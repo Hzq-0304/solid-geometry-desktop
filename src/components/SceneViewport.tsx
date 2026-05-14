@@ -1,0 +1,412 @@
+import { useEffect, useRef } from "react";
+import * as THREE from "three";
+import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import type { BoardDocument } from "../core/document/BoardDocument";
+import type { PointerInfo, ToolName } from "../core/tool/ToolTypes";
+import type { Vec3 } from "../core/geometry/Vec3";
+import {
+  createAxesWithLabels,
+  disposeAxesWithLabels,
+} from "../renderer/three/axesWithLabels";
+import { focusCameraOnDrawingPlane } from "../renderer/three/cameraViews";
+import {
+  disposeDrawingPlaneOverlay,
+  syncDrawingPlaneOverlay,
+} from "../renderer/three/drawingPlaneOverlay";
+import {
+  clearEntityObjects,
+  syncDocumentEntitiesToScene,
+} from "../renderer/three/entityRenderer";
+import { getPointerInfoFromEvent } from "../renderer/three/pickingSystem";
+import {
+  disposePreviewCursor,
+  syncPreviewCursor,
+} from "../renderer/three/previewCursor";
+import {
+  disposeSegmentPreview,
+  syncSegmentPreview,
+} from "../renderer/three/segmentPreview";
+import { getScreenSpaceSnapResult } from "../renderer/three/screenSpaceSnapAdapter";
+import {
+  distancePointToScreenPoint,
+  getPointerScreenPosition,
+  type ScreenPosition,
+} from "../renderer/three/screenSpaceUtils";
+import { updateLineMaterialResolution } from "../renderer/three/materials";
+
+const CLICK_MOVE_THRESHOLD = 3;
+
+interface SceneViewportProps {
+  document: BoardDocument;
+  currentTool: ToolName;
+  previewPosition: Vec3 | null;
+  segmentPreviewStartPosition: Vec3 | null;
+  focusRequestId: number;
+  onCanvasPointerDown(pointerInfo: PointerInfo): void;
+  onCanvasPointerMove(pointerInfo: PointerInfo): void;
+}
+
+function SceneViewport({
+  document,
+  currentTool,
+  previewPosition,
+  segmentPreviewStartPosition,
+  focusRequestId,
+  onCanvasPointerDown,
+  onCanvasPointerMove,
+}: SceneViewportProps) {
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  const sceneRef = useRef<THREE.Scene | null>(null);
+  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const controlsRef = useRef<OrbitControls | null>(null);
+  const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
+  const focusRequestIdRef = useRef(focusRequestId);
+  const documentRef = useRef(document);
+  const onCanvasPointerDownRef = useRef(onCanvasPointerDown);
+  const onCanvasPointerMoveRef = useRef(onCanvasPointerMove);
+
+  useEffect(() => {
+    documentRef.current = document;
+  }, [document]);
+
+  useEffect(() => {
+    onCanvasPointerDownRef.current = onCanvasPointerDown;
+  }, [onCanvasPointerDown]);
+
+  useEffect(() => {
+    onCanvasPointerMoveRef.current = onCanvasPointerMove;
+  }, [onCanvasPointerMove]);
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) {
+      return;
+    }
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0xf7f8fb);
+    sceneRef.current = scene;
+
+    const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 1000);
+    camera.up.set(0, 0, 1);
+    cameraRef.current = camera;
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    rendererRef.current = renderer;
+    host.appendChild(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+    controls.target.set(0, 0, 0);
+    controlsRef.current = controls;
+    focusCameraOnDrawingPlane(
+      camera,
+      controls,
+      documentRef.current.settings.activeDrawingPlane,
+    );
+
+    const axes = createAxesWithLabels();
+    scene.add(axes);
+
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.75);
+    scene.add(ambientLight);
+
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 1.2);
+    directionalLight.position.set(5, 8, 6);
+    scene.add(directionalLight);
+
+    const resize = () => {
+      const { width, height } = host.getBoundingClientRect();
+      const safeWidth = Math.max(1, width);
+      const safeHeight = Math.max(1, height);
+      camera.aspect = safeWidth / safeHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(safeWidth, safeHeight, false);
+      updateLineMaterialResolution(scene, safeWidth, safeHeight);
+    };
+
+    const resizeObserver = new ResizeObserver(resize);
+    resizeObserver.observe(host);
+    resize();
+
+    const createPointerInfo = (event: PointerEvent): PointerInfo => {
+      const pointerInfo = getPointerInfoFromEvent(
+        event,
+        renderer.domElement,
+        camera,
+        scene,
+        documentRef.current.settings.activeDrawingPlane,
+      );
+
+      return {
+        ...pointerInfo,
+        snapResult: pointerInfo.worldPosition
+          ? getScreenSpaceSnapResult({
+              document: documentRef.current,
+              activeDrawingPlane:
+                documentRef.current.settings.activeDrawingPlane,
+              rawWorldPosition: pointerInfo.worldPosition,
+              pointerScreenPosition: getPointerScreenPosition(
+                event,
+                renderer.domElement,
+              ),
+              camera,
+              canvas: renderer.domElement,
+            })
+          : null,
+      };
+    };
+
+    let pointerDownScreenPosition: ScreenPosition | null = null;
+    let isDraggingView = false;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (event.button !== 0) {
+        return;
+      }
+
+      pointerDownScreenPosition = getPointerScreenPosition(
+        event,
+        renderer.domElement,
+      );
+      isDraggingView = false;
+    };
+
+    const handlePointerUp = (event: PointerEvent) => {
+      if (event.button !== 0 || !pointerDownScreenPosition) {
+        return;
+      }
+
+      const pointerUpScreenPosition = getPointerScreenPosition(
+        event,
+        renderer.domElement,
+      );
+      const moveDistance = distancePointToScreenPoint(
+        pointerDownScreenPosition,
+        pointerUpScreenPosition,
+      );
+      const isClick =
+        !isDraggingView && moveDistance <= CLICK_MOVE_THRESHOLD;
+
+      pointerDownScreenPosition = null;
+      isDraggingView = false;
+
+      if (isClick) {
+        onCanvasPointerDownRef.current(createPointerInfo(event));
+      }
+    };
+
+    let pointerMoveFrameId = 0;
+    let latestPointerMoveEvent: PointerEvent | null = null;
+
+    const flushPointerMove = () => {
+      pointerMoveFrameId = 0;
+
+      if (!latestPointerMoveEvent) {
+        return;
+      }
+
+      const pointerInfo = getPointerInfoFromEvent(
+        latestPointerMoveEvent,
+        renderer.domElement,
+        camera,
+        scene,
+        documentRef.current.settings.activeDrawingPlane,
+      );
+
+      onCanvasPointerMoveRef.current({
+        ...pointerInfo,
+        snapResult: pointerInfo.worldPosition
+          ? getScreenSpaceSnapResult({
+              document: documentRef.current,
+              activeDrawingPlane:
+                documentRef.current.settings.activeDrawingPlane,
+              rawWorldPosition: pointerInfo.worldPosition,
+              pointerScreenPosition: getPointerScreenPosition(
+                latestPointerMoveEvent,
+                renderer.domElement,
+              ),
+              camera,
+              canvas: renderer.domElement,
+            })
+          : null,
+      });
+      latestPointerMoveEvent = null;
+    };
+
+    const handlePointerMove = (event: PointerEvent) => {
+      if (pointerDownScreenPosition && (event.buttons & 1) === 1) {
+        const pointerScreenPosition = getPointerScreenPosition(
+          event,
+          renderer.domElement,
+        );
+        const moveDistance = distancePointToScreenPoint(
+          pointerDownScreenPosition,
+          pointerScreenPosition,
+        );
+
+        if (moveDistance > CLICK_MOVE_THRESHOLD) {
+          isDraggingView = true;
+          latestPointerMoveEvent = null;
+          return;
+        }
+      }
+
+      latestPointerMoveEvent = event;
+
+      if (pointerMoveFrameId === 0) {
+        pointerMoveFrameId = requestAnimationFrame(flushPointerMove);
+      }
+    };
+
+    const handlePointerLeave = () => {
+      pointerDownScreenPosition = null;
+      isDraggingView = false;
+      latestPointerMoveEvent = null;
+      onCanvasPointerMoveRef.current({
+        worldPosition: null,
+        hitEntityId: null,
+        hitEntityType: null,
+        drawingPlane: documentRef.current.settings.activeDrawingPlane,
+        snapResult: null,
+      });
+    };
+
+    const handlePointerCancel = () => {
+      pointerDownScreenPosition = null;
+      isDraggingView = false;
+      latestPointerMoveEvent = null;
+    };
+
+    renderer.domElement.addEventListener("pointerdown", handlePointerDown);
+    renderer.domElement.addEventListener("pointerup", handlePointerUp);
+    renderer.domElement.addEventListener("pointermove", handlePointerMove);
+    renderer.domElement.addEventListener("pointerleave", handlePointerLeave);
+    renderer.domElement.addEventListener("pointercancel", handlePointerCancel);
+
+    let frameId = 0;
+    const animate = () => {
+      controls.update();
+      renderer.render(scene, camera);
+      frameId = requestAnimationFrame(animate);
+    };
+    animate();
+
+    return () => {
+      cancelAnimationFrame(frameId);
+      if (pointerMoveFrameId !== 0) {
+        cancelAnimationFrame(pointerMoveFrameId);
+      }
+      renderer.domElement.removeEventListener("pointerdown", handlePointerDown);
+      renderer.domElement.removeEventListener("pointerup", handlePointerUp);
+      renderer.domElement.removeEventListener("pointermove", handlePointerMove);
+      renderer.domElement.removeEventListener("pointerleave", handlePointerLeave);
+      renderer.domElement.removeEventListener(
+        "pointercancel",
+        handlePointerCancel,
+      );
+      disposePreviewCursor(scene);
+      disposeSegmentPreview(scene);
+      disposeDrawingPlaneOverlay(scene);
+      disposeAxesWithLabels(axes);
+      clearEntityObjects(scene);
+      resizeObserver.disconnect();
+      controls.dispose();
+      renderer.dispose();
+      host.removeChild(renderer.domElement);
+      sceneRef.current = null;
+      cameraRef.current = null;
+      controlsRef.current = null;
+      rendererRef.current = null;
+    };
+  }, []);
+
+  const syncLineResolution = () => {
+    if (!sceneRef.current || !rendererRef.current) {
+      return;
+    }
+
+    updateLineMaterialResolution(
+      sceneRef.current,
+      rendererRef.current.domElement.clientWidth,
+      rendererRef.current.domElement.clientHeight,
+    );
+  };
+
+  useEffect(() => {
+    if (focusRequestId === focusRequestIdRef.current) {
+      return;
+    }
+
+    focusRequestIdRef.current = focusRequestId;
+
+    if (!cameraRef.current || !controlsRef.current) {
+      return;
+    }
+
+    focusCameraOnDrawingPlane(
+      cameraRef.current,
+      controlsRef.current,
+      document.settings.activeDrawingPlane,
+    );
+  }, [document.settings.activeDrawingPlane, focusRequestId]);
+
+  useEffect(() => {
+    if (!sceneRef.current) {
+      return;
+    }
+
+    syncDocumentEntitiesToScene(sceneRef.current, document);
+    syncLineResolution();
+  }, [document]);
+
+  useEffect(() => {
+    if (!sceneRef.current) {
+      return;
+    }
+
+    syncDrawingPlaneOverlay(sceneRef.current, document.settings);
+  }, [document.settings]);
+
+  useEffect(() => {
+    if (!sceneRef.current) {
+      return;
+    }
+
+    syncPreviewCursor(
+      sceneRef.current,
+      previewPosition,
+      currentTool === "point" || currentTool === "segment",
+    );
+  }, [currentTool, previewPosition]);
+
+  useEffect(() => {
+    if (!sceneRef.current) {
+      return;
+    }
+
+    syncSegmentPreview(
+      sceneRef.current,
+      segmentPreviewStartPosition,
+      previewPosition,
+      currentTool === "segment" && segmentPreviewStartPosition !== null,
+    );
+    syncLineResolution();
+  }, [currentTool, previewPosition, segmentPreviewStartPosition]);
+
+  return (
+    <div
+      className={
+        currentTool === "point" || currentTool === "segment"
+          ? "scene-viewport point-tool-active"
+          : "scene-viewport"
+      }
+      ref={hostRef}
+    />
+  );
+}
+
+export default SceneViewport;
