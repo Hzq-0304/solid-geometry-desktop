@@ -1,6 +1,11 @@
-import { useEffect, useRef, useState } from "react";
 import {
-  Circle,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ElementType,
+} from "react";
+import {
   Grid3X3,
   Move3D,
   MousePointer2,
@@ -13,6 +18,10 @@ import { AddSegmentCommand } from "./core/command/AddSegmentCommand";
 import type { Command } from "./core/command/Command";
 import { CommandManager } from "./core/command/CommandManager";
 import { DeleteEntityCommand } from "./core/command/DeleteEntityCommand";
+import {
+  UpdateEntityCommand,
+  type EntityUpdate,
+} from "./core/command/UpdateEntityCommand";
 import { UpdateDocumentSettingsCommand } from "./core/command/UpdateDocumentSettingsCommand";
 import type {
   ActiveDrawingPlane,
@@ -28,6 +37,7 @@ import type {
   SegmentEntity,
 } from "./core/document/EntityTypes";
 import { createEntityId } from "./core/document/idGenerator";
+import { generatePointNames } from "./core/document/pointNameUtils";
 import { createVec3 } from "./core/geometry/geometryUtils";
 import {
   calculateMeasurementValue,
@@ -36,23 +46,42 @@ import {
   getSegmentLengthById,
 } from "./core/geometry/measurementUtils";
 import type { Vec3 } from "./core/geometry/Vec3";
+import { exportProject } from "./core/io/exportProject";
+import { importProject } from "./core/io/importProject";
 import { getSnapResult } from "./core/snap/SnapSystem";
 import type { SnapResult } from "./core/snap/SnapTypes";
 import { MeasureAngleTool } from "./core/tool/MeasureAngleTool";
 import { MeasureLengthTool } from "./core/tool/MeasureLengthTool";
 import { PointTool } from "./core/tool/PointTool";
 import { SegmentTool } from "./core/tool/SegmentTool";
+import { SelectTool } from "./core/tool/SelectTool";
 import type { ToolContext } from "./core/tool/ToolContext";
 import type { PointerInfo, ToolName } from "./core/tool/ToolTypes";
+import { isTauriEnvironment } from "./platform/platform";
+
+interface ToolIconProps {
+  readonly size?: string | number;
+  readonly "aria-hidden"?: string | boolean;
+}
+
+const SolidPointIcon = ({ size = 18 }: ToolIconProps) => (
+  <span
+    aria-hidden="true"
+    className="solid-point-tool-icon"
+    style={{ width: size, height: size }}
+  >
+    <span />
+  </span>
+);
 
 const constructTools: Array<{
   readonly name: ToolName;
   readonly label: string;
-  readonly icon: typeof MousePointer2;
+  readonly icon: ElementType;
   readonly disabled?: boolean;
 }> = [
   { name: "select", label: "\u9009\u62e9", icon: MousePointer2 },
-  { name: "point", label: "\u70b9", icon: Circle },
+  { name: "point", label: "\u70b9", icon: SolidPointIcon },
   { name: "segment", label: "\u7ebf\u6bb5", icon: Ruler },
   { name: "move", label: "\u79fb\u52a8", icon: Move3D, disabled: true },
 ];
@@ -60,7 +89,7 @@ const constructTools: Array<{
 const measureTools: Array<{
   readonly name: ToolName;
   readonly label: string;
-  readonly icon: typeof Ruler;
+  readonly icon: ElementType;
 }> = [
   { name: "measureLength", label: "\u957f\u5ea6", icon: Ruler },
   { name: "measureAngle", label: "\u89d2\u5ea6", icon: Ruler },
@@ -108,6 +137,7 @@ const createPointEntity = (
     visible: true,
     locked: false,
     position,
+    nameSource: "auto",
     createdAt: timestamp,
     updatedAt: timestamp,
   };
@@ -237,52 +267,35 @@ const getEntityDetail = (entity: BoardEntity, document: BoardDocument): string =
   switch (entity.kind) {
     case "point":
       return formatVec3(entity.position);
-    case "segment":
-      return `start: ${entity.pointIds[0]} / end: ${entity.pointIds[1]}`;
+    case "segment": {
+      const [startPointId, endPointId] = entity.pointIds;
+      const length = getSegmentLengthById(document, entity.id);
+
+      return `start: ${getPointNameById(
+        document,
+        startPointId,
+      )} / end: ${getPointNameById(document, endPointId)}${
+        length === null ? "" : ` / length: ${formatMeasurementValue(length)}`
+      }`;
+    }
     case "measurement": {
-      const dynamicValue = (() => {
-        if (entity.measurementKind === "angle" && entity.pointIds.length === 3) {
-          return getAngleByPointIds(
-            document,
-            entity.pointIds[0],
-            entity.pointIds[1],
-            entity.pointIds[2],
-          );
-        }
-
-        if (entity.targetEntityIds.length === 1) {
-          return getSegmentLengthById(document, entity.targetEntityIds[0]);
-        }
-
-        if (entity.pointIds.length === 2) {
-          return getPointDistanceByIds(
-            document,
-            entity.pointIds[0],
-            entity.pointIds[1],
-          );
-        }
-
-        return null;
-      })();
-      const value = dynamicValue ?? entity.value;
+      const calculation = calculateMeasurementValue(entity, document);
       const targetIds =
-        entity.targetEntityIds.length > 0
-          ? entity.targetEntityIds
-          : entity.pointIds;
+        entity.targetIds.length > 0
+          ? entity.targetIds
+          : entity.targetEntityIds.length > 0
+            ? entity.targetEntityIds
+            : entity.pointIds;
 
-      if (value === undefined) {
+      if (!calculation) {
         return `type: ${entity.measurementKind} / targets: ${targetIds.join(
           ", ",
-        )}`;
+        )} / invalid target`;
       }
 
-      return entity.measurementKind === "angle"
-        ? `type: angle / targets: ${targetIds.join(", ")} / value: ${formatAngleValue(
-            value,
-          )}`
-        : `type: length / targets: ${targetIds.join(
-            ", ",
-          )} / value: ${formatMeasurementValue(value)}`;
+      return `type: ${entity.measurementKind} / targets: ${targetIds.join(
+        ", ",
+      )} / value: ${calculation.formattedText}`;
     }
     default:
       return entity.kind;
@@ -386,11 +399,21 @@ function App() {
   const [angleStatusMessage, setAngleStatusMessage] = useState<string | null>(
     null,
   );
+  const [deleteStatusMessage, setDeleteStatusMessage] = useState<string | null>(
+    null,
+  );
+  const [batchNameStart, setBatchNameStart] = useState("A");
+  const [currentFilePath, setCurrentFilePath] = useState<string | null>(null);
+  const [isDirty, setIsDirty] = useState(false);
+  const [fileStatusMessage, setFileStatusMessage] = useState<string | null>(
+    null,
+  );
   const commandManagerRef = useRef<CommandManager | null>(null);
   const pointToolRef = useRef(new PointTool());
   const segmentToolRef = useRef(new SegmentTool());
   const measureLengthToolRef = useRef(new MeasureLengthTool());
   const measureAngleToolRef = useRef(new MeasureAngleTool());
+  const selectToolRef = useRef(new SelectTool());
 
   if (!commandManagerRef.current) {
     commandManagerRef.current = new CommandManager(document);
@@ -398,9 +421,22 @@ function App() {
 
   const commandManager = commandManagerRef.current;
   const entities = Object.values(document.entities);
+  const selectedEntities = document.selectedEntityIds
+    .map((entityId) => document.entities[entityId])
+    .filter((entity): entity is BoardEntity => Boolean(entity));
+  const selectedEntityCount = selectedEntities.length;
+  const selectedPointEntities = selectedEntities.filter(
+    (entity): entity is PointEntity => entity.kind === "point",
+  );
+  const selectedPointCount = selectedPointEntities.length;
+  const singleSelectedEntity =
+    selectedEntityCount === 1 ? selectedEntities[0] : null;
   const hasPointA = Boolean(document.entities[TEST_POINT_A_ID]);
   const hasPointB = Boolean(document.entities[TEST_POINT_B_ID]);
   const hasSegmentAB = Boolean(document.entities[TEST_SEGMENT_AB_ID]);
+  const currentFileName = currentFilePath
+    ? currentFilePath.split(/[\\/]/).pop() ?? currentFilePath
+    : "Untitled.sgb";
   const previewPosition =
     currentTool === "point" || currentTool === "segment"
       ? lastSnapResult?.position ?? null
@@ -428,9 +464,393 @@ function App() {
     angleStatusMessage,
     document,
   );
+  const highlightedPointIds = useMemo(() => {
+    const pointIds: EntityId[] = [];
+    const addPointId = (entityId: EntityId | null | undefined) => {
+      if (!entityId || document.entities[entityId]?.kind !== "point") {
+        return;
+      }
+
+      pointIds.push(entityId);
+    };
+
+    document.selectedEntityIds.forEach(addPointId);
+    addPointId(segmentFirstPointId);
+    addPointId(measureFirstPointId);
+    angleSelectedPointIds.forEach(addPointId);
+
+    return [...new Set(pointIds)];
+  }, [
+    angleSelectedPointIds,
+    document.entities,
+    document.selectedEntityIds,
+    measureFirstPointId,
+    segmentFirstPointId,
+  ]);
+
+  const sanitizeSelection = (nextDocument: BoardDocument): BoardDocument => {
+    const selectedEntityIds = nextDocument.selectedEntityIds.filter((entityId) =>
+      Boolean(nextDocument.entities[entityId]),
+    );
+
+    return selectedEntityIds.length === nextDocument.selectedEntityIds.length
+      ? nextDocument
+      : {
+          ...nextDocument,
+          selectedEntityIds,
+        };
+  };
+
+  const syncDocumentState = (nextDocument: BoardDocument) => {
+    const sanitizedDocument = sanitizeSelection(nextDocument);
+
+    commandManager.setDocument(sanitizedDocument);
+    setDocument(sanitizedDocument);
+  };
 
   const executeCommand = (command: Command) => {
-    setDocument(commandManager.execute(command));
+    const previousDocument = commandManager.getDocument();
+    const nextDocument = commandManager.execute(command);
+
+    syncDocumentState(nextDocument);
+
+    if (nextDocument !== previousDocument) {
+      setIsDirty(true);
+    }
+  };
+
+  const setSelection = (entityIds: readonly EntityId[]) => {
+    const currentDocument = commandManager.getDocument();
+    const selectedEntityIds = [...new Set(entityIds)].filter((entityId) =>
+      Boolean(currentDocument.entities[entityId]),
+    );
+
+    syncDocumentState({
+      ...currentDocument,
+      selectedEntityIds,
+    });
+  };
+
+  const selectEntity = (entityId: EntityId) => {
+    setSelection([entityId]);
+  };
+
+  const toggleSelection = (entityId: EntityId) => {
+    const currentSelectedEntityIds =
+      commandManager.getDocument().selectedEntityIds;
+
+    setSelection(
+      currentSelectedEntityIds.includes(entityId)
+        ? currentSelectedEntityIds.filter(
+            (selectedEntityId) => selectedEntityId !== entityId,
+          )
+        : [...currentSelectedEntityIds, entityId],
+    );
+  };
+
+  const clearSelection = () => {
+    setSelection([]);
+  };
+
+  const resetTransientToolState = () => {
+    segmentToolRef.current.cancel();
+    measureLengthToolRef.current.cancel();
+    measureAngleToolRef.current.cancel();
+    setSegmentFirstPointId(null);
+    setMeasureFirstPointId(null);
+    setMeasureStatusMessage(null);
+    setAngleSelectedPointIds([]);
+    setAngleStatusMessage(null);
+    setLastPointerInfo(null);
+    setLastSnapResult(null);
+  };
+
+  const resetProjectDocument = (
+    nextDocument: BoardDocument,
+    nextFilePath: string | null,
+  ) => {
+    const sanitizedDocument = sanitizeSelection({
+      ...nextDocument,
+      selectedEntityIds: [],
+    });
+
+    commandManager.reset(sanitizedDocument);
+    setDocument(sanitizedDocument);
+    setCurrentFilePath(nextFilePath);
+    setIsDirty(false);
+    setCurrentTool("select");
+    resetTransientToolState();
+  };
+
+  const showFileError = async (title: string, error: unknown) => {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+
+    if (isTauriEnvironment()) {
+      try {
+        const { message } = await import("@tauri-apps/plugin-dialog");
+
+        await message(errorMessage, { title, kind: "error" });
+        return;
+      } catch {
+        // Fall back to alert below. This also covers browser dev mode.
+      }
+    }
+
+    window.alert(`${title}\n${errorMessage}`);
+  };
+
+  const getDefaultProjectFileName = () => {
+    const safeDocumentName = (document.name || "Untitled Board")
+      .replace(/[<>:"\/\\|?*]+/g, "-")
+      .trim();
+
+    return `${safeDocumentName || "Untitled Board"}.sgb`;
+  };
+
+  const ensureProjectFileExtension = (filePath: string) =>
+    /\.(sgb|json)$/i.test(filePath) ? filePath : `${filePath}.sgb`;
+
+  const getDownloadFileName = () =>
+    ensureProjectFileExtension(currentFileName || getDefaultProjectFileName());
+
+  const downloadProjectInBrowser = (fileName: string) => {
+    const projectJson = exportProject(commandManager.getDocument());
+    const blob = new Blob([projectJson], { type: "application/json" });
+    const objectUrl = URL.createObjectURL(blob);
+    const link = window.document.createElement("a");
+
+    link.href = objectUrl;
+    link.download = ensureProjectFileExtension(fileName);
+    link.style.display = "none";
+    window.document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(objectUrl);
+    setCurrentFilePath(link.download);
+    setIsDirty(false);
+    setFileStatusMessage("Downloaded project file");
+  };
+
+  const readProjectInBrowser = async (): Promise<{
+    readonly fileName: string;
+    readonly jsonText: string;
+  } | null> =>
+    new Promise((resolve, reject) => {
+      const input = window.document.createElement("input");
+
+      input.type = "file";
+      input.accept = ".sgb,.json,application/json";
+      input.style.display = "none";
+
+      input.addEventListener("change", async () => {
+        const file = input.files?.[0] ?? null;
+
+        input.remove();
+
+        if (!file) {
+          resolve(null);
+          return;
+        }
+
+        try {
+          resolve({
+            fileName: file.name,
+            jsonText: await file.text(),
+          });
+        } catch (error) {
+          reject(error);
+        }
+      });
+
+      window.document.body.appendChild(input);
+      input.click();
+    });
+
+  const writeProjectToFile = async (filePath: string) => {
+    if (!isTauriEnvironment()) {
+      downloadProjectInBrowser(filePath);
+      return;
+    }
+
+    const { writeTextFile } = await import("@tauri-apps/plugin-fs");
+
+    await writeTextFile(filePath, exportProject(commandManager.getDocument()));
+    setCurrentFilePath(filePath);
+    setIsDirty(false);
+    setFileStatusMessage("Saved");
+  };
+
+  const newProject = () => {
+    resetProjectDocument(createEmptyDocument({ name: "Untitled Board" }), null);
+    setFileStatusMessage("New project");
+  };
+
+  const openProject = async () => {
+    try {
+      if (!isTauriEnvironment()) {
+        const browserFile = await readProjectInBrowser();
+
+        if (!browserFile) {
+          return;
+        }
+
+        const importedDocument = importProject(browserFile.jsonText);
+
+        resetProjectDocument(importedDocument, browserFile.fileName);
+        setFileStatusMessage("Opened browser file");
+        return;
+      }
+
+      const { open: openFileDialog } = await import("@tauri-apps/plugin-dialog");
+      const { readTextFile } = await import("@tauri-apps/plugin-fs");
+      const selectedFilePath = await openFileDialog({
+        title: "Open Solid Geometry project",
+        multiple: false,
+        filters: [
+          {
+            name: "Solid Geometry Board",
+            extensions: ["sgb", "json"],
+          },
+        ],
+      });
+
+      if (!selectedFilePath || Array.isArray(selectedFilePath)) {
+        return;
+      }
+
+      const jsonText = await readTextFile(selectedFilePath);
+      const importedDocument = importProject(jsonText);
+
+      resetProjectDocument(importedDocument, selectedFilePath);
+      setFileStatusMessage("Opened");
+    } catch (error) {
+      setFileStatusMessage("Open failed");
+      await showFileError("Open failed", error);
+    }
+  };
+
+  const saveProjectAs = async () => {
+    try {
+      if (!isTauriEnvironment()) {
+        downloadProjectInBrowser(getDefaultProjectFileName());
+        return;
+      }
+
+      const { save: saveFileDialog } = await import(
+        "@tauri-apps/plugin-dialog"
+      );
+      const selectedFilePath = await saveFileDialog({
+        title: "Save Solid Geometry project",
+        defaultPath: currentFilePath ?? getDefaultProjectFileName(),
+        filters: [
+          {
+            name: "Solid Geometry Board",
+            extensions: ["sgb"],
+          },
+          {
+            name: "JSON",
+            extensions: ["json"],
+          },
+        ],
+      });
+
+      if (!selectedFilePath) {
+        return;
+      }
+
+      await writeProjectToFile(ensureProjectFileExtension(selectedFilePath));
+    } catch (error) {
+      setFileStatusMessage("Save failed");
+      await showFileError("Save failed", error);
+    }
+  };
+
+  const saveProject = async () => {
+    if (!isTauriEnvironment()) {
+      downloadProjectInBrowser(getDownloadFileName());
+      return;
+    }
+
+    if (!currentFilePath) {
+      await saveProjectAs();
+      return;
+    }
+
+    try {
+      await writeProjectToFile(currentFilePath);
+    } catch (error) {
+      setFileStatusMessage("Save failed");
+      await showFileError("Save failed", error);
+    }
+  };
+
+  const deleteSelectedEntities = () => {
+    const selectedEntityIds = commandManager
+      .getDocument()
+      .selectedEntityIds.filter((entityId) =>
+        Boolean(commandManager.getDocument().entities[entityId]),
+      );
+
+    if (selectedEntityIds.length === 0) {
+      return;
+    }
+
+    let nextDocument = commandManager.getDocument();
+
+    selectedEntityIds.forEach((entityId) => {
+      nextDocument = commandManager.execute(new DeleteEntityCommand(entityId));
+    });
+
+    syncDocumentState({
+      ...nextDocument,
+      selectedEntityIds: [],
+    });
+    setIsDirty(true);
+    setDeleteStatusMessage(
+      selectedEntityIds.length === 1
+        ? "Deleted selected entity"
+        : `Deleted ${selectedEntityIds.length} selected entities`,
+    );
+  };
+
+  const updateEntity = (entityId: EntityId, patch: EntityUpdate) => {
+    executeCommand(new UpdateEntityCommand(entityId, patch));
+  };
+
+  const renamePoint = (point: PointEntity, nextName: string) => {
+    const trimmedName = nextName.trim();
+
+    if (!trimmedName) {
+      return false;
+    }
+
+    if (trimmedName !== point.name || point.nameSource !== "manual") {
+      updateEntity(point.id, {
+        name: trimmedName,
+        nameSource: "manual",
+      });
+    }
+
+    return true;
+  };
+
+  const renameSelectedPoints = () => {
+    const trimmedStartName = batchNameStart.trim();
+
+    if (selectedPointCount === 0 || !trimmedStartName) {
+      return;
+    }
+
+    const pointNames = generatePointNames(trimmedStartName, selectedPointCount);
+
+    selectedPointEntities.forEach((point, index) => {
+      updateEntity(point.id, {
+        name: pointNames[index],
+        nameSource: "manual",
+      });
+    });
+    setBatchNameStart("");
+    clearSelection();
   };
 
   const getNextPointName = () => {
@@ -455,6 +875,18 @@ function App() {
     ).filter((entity) => entity.kind === "measurement").length;
 
     return `L${measurementCount + 1}`;
+  };
+
+  const getNextMeasurementDisplayPosition = () => {
+    const measurementCount = Object.values(
+      commandManager.getDocument().entities,
+    ).filter((entity) => entity.kind === "measurement").length;
+
+    return {
+      mode: "screen" as const,
+      x: 20,
+      y: 20 + measurementCount * 20,
+    };
   };
 
   const getSegmentName = (
@@ -538,13 +970,16 @@ function App() {
       return;
     }
 
-    const measurement = createLengthMeasurementEntity(
-      createEntityId("measurement"),
-      getLengthMeasurementName(targetIds),
-      targetEntityIds,
-      pointIds,
-      value,
-    );
+    const measurement = {
+      ...createLengthMeasurementEntity(
+        createEntityId("measurement"),
+        getLengthMeasurementName(targetIds),
+        targetEntityIds,
+        pointIds,
+        value,
+      ),
+      displayPosition: getNextMeasurementDisplayPosition(),
+    };
 
     executeCommand(new AddMeasurementCommand(measurement));
     setMeasureStatusMessage(
@@ -595,12 +1030,15 @@ function App() {
       return;
     }
 
-    const measurement = createAngleMeasurementEntity(
-      createEntityId("measurement"),
-      getAngleMeasurementName(pointAId, vertexBId, pointCId),
-      [pointAId, vertexBId, pointCId],
-      value,
-    );
+    const measurement = {
+      ...createAngleMeasurementEntity(
+        createEntityId("measurement"),
+        getAngleMeasurementName(pointAId, vertexBId, pointCId),
+        [pointAId, vertexBId, pointCId],
+        value,
+      ),
+      displayPosition: getNextMeasurementDisplayPosition(),
+    };
 
     executeCommand(new AddMeasurementCommand(measurement));
     setAngleStatusMessage(`${measurement.name} = ${formatAngleValue(value)}`);
@@ -634,6 +1072,14 @@ function App() {
     },
     addLengthMeasurement,
     addAngleMeasurement,
+    selectEntity,
+    toggleSelection,
+    clearSelection,
+    setSelection,
+    getSelectedEntityIds: () =>
+      commandManager.getDocument().selectedEntityIds,
+    deleteSelectedEntities,
+    updateEntity,
     getEntity: (entityId) => commandManager.getDocument().entities[entityId] ?? null,
     getPoint: (entityId) => {
       const entity = commandManager.getDocument().entities[entityId];
@@ -700,11 +1146,25 @@ function App() {
   };
 
   const undo = () => {
-    setDocument(commandManager.undo());
+    const previousDocument = commandManager.getDocument();
+    const nextDocument = commandManager.undo();
+
+    syncDocumentState(nextDocument);
+
+    if (nextDocument !== previousDocument) {
+      setIsDirty(true);
+    }
   };
 
   const redo = () => {
-    setDocument(commandManager.redo());
+    const previousDocument = commandManager.getDocument();
+    const nextDocument = commandManager.redo();
+
+    syncDocumentState(nextDocument);
+
+    if (nextDocument !== previousDocument) {
+      setIsDirty(true);
+    }
   };
 
   const updateDocumentSettings = (
@@ -817,6 +1277,11 @@ function App() {
     setLastPointerInfo(nextPointerInfo);
     setLastSnapResult(snapResult);
 
+    if (currentTool === "select") {
+      selectToolRef.current.onPointerDown(nextPointerInfo, createToolContext());
+      return;
+    }
+
     if (currentTool === "point") {
       pointToolRef.current.onPointerDown(nextPointerInfo, createToolContext());
       return;
@@ -874,6 +1339,18 @@ function App() {
     }
   };
 
+  const handleOverlayEntityPointerDown = (
+    entityId: EntityId,
+    additive: boolean,
+  ) => {
+    if (additive) {
+      toggleSelection(entityId);
+      return;
+    }
+
+    selectEntity(entityId);
+  };
+
   const changeTool = (nextTool: ToolName) => {
     if (currentTool === "segment" && nextTool !== "segment") {
       segmentToolRef.current.cancel();
@@ -894,6 +1371,70 @@ function App() {
 
     setCurrentTool(nextTool);
   };
+
+  useEffect(() => {
+    const isEditingText = (target: EventTarget | null): boolean => {
+      if (!(target instanceof HTMLElement)) {
+        return false;
+      }
+
+      return (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target.isContentEditable
+      );
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (
+        (event.key === "Delete" || event.key === "Backspace") &&
+        !isEditingText(event.target)
+      ) {
+        if (commandManager.getDocument().selectedEntityIds.length > 0) {
+          event.preventDefault();
+          deleteSelectedEntities();
+        }
+
+        return;
+      }
+
+      if (event.key !== "Escape") {
+        return;
+      }
+
+      if (currentTool === "measureLength") {
+        measureLengthToolRef.current.cancel();
+        setMeasureFirstPointId(null);
+        setMeasureStatusMessage(null);
+        setCurrentTool("select");
+        return;
+      }
+
+      if (currentTool === "measureAngle") {
+        measureAngleToolRef.current.cancel();
+        setAngleSelectedPointIds([]);
+        setAngleStatusMessage(null);
+        setCurrentTool("select");
+        return;
+      }
+
+      if (currentTool === "segment") {
+        segmentToolRef.current.cancel();
+        setSegmentFirstPointId(null);
+        return;
+      }
+
+      if (commandManager.getDocument().selectedEntityIds.length > 0) {
+        clearSelection();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  });
 
   return (
     <main className="app-shell">
@@ -1024,6 +1565,20 @@ function App() {
             </span>
           </div>
           <div className="viewport-actions">
+            <div className="debug-actions" aria-label="Project file commands">
+              <button onClick={newProject} type="button">
+                新建
+              </button>
+              <button onClick={() => void openProject()} type="button">
+                打开
+              </button>
+              <button onClick={() => void saveProject()} type="button">
+                保存
+              </button>
+              <button onClick={() => void saveProjectAs()} type="button">
+                另存为
+              </button>
+            </div>
             <div className="debug-actions" aria-label="Debug geometry commands">
               <button disabled={hasPointA} onClick={addTestPointA} type="button">
                 {"\u6dfb\u52a0\u6d4b\u8bd5\u70b9 A"}
@@ -1059,18 +1614,87 @@ function App() {
           currentTool={currentTool}
           document={document}
           focusRequestId={focusRequestId}
+          highlightedPointIds={highlightedPointIds}
           previewPosition={previewPosition}
           segmentPreviewStartPosition={segmentPreviewStartPosition}
           onCanvasPointerDown={handleCanvasPointerDown}
           onCanvasPointerMove={handleCanvasPointerMove}
+          onOverlayEntityPointerDown={handleOverlayEntityPointerDown}
         />
       </section>
 
       <aside className="properties-panel" aria-label="Properties">
         <div className="panel-header">
           <h2>Properties</h2>
-          <span>No selection</span>
+          <span>
+            {selectedEntityCount === 0
+              ? "No selection"
+              : `${selectedEntityCount} selected`}
+          </span>
         </div>
+
+        {selectedEntityCount > 0 ? (
+          <section className="property-group selection-actions">
+            <h3>Selection</h3>
+            {singleSelectedEntity?.kind === "point" ? (
+              <label>
+                Name
+                <input
+                  defaultValue={singleSelectedEntity.name ?? ""}
+                  key={singleSelectedEntity.id}
+                  onBlur={(event) => {
+                    if (
+                      !renamePoint(
+                        singleSelectedEntity,
+                        event.currentTarget.value,
+                      )
+                    ) {
+                      event.currentTarget.value = singleSelectedEntity.name ?? "";
+                    }
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      event.currentTarget.blur();
+                    }
+                  }}
+                />
+              </label>
+            ) : null}
+            {selectedPointCount > 1 ? (
+              <div className="batch-naming">
+                <span>Selected points: {selectedPointCount}</span>
+                <label>
+                  Start name
+                  <input
+                    value={batchNameStart}
+                    onChange={(event) => setBatchNameStart(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        renameSelectedPoints();
+                      }
+                    }}
+                  />
+                </label>
+                <button onClick={renameSelectedPoints} type="button">
+                  Batch rename points
+                </button>
+              </div>
+            ) : null}
+            <button
+              className="danger-button"
+              onClick={deleteSelectedEntities}
+              type="button"
+            >
+              {selectedEntityCount === 1
+                ? "Delete object"
+                : `Delete ${selectedEntityCount} objects`}
+            </button>
+          </section>
+        ) : null}
 
         <section className="property-group">
           <h3>Scene</h3>
@@ -1217,7 +1841,30 @@ function App() {
           {entities.length > 0 ? (
             <ul className="entity-list">
               {entities.map((entity: BoardEntity) => (
-                <li className="entity-list-item" key={entity.id}>
+                <li
+                  className={
+                    document.selectedEntityIds.includes(entity.id)
+                      ? "entity-list-item selected"
+                      : "entity-list-item"
+                  }
+                  key={entity.id}
+                  onClick={(event) => {
+                    if (event.ctrlKey) {
+                      toggleSelection(entity.id);
+                      return;
+                    }
+
+                    selectEntity(entity.id);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      selectEntity(entity.id);
+                    }
+                  }}
+                  role="button"
+                  tabIndex={0}
+                >
                   <span className="entity-list-main">
                     <span className="entity-name">{entity.name ?? entity.id}</span>
                     <span className="entity-detail">
@@ -1235,6 +1882,11 @@ function App() {
       </aside>
 
       <footer className="status-bar">
+        <span>
+          File: {currentFileName}
+          {isDirty ? " *" : ""}
+        </span>
+        {fileStatusMessage ? <span>{fileStatusMessage}</span> : null}
         <span>Tool: {toolLabels[currentTool]}</span>
         <span>Plane: {document.settings.activeDrawingPlane}</span>
         <span>Snap: {document.settings.snapEnabled ? "On" : "Off"}</span>
@@ -1242,6 +1894,7 @@ function App() {
         {segmentToolStatus ? <span>{segmentToolStatus}</span> : null}
         {measureLengthToolStatus ? <span>{measureLengthToolStatus}</span> : null}
         {measureAngleToolStatus ? <span>{measureAngleToolStatus}</span> : null}
+        {deleteStatusMessage ? <span>{deleteStatusMessage}</span> : null}
         <span>Raw: {formatVec3(lastPointerInfo?.worldPosition)}</span>
         <span>Snap: {formatVec3(lastSnapResult?.position)}</span>
         <span>Target: {getSnapDescription(lastSnapResult)}</span>

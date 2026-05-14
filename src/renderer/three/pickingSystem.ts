@@ -103,6 +103,10 @@ export const getPointerInfoFromEvent = (
     ...raycaster.params.Line,
     threshold: 0.08,
   };
+  raycaster.params.Points = {
+    ...raycaster.params.Points,
+    threshold: 0.08,
+  };
   raycaster.setFromCamera(ndc, camera);
 
   const intersections = raycaster.intersectObjects(scene.children, true);
@@ -113,5 +117,8 @@ export const getPointerInfoFromEvent = (
     worldPosition: getDrawingPlaneIntersection(raycaster, drawingPlane),
     drawingPlane,
     snapResult: null,
+    ctrlKey: event.ctrlKey,
+    shiftKey: event.shiftKey,
+    altKey: event.altKey,
   };
 };

@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import type { BoardDocument } from "../../core/document/BoardDocument";
+import type { EntityId } from "../../core/document/EntityTypes";
 import { createEntityObject } from "./entityObjectFactory";
 
 const ENTITY_OBJECT_GROUP_NAME = "board-document-entities";
@@ -55,6 +56,7 @@ export const clearEntityObjects = (scene: THREE.Scene): void => {
 export const syncDocumentEntitiesToScene = (
   scene: THREE.Scene,
   document: BoardDocument,
+  highlightedPointIds: readonly EntityId[] = [],
 ): void => {
   const group = getEntityGroup(scene);
 
@@ -64,7 +66,7 @@ export const syncDocumentEntitiesToScene = (
   }
 
   Object.values(document.entities).forEach((entity) => {
-    const object = createEntityObject(entity, document);
+    const object = createEntityObject(entity, document, highlightedPointIds);
 
     if (object) {
       group.add(object);

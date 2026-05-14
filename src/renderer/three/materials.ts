@@ -3,15 +3,18 @@ import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 
 export const DEFAULT_POINT_COLOR = "#2563eb";
 export const DEFAULT_SEGMENT_COLOR = "#111827";
+export const SELECTED_ENTITY_COLOR = "#f59e0b";
 export const POINT_VISUAL_RADIUS = 0.04;
 export const SEGMENT_LINE_WIDTH = 3;
+export const SELECTED_SEGMENT_LINE_WIDTH = 4.5;
 export const PREVIEW_SEGMENT_LINE_WIDTH = 2;
 
 export const createPointMaterial = (
   color: THREE.ColorRepresentation = DEFAULT_POINT_COLOR,
+  selected = false,
 ): THREE.MeshStandardMaterial =>
   new THREE.MeshStandardMaterial({
-    color,
+    color: selected ? SELECTED_ENTITY_COLOR : color,
     transparent: false,
     opacity: 1,
     depthTest: true,
@@ -23,10 +26,11 @@ export const createPointMaterial = (
 
 export const createSegmentMaterial = (
   color: THREE.ColorRepresentation = DEFAULT_SEGMENT_COLOR,
+  selected = false,
 ): LineMaterial =>
   new LineMaterial({
-    color,
-    linewidth: SEGMENT_LINE_WIDTH,
+    color: selected ? SELECTED_ENTITY_COLOR : color,
+    linewidth: selected ? SELECTED_SEGMENT_LINE_WIDTH : SEGMENT_LINE_WIDTH,
     worldUnits: false,
     transparent: false,
     opacity: 1,

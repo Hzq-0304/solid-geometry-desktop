@@ -18,6 +18,9 @@ export interface PointerInfo {
   readonly hitEntityType: EntityKind | null;
   readonly drawingPlane: ActiveDrawingPlane;
   readonly snapResult: SnapResult | null;
+  readonly ctrlKey: boolean;
+  readonly shiftKey: boolean;
+  readonly altKey: boolean;
 }
 
 export interface Tool {

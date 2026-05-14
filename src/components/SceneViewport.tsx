@@ -1,9 +1,13 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import type { BoardDocument } from "../core/document/BoardDocument";
+import type { EntityId, PointEntity } from "../core/document/EntityTypes";
 import type { PointerInfo, ToolName } from "../core/tool/ToolTypes";
 import type { Vec3 } from "../core/geometry/Vec3";
+import GeometryOverlay, {
+  type ProjectedPointLabel,
+} from "./GeometryOverlay";
 import {
   createAxesWithLabels,
   disposeAxesWithLabels,
@@ -30,6 +34,7 @@ import { getScreenSpaceSnapResult } from "../renderer/three/screenSpaceSnapAdapt
 import {
   distancePointToScreenPoint,
   getPointerScreenPosition,
+  worldPositionToScreenPosition,
   type ScreenPosition,
 } from "../renderer/three/screenSpaceUtils";
 import { updateLineMaterialResolution } from "../renderer/three/materials";
@@ -39,21 +44,46 @@ const CLICK_MOVE_THRESHOLD = 3;
 interface SceneViewportProps {
   document: BoardDocument;
   currentTool: ToolName;
+  highlightedPointIds: readonly EntityId[];
   previewPosition: Vec3 | null;
   segmentPreviewStartPosition: Vec3 | null;
   focusRequestId: number;
   onCanvasPointerDown(pointerInfo: PointerInfo): void;
   onCanvasPointerMove(pointerInfo: PointerInfo): void;
+  onOverlayEntityPointerDown(entityId: EntityId, additive: boolean): void;
 }
+
+const shouldShowPointLabel = (point: PointEntity): boolean =>
+  point.visible && point.nameSource === "manual" && Boolean(point.name?.trim());
+
+const arePointLabelsEqual = (
+  first: readonly ProjectedPointLabel[],
+  second: readonly ProjectedPointLabel[],
+): boolean =>
+  first.length === second.length &&
+  first.every((label, index) => {
+    const other = second[index];
+
+    return (
+      other &&
+      label.id === other.id &&
+      label.name === other.name &&
+      label.selected === other.selected &&
+      Math.abs(label.x - other.x) < 0.5 &&
+      Math.abs(label.y - other.y) < 0.5
+    );
+  });
 
 function SceneViewport({
   document,
   currentTool,
+  highlightedPointIds,
   previewPosition,
   segmentPreviewStartPosition,
   focusRequestId,
   onCanvasPointerDown,
   onCanvasPointerMove,
+  onOverlayEntityPointerDown,
 }: SceneViewportProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
@@ -62,12 +92,21 @@ function SceneViewport({
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const focusRequestIdRef = useRef(focusRequestId);
   const documentRef = useRef(document);
+  const highlightedPointIdsRef = useRef(highlightedPointIds);
   const onCanvasPointerDownRef = useRef(onCanvasPointerDown);
   const onCanvasPointerMoveRef = useRef(onCanvasPointerMove);
+  const pointLabelsRef = useRef<readonly ProjectedPointLabel[]>([]);
+  const [pointLabels, setPointLabels] = useState<readonly ProjectedPointLabel[]>(
+    [],
+  );
 
   useEffect(() => {
     documentRef.current = document;
   }, [document]);
+
+  useEffect(() => {
+    highlightedPointIdsRef.current = highlightedPointIds;
+  }, [highlightedPointIds]);
 
   useEffect(() => {
     onCanvasPointerDownRef.current = onCanvasPointerDown;
@@ -272,6 +311,9 @@ function SceneViewport({
         hitEntityType: null,
         drawingPlane: documentRef.current.settings.activeDrawingPlane,
         snapResult: null,
+        ctrlKey: false,
+        shiftKey: false,
+        altKey: false,
       });
     };
 
@@ -290,6 +332,35 @@ function SceneViewport({
     let frameId = 0;
     const animate = () => {
       controls.update();
+
+      const nextPointLabels = Object.values(documentRef.current.entities)
+        .filter((entity): entity is PointEntity =>
+          entity.kind === "point" && shouldShowPointLabel(entity),
+        )
+        .map((point) => {
+          const screenPosition = worldPositionToScreenPosition(
+            point.position,
+            camera,
+            renderer.domElement,
+          );
+
+          return screenPosition
+            ? {
+                id: point.id,
+                name: point.name?.trim() ?? "",
+                x: screenPosition.x,
+                y: screenPosition.y,
+                selected: highlightedPointIdsRef.current.includes(point.id),
+              }
+            : null;
+        })
+        .filter((label): label is ProjectedPointLabel => Boolean(label));
+
+      if (!arePointLabelsEqual(pointLabelsRef.current, nextPointLabels)) {
+        pointLabelsRef.current = nextPointLabels;
+        setPointLabels(nextPointLabels);
+      }
+
       renderer.render(scene, camera);
       frameId = requestAnimationFrame(animate);
     };
@@ -359,9 +430,9 @@ function SceneViewport({
       return;
     }
 
-    syncDocumentEntitiesToScene(sceneRef.current, document);
+    syncDocumentEntitiesToScene(sceneRef.current, document, highlightedPointIds);
     syncLineResolution();
-  }, [document]);
+  }, [document, highlightedPointIds]);
 
   useEffect(() => {
     if (!sceneRef.current) {
@@ -405,7 +476,13 @@ function SceneViewport({
           : "scene-viewport"
       }
       ref={hostRef}
-    />
+    >
+      <GeometryOverlay
+        document={document}
+        pointLabels={pointLabels}
+        onMeasurementPointerDown={onOverlayEntityPointerDown}
+      />
+    </div>
   );
 }
 

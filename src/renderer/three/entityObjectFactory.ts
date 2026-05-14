@@ -9,12 +9,18 @@ import type {
   PointEntity,
   SegmentEntity,
 } from "../../core/document/EntityTypes";
-import { calculateMeasurementValue } from "../../core/geometry/measurementUtils";
 import {
-  createPointMaterial,
+  formatMeasurementText,
+  type MeasurementTextFormat,
+} from "../../core/geometry/measurementUtils";
+import {
   createSegmentMaterial,
-  POINT_VISUAL_RADIUS,
+  DEFAULT_POINT_COLOR,
+  SELECTED_ENTITY_COLOR,
 } from "./materials";
+
+const POINT_PIXEL_SIZE = 8;
+const HIGHLIGHTED_POINT_PIXEL_SIZE = 11;
 
 const findPointEntity = (
   document: BoardDocument,
@@ -144,14 +150,14 @@ const getMeasurementLabelPosition = (
 };
 
 const createMeasurementLabelTexture = (
-  text: string,
+  textFormat: MeasurementTextFormat,
   selected: boolean,
 ): THREE.CanvasTexture => {
   const canvas = globalThis.document.createElement("canvas");
   const context = canvas.getContext("2d");
-  const fontSize = 26;
-  const paddingX = 18;
-  const paddingY = 10;
+  const fontSize = 18;
+  const paddingX = 5;
+  const paddingY = 4;
 
   if (!context) {
     canvas.width = 1;
@@ -159,39 +165,48 @@ const createMeasurementLabelTexture = (
     return new THREE.CanvasTexture(canvas);
   }
 
-  context.font = `700 ${fontSize}px system-ui, sans-serif`;
-  const textMetrics = context.measureText(text);
+  const fullText = `${textFormat.prefix} = ${textFormat.valueText}${textFormat.unitText}`;
+
+  context.font = `500 ${fontSize}px Arial, Helvetica, sans-serif`;
+  const textMetrics = context.measureText(fullText);
   canvas.width = Math.ceil(textMetrics.width + paddingX * 2);
   canvas.height = fontSize + paddingY * 2;
 
-  context.font = `700 ${fontSize}px system-ui, sans-serif`;
+  context.font = `500 ${fontSize}px Arial, Helvetica, sans-serif`;
   context.textBaseline = "middle";
   context.clearRect(0, 0, canvas.width, canvas.height);
 
-  const radius = 10;
-  context.beginPath();
-  context.moveTo(radius, 0);
-  context.lineTo(canvas.width - radius, 0);
-  context.quadraticCurveTo(canvas.width, 0, canvas.width, radius);
-  context.lineTo(canvas.width, canvas.height - radius);
-  context.quadraticCurveTo(
-    canvas.width,
-    canvas.height,
-    canvas.width - radius,
-    canvas.height,
-  );
-  context.lineTo(radius, canvas.height);
-  context.quadraticCurveTo(0, canvas.height, 0, canvas.height - radius);
-  context.lineTo(0, radius);
-  context.quadraticCurveTo(0, 0, radius, 0);
-  context.closePath();
-  context.fillStyle = selected ? "rgba(37, 99, 235, 0.94)" : "rgba(255, 255, 255, 0.92)";
-  context.fill();
-  context.lineWidth = selected ? 3 : 2;
-  context.strokeStyle = selected ? "rgba(147, 197, 253, 1)" : "rgba(99, 102, 241, 0.65)";
-  context.stroke();
-  context.fillStyle = selected ? "#ffffff" : "#1f2937";
-  context.fillText(text, paddingX, canvas.height / 2);
+  const baseline = canvas.height / 2;
+
+  context.lineJoin = "round";
+  context.lineWidth = 2;
+  context.strokeStyle = "rgba(255, 255, 255, 0.88)";
+  context.strokeText(fullText, paddingX, baseline);
+  context.fillStyle = selected ? "#2563eb" : "#111827";
+  context.fillText(fullText, paddingX, baseline);
+
+  if (textFormat.overlinePrefix) {
+    const prefixWidth = context.measureText(textFormat.prefix).width;
+    const overlineY = baseline - fontSize * 0.46;
+
+    context.beginPath();
+    context.lineWidth = 1.4;
+    context.strokeStyle = selected ? "#2563eb" : "#111827";
+    context.moveTo(paddingX, overlineY);
+    context.lineTo(paddingX + prefixWidth, overlineY);
+    context.stroke();
+  }
+
+  if (selected) {
+    context.beginPath();
+    context.setLineDash([6, 4]);
+    context.lineWidth = 2;
+    context.strokeStyle = "#2563eb";
+    context.moveTo(paddingX, canvas.height - 3);
+    context.lineTo(canvas.width - paddingX, canvas.height - 3);
+    context.stroke();
+    context.setLineDash([]);
+  }
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
@@ -199,45 +214,191 @@ const createMeasurementLabelTexture = (
   return texture;
 };
 
-export const createMeasurementObject = (
-  measurement: MeasurementEntity,
-  document: BoardDocument,
-): THREE.Sprite | null => {
-  const calculation = calculateMeasurementValue(measurement, document);
-  const position = getMeasurementLabelPosition(measurement, document);
+const shouldShowPointLabel = (point: PointEntity): boolean =>
+  point.nameSource === "manual" && Boolean(point.name?.trim());
 
-  if (!calculation || !position) {
+const createPointLabelTexture = (
+  text: string,
+  selected: boolean,
+): THREE.CanvasTexture => {
+  const canvas = globalThis.document.createElement("canvas");
+  const context = canvas.getContext("2d");
+  const fontSize = 12;
+  const paddingX = 3;
+  const paddingY = 2;
+
+  if (!context) {
+    canvas.width = 1;
+    canvas.height = 1;
+    return new THREE.CanvasTexture(canvas);
+  }
+
+  context.font = `400 ${fontSize}px Arial, Helvetica, sans-serif`;
+  const textMetrics = context.measureText(text);
+  canvas.width = Math.ceil(textMetrics.width + paddingX * 2);
+  canvas.height = fontSize + paddingY * 2;
+
+  context.font = `400 ${fontSize}px Arial, Helvetica, sans-serif`;
+  context.textBaseline = "middle";
+  context.clearRect(0, 0, canvas.width, canvas.height);
+
+  const baseline = canvas.height / 2;
+  context.lineJoin = "round";
+  context.lineWidth = 1.5;
+  context.strokeStyle = "rgba(255, 255, 255, 0.9)";
+  context.strokeText(text, paddingX, baseline);
+  context.fillStyle = selected ? "#1d4ed8" : "#1f2937";
+  context.fillText(text, paddingX, baseline);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+
+  return texture;
+};
+
+const createPointLabelObject = (
+  point: PointEntity,
+  selected: boolean,
+): THREE.Sprite | null => {
+  if (!shouldShowPointLabel(point)) {
     return null;
   }
 
-  const selected = document.selectedEntityIds.includes(measurement.id);
-  const texture = createMeasurementLabelTexture(calculation.formattedText, selected);
+  const texture = createPointLabelTexture(point.name?.trim() ?? "", selected);
   const material = new THREE.SpriteMaterial({
     map: texture,
     transparent: true,
     depthTest: false,
     depthWrite: false,
+    sizeAttenuation: false,
   });
   const sprite = new THREE.Sprite(material);
   const aspect = texture.image.width / texture.image.height;
 
-  sprite.position.set(position.x, position.y, position.z);
-  sprite.scale.set(aspect * 0.34, 0.34, 1);
+  sprite.position.set(0.16, 0.16, 0.12);
+  sprite.center.set(0, 0);
+  sprite.scale.set(aspect * 0.045, 0.045, 1);
+  sprite.renderOrder = 40;
+  sprite.userData.ignorePicking = true;
+
+  return sprite;
+};
+
+export const createMeasurementObject = (
+  measurement: MeasurementEntity,
+  document: BoardDocument,
+): THREE.Sprite | null => {
+  const textFormat = formatMeasurementText(measurement, document);
+
+  if (!textFormat) {
+    return null;
+  }
+
+  const selected = document.selectedEntityIds.includes(measurement.id);
+  const texture = createMeasurementLabelTexture(textFormat, selected);
+  const material = new THREE.SpriteMaterial({
+    map: texture,
+    transparent: true,
+    depthTest: false,
+    depthWrite: false,
+    sizeAttenuation: false,
+  });
+  const sprite = new THREE.Sprite(material);
+  const aspect = texture.image.width / texture.image.height;
+  const measurementIndex = Object.values(document.entities)
+    .filter((entity) => entity.kind === "measurement")
+    .findIndex((entity) => entity.id === measurement.id);
+  const displayPosition =
+    measurement.displayPosition ??
+    ({
+      mode: "screen",
+      x: 24,
+      y: 20 + Math.max(0, measurementIndex) * 20,
+    } as const);
+
+  if (displayPosition.mode === "screen") {
+    sprite.userData.screenAnchor = {
+      x: displayPosition.x,
+      y: displayPosition.y,
+    };
+    sprite.center.set(0, 1);
+  } else {
+    sprite.position.set(
+      displayPosition.x,
+      displayPosition.y,
+      displayPosition.z ?? 0,
+    );
+  }
+
+  sprite.scale.set(aspect * 0.09, 0.09, 1);
   sprite.renderOrder = 35;
   applyEntityUserData(sprite, measurement);
 
   return sprite;
 };
 
-export const createPointObject = (point: PointEntity): THREE.Mesh => {
-  const geometry = new THREE.SphereGeometry(POINT_VISUAL_RADIUS, 18, 12);
-  const material = createPointMaterial(point.style?.color);
-  const mesh = new THREE.Mesh(geometry, material);
+export const createPointObject = (
+  point: PointEntity,
+  highlighted: boolean,
+): THREE.Points => {
+  const canvas = globalThis.document.createElement("canvas");
+  const context = canvas.getContext("2d");
+  const size = 64;
+  const center = size / 2;
+  const fillColor = new THREE.Color(
+    highlighted
+      ? SELECTED_ENTITY_COLOR
+      : point.style?.color ?? DEFAULT_POINT_COLOR,
+  ).getStyle();
 
-  mesh.position.set(point.position.x, point.position.y, point.position.z);
-  applyEntityUserData(mesh, point);
+  canvas.width = size;
+  canvas.height = size;
 
-  return mesh;
+  if (context) {
+    context.clearRect(0, 0, size, size);
+    context.beginPath();
+    context.arc(center, center, highlighted ? 22 : 23, 0, Math.PI * 2);
+    context.fillStyle = fillColor;
+    context.fill();
+
+    if (highlighted) {
+      context.beginPath();
+      context.arc(center, center, 26, 0, Math.PI * 2);
+      context.lineWidth = 3;
+      context.strokeStyle = "rgba(245, 158, 11, 0.85)";
+      context.stroke();
+    }
+  }
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+
+  const material = new THREE.PointsMaterial({
+    map: texture,
+    size: highlighted ? HIGHLIGHTED_POINT_PIXEL_SIZE : POINT_PIXEL_SIZE,
+    sizeAttenuation: false,
+    transparent: true,
+    alphaTest: 0.45,
+    depthTest: false,
+    depthWrite: false,
+    color: 0xffffff,
+  });
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute(
+    "position",
+    new THREE.Float32BufferAttribute(
+      [point.position.x, point.position.y, point.position.z],
+      3,
+    ),
+  );
+  const points = new THREE.Points(geometry, material);
+
+  points.renderOrder = highlighted ? 50 : 48;
+  applyEntityUserData(points, point);
+
+  return points;
 };
 
 export const createSegmentObject = (
@@ -261,7 +422,10 @@ export const createSegmentObject = (
     endPoint.position.y,
     endPoint.position.z,
   ]);
-  const material = createSegmentMaterial(segment.style?.color);
+  const material = createSegmentMaterial(
+    segment.style?.color,
+    document.selectedEntityIds.includes(segment.id),
+  );
   const line = new Line2(geometry, material);
   line.computeLineDistances();
 
@@ -273,6 +437,7 @@ export const createSegmentObject = (
 export const createEntityObject = (
   entity: BoardEntity,
   document: BoardDocument,
+  highlightedPointIds: readonly EntityId[] = [],
 ): THREE.Object3D | null => {
   if (!entity.visible) {
     return null;
@@ -280,11 +445,11 @@ export const createEntityObject = (
 
   switch (entity.kind) {
     case "point":
-      return createPointObject(entity);
+      return createPointObject(entity, highlightedPointIds.includes(entity.id));
     case "segment":
       return createSegmentObject(entity, document);
     case "measurement":
-      return createMeasurementObject(entity, document);
+      return null;
     default:
       return null;
   }

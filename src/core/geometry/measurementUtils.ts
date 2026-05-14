@@ -115,6 +115,14 @@ export interface MeasurementCalculationResult {
   readonly formattedText: string;
 }
 
+export interface MeasurementTextFormat {
+  readonly prefix: string;
+  readonly valueText: string;
+  readonly unitText: string;
+  readonly formattedText: string;
+  readonly overlinePrefix: boolean;
+}
+
 const getMeasurementTargetIds = (
   measurement: MeasurementEntity,
 ): readonly EntityId[] => {
@@ -127,6 +135,75 @@ const getMeasurementTargetIds = (
   }
 
   return measurement.pointIds;
+};
+
+const getCompactPointName = (point: PointEntity | null): string | null => {
+  const rawName = point?.name?.trim() || point?.id.trim();
+
+  if (!rawName) {
+    return null;
+  }
+
+  const match = /([A-Za-z0-9]+)$/.exec(rawName);
+
+  return match?.[1] ?? rawName;
+};
+
+const getLengthPrefix = (
+  measurement: MeasurementEntity,
+  document: BoardDocument,
+): string | null => {
+  const targetIds = getMeasurementTargetIds(measurement);
+
+  if (targetIds.length === 1) {
+    const target = document.entities[targetIds[0]];
+
+    if (target?.kind !== "segment") {
+      return null;
+    }
+
+    const [startPointId, endPointId] = target.pointIds;
+    const startName = getCompactPointName(
+      getPointFromDocument(document, startPointId),
+    );
+    const endName = getCompactPointName(
+      getPointFromDocument(document, endPointId),
+    );
+
+    return startName && endName ? `${startName}${endName}` : null;
+  }
+
+  if (targetIds.length === 2) {
+    const startName = getCompactPointName(
+      getPointFromDocument(document, targetIds[0]),
+    );
+    const endName = getCompactPointName(
+      getPointFromDocument(document, targetIds[1]),
+    );
+
+    return startName && endName ? `${startName}${endName}` : null;
+  }
+
+  return null;
+};
+
+const getAnglePrefix = (
+  measurement: MeasurementEntity,
+  document: BoardDocument,
+): string | null => {
+  const targetIds = getMeasurementTargetIds(measurement);
+
+  if (targetIds.length !== 3) {
+    return null;
+  }
+
+  const pointNames = targetIds.map((pointId) =>
+    getCompactPointName(getPointFromDocument(document, pointId)),
+  );
+
+  return pointNames.every(Boolean)
+    ? `\u2220${pointNames.join("")}`
+    : null;
 };
 
 export const calculateMeasurementValue = (
@@ -148,7 +225,9 @@ export const calculateMeasurementValue = (
       : {
           value,
           unit: measurement.unit ?? "unit",
-          formattedText: `${measurement.name ?? "Length"} = ${value.toFixed(2)}`,
+          formattedText: `${
+            getLengthPrefix(measurement, document) ?? "d"
+          } = ${value.toFixed(2)}`,
         };
   }
 
@@ -163,8 +242,49 @@ export const calculateMeasurementValue = (
       : {
           value,
           unit: measurement.unit ?? "deg",
-          formattedText: `${measurement.name ?? "Angle"} = ${value.toFixed(2)}°`,
+          formattedText: `${
+            getAnglePrefix(measurement, document) ?? "\u03b8"
+          } = ${value.toFixed(2)}\u00b0`,
         };
+  }
+
+  return null;
+};
+
+export const formatMeasurementText = (
+  measurement: MeasurementEntity,
+  document: BoardDocument,
+): MeasurementTextFormat | null => {
+  const calculation = calculateMeasurementValue(measurement, document);
+
+  if (!calculation) {
+    return null;
+  }
+
+  if (measurement.measurementKind === "length") {
+    const prefix = getLengthPrefix(measurement, document) ?? "d";
+    const unitText = "";
+
+    return {
+      prefix,
+      valueText: calculation.value.toFixed(2),
+      unitText,
+      formattedText: `${prefix} = ${calculation.value.toFixed(2)}${unitText}`,
+      overlinePrefix: prefix !== "d",
+    };
+  }
+
+  if (measurement.measurementKind === "angle") {
+    const prefix = getAnglePrefix(measurement, document) ?? "\u03b8";
+    const unitText = "\u00b0";
+
+    return {
+      prefix,
+      valueText: calculation.value.toFixed(2),
+      unitText,
+      formattedText: `${prefix} = ${calculation.value.toFixed(2)}${unitText}`,
+      overlinePrefix: false,
+    };
   }
 
   return null;

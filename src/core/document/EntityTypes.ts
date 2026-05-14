@@ -28,6 +28,7 @@ export interface BaseEntity {
 export interface PointEntity extends BaseEntity {
   readonly kind: "point";
   readonly position: Vec3;
+  readonly nameSource?: "auto" | "manual";
 }
 
 export interface SegmentEntity extends BaseEntity {
@@ -67,6 +68,12 @@ export interface MeasurementEntity extends BaseEntity {
   readonly targetIds: readonly EntityId[];
   readonly pointIds: readonly EntityId[];
   readonly targetEntityIds: readonly EntityId[];
+  readonly displayPosition?: {
+    readonly mode: "screen" | "world";
+    readonly x: number;
+    readonly y: number;
+    readonly z?: number;
+  };
   readonly value?: number;
   readonly unit?: string;
 }

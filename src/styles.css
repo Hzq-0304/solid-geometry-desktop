@@ -135,6 +135,19 @@ input {
   background: #e8f0ff;
 }
 
+.solid-point-tool-icon {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+}
+
+.solid-point-tool-icon span {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: currentColor;
+}
+
 .viewport-panel {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
@@ -274,10 +287,81 @@ input {
   display: block;
   width: 100%;
   height: 100%;
+  position: relative;
+  z-index: 0;
 }
 
 .scene-viewport.point-tool-active canvas {
   cursor: crosshair;
+}
+
+.geometry-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.point-label-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.point-name-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  color: #2563eb;
+  font: 400 12px Arial, Helvetica, sans-serif;
+  line-height: 1;
+  white-space: nowrap;
+  pointer-events: none;
+  user-select: none;
+}
+
+.point-name-label.selected {
+  color: #1d4ed8;
+  font-weight: 500;
+}
+
+.measurement-list {
+  position: absolute;
+  top: 24px;
+  left: 24px;
+  display: grid;
+  gap: 5px;
+  align-items: start;
+  justify-items: start;
+  pointer-events: none;
+}
+
+.measurement-overlay-item {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  color: #111827;
+  background: transparent;
+  box-shadow: none;
+  cursor: pointer;
+  font: 400 13px Arial, Helvetica, sans-serif;
+  line-height: 1.2;
+  pointer-events: auto;
+}
+
+.measurement-overlay-item:hover,
+.measurement-overlay-item.selected {
+  color: #2563eb;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 3px;
+}
+
+.segment-name-overline {
+  text-decoration: overline;
 }
 
 .properties-panel {
@@ -387,6 +471,18 @@ input {
   color: #1f2937;
   background: #ffffff;
   font-size: 13px;
+  cursor: pointer;
+}
+
+.entity-list-item:hover {
+  border-color: #b9c4d3;
+  background: #f6f8fb;
+}
+
+.entity-list-item.selected {
+  border-color: #f59e0b;
+  background: #fff7ed;
+  box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.2);
 }
 
 .entity-list-main {
@@ -415,6 +511,51 @@ input {
   background: #eef4ff;
   font-size: 11px;
   text-transform: capitalize;
+}
+
+.selection-actions {
+  padding: 10px;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  background: #fff7ed;
+}
+
+.batch-naming {
+  display: grid;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid #d8dde6;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #536071;
+  font-size: 12px;
+}
+
+.batch-naming button {
+  min-height: 32px;
+  border: 1px solid #a9c3f6;
+  border-radius: 7px;
+  color: #1f56b3;
+  background: #e8f0ff;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.danger-button {
+  min-height: 34px;
+  border: 1px solid #f97316;
+  border-radius: 7px;
+  color: #9a3412;
+  background: #ffedd5;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.danger-button:hover {
+  border-color: #ea580c;
+  color: #7c2d12;
+  background: #fed7aa;
 }
 
 .status-bar {

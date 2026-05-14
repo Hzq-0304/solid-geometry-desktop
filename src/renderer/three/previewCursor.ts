@@ -2,50 +2,69 @@ import * as THREE from "three";
 import type { Vec3 } from "../../core/geometry/Vec3";
 
 const PREVIEW_CURSOR_NAME = "preview-cursor";
-const PREVIEW_CURSOR_RADIUS = 0.075;
+const PREVIEW_POINT_PIXEL_SIZE = 10;
 
-const createPreviewCursor = (): THREE.Group => {
-  const group = new THREE.Group();
-  group.name = PREVIEW_CURSOR_NAME;
-  group.userData.ignorePicking = true;
+const createPreviewPointTexture = (): THREE.CanvasTexture => {
+  const canvas = globalThis.document.createElement("canvas");
+  const context = canvas.getContext("2d");
+  const size = 64;
+  const center = size / 2;
 
-  const sphere = new THREE.Mesh(
-    new THREE.SphereGeometry(PREVIEW_CURSOR_RADIUS, 18, 12),
-    new THREE.MeshBasicMaterial({
-      color: 0xf59e0b,
-      transparent: true,
-      opacity: 0.92,
-      depthTest: false,
-    }),
-  );
-  sphere.userData.ignorePicking = true;
-  sphere.renderOrder = 20;
-  group.add(sphere);
+  canvas.width = size;
+  canvas.height = size;
 
-  const ring = new THREE.LineSegments(
-    new THREE.EdgesGeometry(
-      new THREE.SphereGeometry(PREVIEW_CURSOR_RADIUS * 1.75, 16, 8),
-    ),
-    new THREE.LineBasicMaterial({
-      color: 0x92400e,
-      transparent: true,
-      opacity: 0.72,
-      depthTest: false,
-    }),
-  );
-  ring.userData.ignorePicking = true;
-  ring.renderOrder = 21;
-  group.add(ring);
+  if (context) {
+    context.clearRect(0, 0, size, size);
+    context.beginPath();
+    context.arc(center, center, 23, 0, Math.PI * 2);
+    context.fillStyle = "rgba(245, 158, 11, 0.72)";
+    context.fill();
+    context.beginPath();
+    context.arc(center, center, 28, 0, Math.PI * 2);
+    context.lineWidth = 2;
+    context.strokeStyle = "rgba(146, 64, 14, 0.82)";
+    context.stroke();
+  }
 
-  group.visible = false;
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
 
-  return group;
+  return texture;
 };
 
-const getPreviewCursor = (scene: THREE.Scene): THREE.Group => {
+const createPreviewCursor = (): THREE.Points => {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute(
+    "position",
+    new THREE.Float32BufferAttribute([0, 0, 0], 3),
+  );
+
+  const material = new THREE.PointsMaterial({
+    map: createPreviewPointTexture(),
+    size: PREVIEW_POINT_PIXEL_SIZE,
+    sizeAttenuation: false,
+    transparent: true,
+    alphaTest: 0.2,
+    depthTest: false,
+    depthWrite: false,
+    color: 0xffffff,
+  });
+  const cursor = new THREE.Points(geometry, material);
+
+  cursor.name = PREVIEW_CURSOR_NAME;
+  cursor.userData.ignorePicking = true;
+  cursor.renderOrder = 52;
+  cursor.visible = false;
+
+  return cursor;
+};
+
+const getPreviewCursor = (scene: THREE.Scene): THREE.Points => {
   const existing = scene.getObjectByName(PREVIEW_CURSOR_NAME);
 
-  if (existing instanceof THREE.Group) {
+  if (existing instanceof THREE.Points) {
     return existing;
   }
 
@@ -67,25 +86,33 @@ export const syncPreviewCursor = (
     return;
   }
 
-  cursor.position.set(position.x, position.y, position.z);
+  const positionAttribute = cursor.geometry.getAttribute(
+    "position",
+  ) as THREE.BufferAttribute;
+  positionAttribute.setXYZ(0, position.x, position.y, position.z);
+  positionAttribute.needsUpdate = true;
 };
 
 export const disposePreviewCursor = (scene: THREE.Scene): void => {
-  const cursor = scene.getObjectByName(PREVIEW_CURSOR_NAME);
+  const cursor = scene.getObjectByName(PREVIEW_CURSOR_NAME) as
+    | THREE.Points
+    | undefined;
 
   if (!cursor) {
     return;
   }
 
-  cursor.traverse((child) => {
-    const renderable = child as THREE.Mesh | THREE.LineSegments;
-    renderable.geometry?.dispose();
+  cursor.geometry.dispose();
 
-    if (Array.isArray(renderable.material)) {
-      renderable.material.forEach((material) => material.dispose());
-    } else {
-      renderable.material?.dispose();
+  const material = cursor.material;
+  const materials = Array.isArray(material) ? material : [material];
+
+  materials.forEach((item) => {
+    if (item instanceof THREE.PointsMaterial) {
+      item.map?.dispose();
     }
+
+    item.dispose();
   });
 
   scene.remove(cursor);

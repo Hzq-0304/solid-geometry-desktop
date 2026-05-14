@@ -14,6 +14,16 @@ export class CommandManager {
     return this.currentDocument;
   }
 
+  setDocument(document: BoardDocument): void {
+    this.currentDocument = document;
+  }
+
+  reset(document: BoardDocument): void {
+    this.currentDocument = document;
+    this.undoStack.length = 0;
+    this.redoStack.length = 0;
+  }
+
   execute(command: Command): BoardDocument {
     const nextDocument = command.execute(this.currentDocument);
 
