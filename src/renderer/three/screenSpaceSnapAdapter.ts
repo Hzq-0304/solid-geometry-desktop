@@ -29,6 +29,7 @@ interface ScreenSpaceSnapContext {
   readonly pointerScreenPosition: ScreenPosition;
   readonly camera: THREE.Camera;
   readonly canvas: HTMLCanvasElement;
+  readonly ignoredEntityIds?: readonly EntityId[];
 }
 
 interface PointCandidate {
@@ -268,6 +269,10 @@ const getNearestPointSnap = (
 
   for (const entity of Object.values(context.document.entities)) {
     if (entity.kind !== "point") {
+      continue;
+    }
+
+    if (context.ignoredEntityIds?.includes(entity.id)) {
       continue;
     }
 

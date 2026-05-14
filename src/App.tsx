@@ -7,7 +7,6 @@ import {
 } from "react";
 import {
   Grid3X3,
-  Move3D,
   MousePointer2,
   Ruler,
 } from "lucide-react";
@@ -18,6 +17,7 @@ import { AddSegmentCommand } from "./core/command/AddSegmentCommand";
 import type { Command } from "./core/command/Command";
 import { CommandManager } from "./core/command/CommandManager";
 import { DeleteEntityCommand } from "./core/command/DeleteEntityCommand";
+import { MovePointCommand } from "./core/command/MovePointCommand";
 import {
   UpdateEntityCommand,
   type EntityUpdate,
@@ -38,9 +38,15 @@ import type {
 } from "./core/document/EntityTypes";
 import { createEntityId } from "./core/document/idGenerator";
 import { generatePointNames } from "./core/document/pointNameUtils";
-import { createVec3 } from "./core/geometry/geometryUtils";
+import {
+  areVec3Equal,
+  cloneVec3,
+  createVec3,
+} from "./core/geometry/geometryUtils";
 import {
   calculateMeasurementValue,
+  getLinePlaneAngleByPointIds,
+  getLinePlaneAngleBySegmentId,
   getAngleByPointIds,
   getPointDistanceByIds,
   getSegmentLengthById,
@@ -58,6 +64,9 @@ import { SelectTool } from "./core/tool/SelectTool";
 import type { ToolContext } from "./core/tool/ToolContext";
 import type { PointerInfo, ToolName } from "./core/tool/ToolTypes";
 import { isTauriEnvironment } from "./platform/platform";
+
+type PointCreationMode = "free" | "coordinate";
+type AngleMeasureMode = "threePoint" | "linePlane";
 
 interface ToolIconProps {
   readonly size?: string | number;
@@ -83,7 +92,6 @@ const constructTools: Array<{
   { name: "select", label: "\u9009\u62e9", icon: MousePointer2 },
   { name: "point", label: "\u70b9", icon: SolidPointIcon },
   { name: "segment", label: "\u7ebf\u6bb5", icon: Ruler },
-  { name: "move", label: "\u79fb\u52a8", icon: Move3D, disabled: true },
 ];
 
 const measureTools: Array<{
@@ -120,6 +128,9 @@ const MAX_SEGMENT_SNAP_PIXEL_RADIUS = 20;
 const MIN_AXIS_SNAP_PIXEL_RADIUS = 5;
 const MAX_AXIS_SNAP_PIXEL_RADIUS = 18;
 const SNAP_PIXEL_RADIUS_STEP = 1;
+const MAX_POINT_DRAG_COORDINATE = 10000;
+const MAX_POINT_DRAG_STEP = 1000;
+const COORDINATE_POINT_LIMIT = 10000;
 
 const createPointEntity = (
   id: EntityId,
@@ -217,6 +228,39 @@ const createAngleMeasurementEntity = (
     updatedAt: timestamp,
   };
 };
+
+const createLinePlaneAngleMeasurementEntity = (
+  id: EntityId,
+  name: string,
+  targetIds: readonly EntityId[],
+  value: number,
+): MeasurementEntity => {
+  const timestamp = new Date().toISOString();
+
+  return {
+    id,
+    kind: "measurement",
+    measurementKind: "linePlaneAngle",
+    name,
+    style: { color: "#9333ea" },
+    visible: true,
+    locked: false,
+    targetIds,
+    targetEntityIds: targetIds.length === 1 ? targetIds : [],
+    pointIds: targetIds.length === 2 ? targetIds : [],
+    plane: "XY",
+    value,
+    unit: "deg",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+};
+
+interface PointDragState {
+  readonly pointId: EntityId;
+  readonly oldPosition: Vec3;
+  latestPosition: Vec3;
+}
 
 const formatCoordinate = (value: number): string => value.toFixed(2);
 const formatMeasurementValue = (value: number): string => value.toFixed(3);
@@ -349,6 +393,7 @@ const getMeasureLengthToolStatus = (
 
 const getMeasureAngleToolStatus = (
   currentTool: ToolName,
+  angleMeasureMode: AngleMeasureMode,
   selectedPointIds: readonly EntityId[],
   statusMessage: string | null,
   document: BoardDocument,
@@ -359,6 +404,10 @@ const getMeasureAngleToolStatus = (
 
   if (statusMessage) {
     return statusMessage;
+  }
+
+  if (angleMeasureMode === "linePlane") {
+    return "请选择一条线段，测量其与 XY 平面的夹角";
   }
 
   if (selectedPointIds.length === 0) {
@@ -408,7 +457,31 @@ function App() {
   const [fileStatusMessage, setFileStatusMessage] = useState<string | null>(
     null,
   );
+  const [dragPreviewDocument, setDragPreviewDocument] =
+    useState<BoardDocument | null>(null);
+  const [draggedPointId, setDraggedPointId] = useState<EntityId | null>(null);
+  const [pointCreationMode, setPointCreationMode] =
+    useState<PointCreationMode>("free");
+  const [showPointToolPanel, setShowPointToolPanel] = useState(false);
+  const [showCoordinatePointModal, setShowCoordinatePointModal] =
+    useState(false);
+  const [angleMeasureMode, setAngleMeasureMode] =
+    useState<AngleMeasureMode>("threePoint");
+  const [showAngleToolPanel, setShowAngleToolPanel] = useState(false);
+  const [coordinatePointInput, setCoordinatePointInput] = useState({
+    x: "0",
+    y: "0",
+    z: "0",
+    name: "",
+  });
+  const [coordinatePointError, setCoordinatePointError] = useState<
+    string | null
+  >(null);
+  const [coordinatePointStatus, setCoordinatePointStatus] = useState<
+    string | null
+  >(null);
   const commandManagerRef = useRef<CommandManager | null>(null);
+  const pointDragStateRef = useRef<PointDragState | null>(null);
   const pointToolRef = useRef(new PointTool());
   const segmentToolRef = useRef(new SegmentTool());
   const measureLengthToolRef = useRef(new MeasureLengthTool());
@@ -420,9 +493,10 @@ function App() {
   }
 
   const commandManager = commandManagerRef.current;
-  const entities = Object.values(document.entities);
-  const selectedEntities = document.selectedEntityIds
-    .map((entityId) => document.entities[entityId])
+  const displayDocument = dragPreviewDocument ?? document;
+  const entities = Object.values(displayDocument.entities);
+  const selectedEntities = displayDocument.selectedEntityIds
+    .map((entityId) => displayDocument.entities[entityId])
     .filter((entity): entity is BoardEntity => Boolean(entity));
   const selectedEntityCount = selectedEntities.length;
   const selectedPointEntities = selectedEntities.filter(
@@ -431,21 +505,22 @@ function App() {
   const selectedPointCount = selectedPointEntities.length;
   const singleSelectedEntity =
     selectedEntityCount === 1 ? selectedEntities[0] : null;
-  const hasPointA = Boolean(document.entities[TEST_POINT_A_ID]);
-  const hasPointB = Boolean(document.entities[TEST_POINT_B_ID]);
-  const hasSegmentAB = Boolean(document.entities[TEST_SEGMENT_AB_ID]);
+  const hasPointA = Boolean(displayDocument.entities[TEST_POINT_A_ID]);
+  const hasPointB = Boolean(displayDocument.entities[TEST_POINT_B_ID]);
+  const hasSegmentAB = Boolean(displayDocument.entities[TEST_SEGMENT_AB_ID]);
   const currentFileName = currentFilePath
     ? currentFilePath.split(/[\\/]/).pop() ?? currentFilePath
     : "Untitled.sgb";
   const previewPosition =
-    currentTool === "point" || currentTool === "segment"
+    (currentTool === "point" && pointCreationMode === "free") ||
+    currentTool === "segment"
       ? lastSnapResult?.position ?? null
       : null;
   const segmentPreviewStartPosition =
     currentTool === "segment" &&
     segmentFirstPointId &&
-    document.entities[segmentFirstPointId]?.kind === "point"
-      ? document.entities[segmentFirstPointId].position
+    displayDocument.entities[segmentFirstPointId]?.kind === "point"
+      ? displayDocument.entities[segmentFirstPointId].position
       : null;
   const segmentToolStatus = getSegmentToolStatus(
     currentTool,
@@ -460,30 +535,39 @@ function App() {
   );
   const measureAngleToolStatus = getMeasureAngleToolStatus(
     currentTool,
+    angleMeasureMode,
     angleSelectedPointIds,
     angleStatusMessage,
-    document,
+    displayDocument,
   );
+  const pointDragStatus =
+    draggedPointId && displayDocument.entities[draggedPointId]?.kind === "point"
+      ? `Moving point ${getPointDisplayName(
+          displayDocument.entities[draggedPointId],
+        )}`
+      : null;
   const highlightedPointIds = useMemo(() => {
     const pointIds: EntityId[] = [];
     const addPointId = (entityId: EntityId | null | undefined) => {
-      if (!entityId || document.entities[entityId]?.kind !== "point") {
+      if (!entityId || displayDocument.entities[entityId]?.kind !== "point") {
         return;
       }
 
       pointIds.push(entityId);
     };
 
-    document.selectedEntityIds.forEach(addPointId);
+    displayDocument.selectedEntityIds.forEach(addPointId);
     addPointId(segmentFirstPointId);
     addPointId(measureFirstPointId);
+    addPointId(draggedPointId);
     angleSelectedPointIds.forEach(addPointId);
 
     return [...new Set(pointIds)];
   }, [
     angleSelectedPointIds,
-    document.entities,
-    document.selectedEntityIds,
+    displayDocument.entities,
+    displayDocument.selectedEntityIds,
+    draggedPointId,
     measureFirstPointId,
     segmentFirstPointId,
   ]);
@@ -552,7 +636,71 @@ function App() {
     setSelection([]);
   };
 
+  const createPointMovePreviewDocument = (
+    sourceDocument: BoardDocument,
+    pointId: EntityId,
+    position: Vec3,
+  ): BoardDocument => {
+    const entity = sourceDocument.entities[pointId];
+
+    if (!entity || entity.kind !== "point") {
+      return sourceDocument;
+    }
+
+    return {
+      ...sourceDocument,
+      entities: {
+        ...sourceDocument.entities,
+        [pointId]: {
+          ...entity,
+          position: cloneVec3(position),
+          updatedAt: new Date().toISOString(),
+        },
+      },
+    };
+  };
+
+  const getDragPosition = (pointerInfo: PointerInfo): Vec3 | null =>
+    pointerInfo.snapResult?.position ?? pointerInfo.worldPosition ?? null;
+
+  const isFiniteVec3 = (position: Vec3): boolean =>
+    Number.isFinite(position.x) &&
+    Number.isFinite(position.y) &&
+    Number.isFinite(position.z);
+
+  const isDragPositionSafe = (
+    position: Vec3,
+    referencePosition: Vec3,
+  ): boolean => {
+    if (!isFiniteVec3(position)) {
+      return false;
+    }
+
+    if (
+      Math.abs(position.x) > MAX_POINT_DRAG_COORDINATE ||
+      Math.abs(position.y) > MAX_POINT_DRAG_COORDINATE ||
+      Math.abs(position.z) > MAX_POINT_DRAG_COORDINATE
+    ) {
+      return false;
+    }
+
+    return (
+      Math.hypot(
+        position.x - referencePosition.x,
+        position.y - referencePosition.y,
+        position.z - referencePosition.z,
+      ) <= MAX_POINT_DRAG_STEP
+    );
+  };
+
+  const cancelPointDrag = () => {
+    pointDragStateRef.current = null;
+    setDragPreviewDocument(null);
+    setDraggedPointId(null);
+  };
+
   const resetTransientToolState = () => {
+    cancelPointDrag();
     segmentToolRef.current.cancel();
     measureLengthToolRef.current.cancel();
     measureAngleToolRef.current.cancel();
@@ -1044,6 +1192,63 @@ function App() {
     setAngleStatusMessage(`${measurement.name} = ${formatAngleValue(value)}`);
   };
 
+  const getLinePlaneAngleMeasurementName = (
+    targetIds: readonly EntityId[],
+  ): string => {
+    const currentDocument = commandManager.getDocument();
+
+    if (targetIds.length === 1) {
+      const segment = currentDocument.entities[targetIds[0]];
+
+      if (segment?.kind === "segment") {
+        const [startPointId, endPointId] = segment.pointIds;
+        return `${getCompactPointNameById(
+          currentDocument,
+          startPointId,
+        )}${getCompactPointNameById(currentDocument, endPointId)} 与 XY 面`;
+      }
+    }
+
+    if (targetIds.length === 2) {
+      return `${getCompactPointNameById(
+        currentDocument,
+        targetIds[0],
+      )}${getCompactPointNameById(currentDocument, targetIds[1])} 与 XY 面`;
+    }
+
+    return "线段与 XY 面";
+  };
+
+  const addLinePlaneAngleMeasurement = (targetIds: readonly EntityId[]) => {
+    const currentDocument = commandManager.getDocument();
+    const value =
+      targetIds.length === 1
+        ? getLinePlaneAngleBySegmentId(currentDocument, targetIds[0])
+        : targetIds.length === 2
+          ? getLinePlaneAngleByPointIds(currentDocument, targetIds[0], targetIds[1])
+          : null;
+
+    if (value === null) {
+      setAngleStatusMessage("线面角工具：无法计算线段与 XY 面的夹角");
+      return;
+    }
+
+    const measurement = {
+      ...createLinePlaneAngleMeasurementEntity(
+        createEntityId("measurement"),
+        getLinePlaneAngleMeasurementName(targetIds),
+        targetIds,
+        value,
+      ),
+      displayPosition: getNextMeasurementDisplayPosition(),
+    };
+
+    executeCommand(new AddMeasurementCommand(measurement));
+    setAngleStatusMessage(
+      `已测量 ${measurement.name}夹角：${formatAngleValue(value)}`,
+    );
+  };
+
   const createToolContext = (): ToolContext => ({
     addPoint: (position, options) => {
       executeCommand(
@@ -1177,6 +1382,131 @@ function App() {
     updateDocumentSettings({ activeDrawingPlane });
   };
 
+  const activatePointFreeMode = () => {
+    setPointCreationMode("free");
+    setShowPointToolPanel(false);
+    setShowAngleToolPanel(false);
+    setShowCoordinatePointModal(false);
+    setCoordinatePointError(null);
+    changeTool("point");
+  };
+
+  const openPointToolPanel = () => {
+    setShowPointToolPanel((isOpen) => !isOpen);
+    setShowAngleToolPanel(false);
+    changeTool("point");
+  };
+
+  const activateCoordinatePointMode = () => {
+    setPointCreationMode("coordinate");
+    setShowPointToolPanel(false);
+    setShowAngleToolPanel(false);
+    setShowCoordinatePointModal(true);
+    setCoordinatePointError(null);
+    changeTool("point");
+  };
+
+  const activateThreePointAngleMode = () => {
+    setAngleMeasureMode("threePoint");
+    setShowAngleToolPanel(false);
+    setShowPointToolPanel(false);
+    measureAngleToolRef.current.cancel();
+    setAngleSelectedPointIds([]);
+    setAngleStatusMessage(null);
+    changeTool("measureAngle");
+  };
+
+  const openAngleToolPanel = () => {
+    setShowAngleToolPanel((isOpen) => !isOpen);
+    setShowPointToolPanel(false);
+    setShowCoordinatePointModal(false);
+    changeTool("measureAngle");
+  };
+
+  const activateLinePlaneAngleMode = () => {
+    setAngleMeasureMode("linePlane");
+    setShowAngleToolPanel(false);
+    setShowPointToolPanel(false);
+    measureAngleToolRef.current.cancel();
+    setAngleSelectedPointIds([]);
+    setAngleStatusMessage(null);
+    changeTool("measureAngle");
+  };
+
+  const closeCoordinatePointModal = () => {
+    setShowCoordinatePointModal(false);
+    setCoordinatePointError(null);
+  };
+
+  const updateCoordinatePointInput = (
+    field: keyof typeof coordinatePointInput,
+    value: string,
+  ) => {
+    setCoordinatePointInput((currentInput) => ({
+      ...currentInput,
+      [field]: value,
+    }));
+    setCoordinatePointError(null);
+  };
+
+  const parseCoordinateValue = (rawValue: string): number | null => {
+    if (!rawValue.trim()) {
+      return null;
+    }
+
+    const value = Number(rawValue);
+
+    return Number.isFinite(value) ? value : null;
+  };
+
+  const createCoordinatePoint = () => {
+    const x = parseCoordinateValue(coordinatePointInput.x);
+    const y = parseCoordinateValue(coordinatePointInput.y);
+    const z = parseCoordinateValue(coordinatePointInput.z);
+
+    if (x === null || y === null || z === null) {
+      setCoordinatePointError("请输入有效坐标");
+      return;
+    }
+
+    if (
+      [x, y, z].some(
+        (value) => Math.abs(value) > COORDINATE_POINT_LIMIT,
+      )
+    ) {
+      setCoordinatePointError("坐标过大，请输入 -10000 到 10000 之间的值");
+      return;
+    }
+
+    const trimmedName = coordinatePointInput.name.trim();
+    const pointId = createEntityId("point");
+    const point = {
+      ...createPointEntity(
+        pointId,
+        trimmedName || getNextPointName(),
+        createVec3(x, y, z),
+        { color: DEFAULT_POINT_COLOR },
+      ),
+      nameSource: trimmedName ? "manual" as const : "auto" as const,
+    };
+
+    executeCommand(new AddPointCommand(point));
+    setSelection([pointId]);
+    setCoordinatePointInput({
+      x: "0",
+      y: "0",
+      z: "0",
+      name: "",
+    });
+    setCoordinatePointError(null);
+    setShowCoordinatePointModal(false);
+    setCoordinatePointStatus(
+      `已创建点 ${point.name ?? point.id} (${formatCoordinate(x)}, ${formatCoordinate(
+        y,
+      )}, ${formatCoordinate(z)})`,
+    );
+  };
+
   const focusCurrentDrawingPlane = () => {
     setFocusRequestId((requestId) => requestId + 1);
   };
@@ -1256,6 +1586,81 @@ function App() {
     );
   };
 
+  const handleSelectPointDragStart = (pointerInfo: PointerInfo) => {
+    if (
+      currentTool !== "select" ||
+      !pointerInfo.hitEntityId ||
+      pointerInfo.hitEntityType !== "point"
+    ) {
+      return;
+    }
+
+    const entity = commandManager.getDocument().entities[pointerInfo.hitEntityId];
+
+    if (!entity || entity.kind !== "point") {
+      return;
+    }
+
+    pointDragStateRef.current = {
+      pointId: entity.id,
+      oldPosition: cloneVec3(entity.position),
+      latestPosition: cloneVec3(entity.position),
+    };
+    setDraggedPointId(entity.id);
+    selectEntity(entity.id);
+  };
+
+  const handleSelectPointDragMove = (pointerInfo: PointerInfo) => {
+    const dragState = pointDragStateRef.current;
+    const nextPosition = getDragPosition(pointerInfo);
+
+    if (!dragState || !nextPosition) {
+      return;
+    }
+
+    if (!isDragPositionSafe(nextPosition, dragState.latestPosition)) {
+      setLastPointerInfo(pointerInfo);
+      setLastSnapResult(null);
+      return;
+    }
+
+    dragState.latestPosition = cloneVec3(nextPosition);
+    setLastPointerInfo(pointerInfo);
+    setLastSnapResult(pointerInfo.snapResult ?? null);
+    setDragPreviewDocument(
+      createPointMovePreviewDocument(
+        commandManager.getDocument(),
+        dragState.pointId,
+        nextPosition,
+      ),
+    );
+  };
+
+  const handleSelectPointDragEnd = (pointerInfo: PointerInfo) => {
+    const dragState = pointDragStateRef.current;
+
+    if (!dragState) {
+      return;
+    }
+
+    const finalPosition =
+      getDragPosition(pointerInfo) ?? cloneVec3(dragState.latestPosition);
+    const { pointId, oldPosition } = dragState;
+
+    cancelPointDrag();
+
+    if (!isDragPositionSafe(finalPosition, dragState.latestPosition)) {
+      setSelection([pointId]);
+      return;
+    }
+
+    if (!areVec3Equal(oldPosition, finalPosition)) {
+      executeCommand(new MovePointCommand(pointId, oldPosition, finalPosition));
+    }
+
+    setSelection([pointId]);
+  };
+
   const handleCanvasPointerMove = (pointerInfo: PointerInfo) => {
     const snapResult = getPointerSnapResult(pointerInfo);
     const nextPointerInfo: PointerInfo = {
@@ -1283,6 +1688,10 @@ function App() {
     }
 
     if (currentTool === "point") {
+      if (pointCreationMode !== "free") {
+        return;
+      }
+
       pointToolRef.current.onPointerDown(nextPointerInfo, createToolContext());
       return;
     }
@@ -1317,6 +1726,26 @@ function App() {
     }
 
     if (currentTool === "measureAngle") {
+      if (angleMeasureMode === "linePlane") {
+        if (
+          nextPointerInfo.hitEntityId &&
+          nextPointerInfo.hitEntityType === "segment"
+        ) {
+          addLinePlaneAngleMeasurement([nextPointerInfo.hitEntityId]);
+        } else if (
+          nextPointerInfo.snapResult?.type === "segment" &&
+          nextPointerInfo.snapResult.targetEntityId
+        ) {
+          addLinePlaneAngleMeasurement([
+            nextPointerInfo.snapResult.targetEntityId,
+          ]);
+        } else {
+          setAngleStatusMessage("请选择一条线段，测量其与 XY 平面的夹角");
+        }
+
+        return;
+      }
+
       measureAngleToolRef.current.onPointerDown(
         nextPointerInfo,
         createToolContext(),
@@ -1352,6 +1781,15 @@ function App() {
   };
 
   const changeTool = (nextTool: ToolName) => {
+    if (nextTool !== "point") {
+      setShowPointToolPanel(false);
+      setShowCoordinatePointModal(false);
+    }
+
+    if (nextTool !== "measureAngle") {
+      setShowAngleToolPanel(false);
+    }
+
     if (currentTool === "segment" && nextTool !== "segment") {
       segmentToolRef.current.cancel();
       setSegmentFirstPointId(null);
@@ -1402,6 +1840,26 @@ function App() {
         return;
       }
 
+      if (pointDragStateRef.current) {
+        cancelPointDrag();
+        return;
+      }
+
+      if (showCoordinatePointModal) {
+        closeCoordinatePointModal();
+        return;
+      }
+
+      if (showPointToolPanel) {
+        setShowPointToolPanel(false);
+        return;
+      }
+
+      if (showAngleToolPanel) {
+        setShowAngleToolPanel(false);
+        return;
+      }
+
       if (currentTool === "measureLength") {
         measureLengthToolRef.current.cancel();
         setMeasureFirstPointId(null);
@@ -1414,6 +1872,7 @@ function App() {
         measureAngleToolRef.current.cancel();
         setAngleSelectedPointIds([]);
         setAngleStatusMessage(null);
+        setAngleMeasureMode("threePoint");
         setCurrentTool("select");
         return;
       }
@@ -1446,41 +1905,116 @@ function App() {
         <nav className="tool-groups">
           <section className="tool-group" aria-label="Construct tools">
             <h2>{"\u6784\u9020"}</h2>
-            {constructTools.map(({ label, icon: Icon, name, disabled }) => (
-              <button
-                className={
-                  currentTool === name ? "tool-button active" : "tool-button"
-                }
-                disabled={disabled}
-                key={name}
-                onClick={() => changeTool(name)}
-                title={label}
-                aria-label={label}
-                type="button"
-              >
-                <Icon size={18} aria-hidden="true" />
-                <span>{label}</span>
-              </button>
-            ))}
+            {constructTools.map(({ label, icon: Icon, name, disabled }) =>
+              name === "point" ? (
+                <div className="split-tool-button" key={name}>
+                  <button
+                    className={
+                      currentTool === name && pointCreationMode === "free"
+                        ? "tool-button active"
+                        : "tool-button"
+                    }
+                    disabled={disabled}
+                    onClick={activatePointFreeMode}
+                    title={label}
+                    aria-label={label}
+                    type="button"
+                  >
+                    <Icon size={18} aria-hidden="true" />
+                    <span>{label}</span>
+                  </button>
+                  <button
+                    aria-label={
+                      showPointToolPanel ? "收回点工具方式" : "展开点工具方式"
+                    }
+                    className={
+                      showPointToolPanel
+                        ? "tool-button split-toggle active"
+                        : "tool-button split-toggle"
+                    }
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      openPointToolPanel();
+                    }}
+                    title="点工具方式"
+                    type="button"
+                  >
+                    <span>{showPointToolPanel ? "<" : ">"}</span>
+                  </button>
+                </div>
+              ) : (
+                <button
+                  className={
+                    currentTool === name ? "tool-button active" : "tool-button"
+                  }
+                  disabled={disabled}
+                  key={name}
+                  onClick={() => changeTool(name)}
+                  title={label}
+                  aria-label={label}
+                  type="button"
+                >
+                  <Icon size={18} aria-hidden="true" />
+                  <span>{label}</span>
+                </button>
+              ),
+            )}
           </section>
 
           <section className="tool-group" aria-label="Measurement tools">
             <h2>{"\u6d4b\u91cf"}</h2>
-            {measureTools.map(({ label, icon: Icon, name }) => (
-              <button
-                className={
-                  currentTool === name ? "tool-button active" : "tool-button"
-                }
-                key={name}
-                onClick={() => changeTool(name)}
-                title={label}
-                aria-label={label}
-                type="button"
-              >
-                <Icon size={18} aria-hidden="true" />
-                <span>{label}</span>
-              </button>
-            ))}
+            {measureTools.map(({ label, icon: Icon, name }) =>
+              name === "measureAngle" ? (
+                <div className="split-tool-button" key={name}>
+                  <button
+                    className={
+                      currentTool === name && angleMeasureMode === "threePoint"
+                        ? "tool-button active"
+                        : "tool-button"
+                    }
+                    onClick={activateThreePointAngleMode}
+                    title={label}
+                    aria-label={label}
+                    type="button"
+                  >
+                    <Icon size={18} aria-hidden="true" />
+                    <span>{label}</span>
+                  </button>
+                  <button
+                    aria-label={
+                      showAngleToolPanel ? "收回角度工具方式" : "展开角度工具方式"
+                    }
+                    className={
+                      showAngleToolPanel
+                        ? "tool-button split-toggle active"
+                        : "tool-button split-toggle"
+                    }
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      openAngleToolPanel();
+                    }}
+                    title="角度工具方式"
+                    type="button"
+                  >
+                    <span>{showAngleToolPanel ? "<" : ">"}</span>
+                  </button>
+                </div>
+              ) : (
+                <button
+                  className={
+                    currentTool === name ? "tool-button active" : "tool-button"
+                  }
+                  key={name}
+                  onClick={() => changeTool(name)}
+                  title={label}
+                  aria-label={label}
+                  type="button"
+                >
+                  <Icon size={18} aria-hidden="true" />
+                  <span>{label}</span>
+                </button>
+              ),
+            )}
           </section>
 
           <section className="tool-group" aria-label="View tools">
@@ -1489,7 +2023,7 @@ function App() {
               {drawingPlanes.map((drawingPlane) => (
                 <button
                   className={
-                    document.settings.activeDrawingPlane === drawingPlane
+                    displayDocument.settings.activeDrawingPlane === drawingPlane
                       ? "tool-button active"
                       : "tool-button"
                   }
@@ -1513,7 +2047,7 @@ function App() {
           <section className="tool-group" aria-label="Snap tools">
             <h2>{"\u5438\u9644"}</h2>
             <button
-              className={document.settings.snapEnabled ? "tool-button active" : "tool-button"}
+              className={displayDocument.settings.snapEnabled ? "tool-button active" : "tool-button"}
               onClick={() => toggleSetting("snapEnabled")}
               type="button"
             >
@@ -1529,8 +2063,8 @@ function App() {
               ].map(([settingName, label]) => (
                 <button
                   className={
-                    document.settings[
-                      settingName as keyof typeof document.settings
+                    displayDocument.settings[
+                      settingName as keyof typeof displayDocument.settings
                     ]
                       ? "tool-button active"
                       : "tool-button"
@@ -1556,12 +2090,54 @@ function App() {
         </nav>
       </aside>
 
+      {showPointToolPanel ? (
+        <div className="point-tool-flyout" role="menu" aria-label="点工具方式">
+          <button
+            className={pointCreationMode === "free" ? "active" : ""}
+            onClick={activatePointFreeMode}
+            type="button"
+          >
+            自由画点
+          </button>
+          <button
+            className={pointCreationMode === "coordinate" ? "active" : ""}
+            onClick={activateCoordinatePointMode}
+            type="button"
+          >
+            坐标画点
+          </button>
+        </div>
+      ) : null}
+
+      {showAngleToolPanel ? (
+        <div
+          className="point-tool-flyout angle-tool-flyout"
+          role="menu"
+          aria-label="角度工具方式"
+        >
+          <button
+            className={angleMeasureMode === "threePoint" ? "active" : ""}
+            onClick={activateThreePointAngleMode}
+            type="button"
+          >
+            三点角度
+          </button>
+          <button
+            className={angleMeasureMode === "linePlane" ? "active" : ""}
+            onClick={activateLinePlaneAngleMode}
+            type="button"
+          >
+            线面角
+          </button>
+        </div>
+      ) : null}
+
       <section className="viewport-panel" aria-label="3D viewport">
         <div className="viewport-topbar">
           <div>
             <h1>Solid Geometry Studio</h1>
             <span>
-              {toolLabels[currentTool]} / {document.settings.activeDrawingPlane}
+              {toolLabels[currentTool]} / {displayDocument.settings.activeDrawingPlane}
             </span>
           </div>
           <div className="viewport-actions">
@@ -1612,13 +2188,18 @@ function App() {
         </div>
         <SceneViewport
           currentTool={currentTool}
-          document={document}
+          document={displayDocument}
           focusRequestId={focusRequestId}
           highlightedPointIds={highlightedPointIds}
+          isDraggingPoint={draggedPointId !== null}
           previewPosition={previewPosition}
           segmentPreviewStartPosition={segmentPreviewStartPosition}
           onCanvasPointerDown={handleCanvasPointerDown}
           onCanvasPointerMove={handleCanvasPointerMove}
+          onSelectPointDragStart={handleSelectPointDragStart}
+          onSelectPointDragMove={handleSelectPointDragMove}
+          onSelectPointDragEnd={handleSelectPointDragEnd}
+          onSelectPointDragCancel={cancelPointDrag}
           onOverlayEntityPointerDown={handleOverlayEntityPointerDown}
         />
       </section>
@@ -1700,19 +2281,19 @@ function App() {
           <h3>Scene</h3>
           <label>
             Grid size
-            <input value={`${document.settings.gridSize} unit`} readOnly />
+            <input value={`${displayDocument.settings.gridSize} unit`} readOnly />
           </label>
           <label>
             Drawing plane
-            <input value={document.settings.activeDrawingPlane} readOnly />
+            <input value={displayDocument.settings.activeDrawingPlane} readOnly />
           </label>
           <label>
             Snap to grid
-            <input value={document.settings.snapToGrid ? "On" : "Off"} readOnly />
+            <input value={displayDocument.settings.snapToGrid ? "On" : "Off"} readOnly />
           </label>
           <label>
             Snap enabled
-            <input value={document.settings.snapEnabled ? "On" : "Off"} readOnly />
+            <input value={displayDocument.settings.snapEnabled ? "On" : "Off"} readOnly />
           </label>
         </section>
 
@@ -1720,42 +2301,42 @@ function App() {
           <h3>Snap</h3>
           <div className="setting-button-grid">
             <button
-              className={document.settings.snapEnabled ? "active" : ""}
+              className={displayDocument.settings.snapEnabled ? "active" : ""}
               onClick={() => toggleSetting("snapEnabled")}
               type="button"
             >
               Enabled
             </button>
             <button
-              className={document.settings.snapToGrid ? "active" : ""}
+              className={displayDocument.settings.snapToGrid ? "active" : ""}
               onClick={() => toggleSetting("snapToGrid")}
               type="button"
             >
               Grid
             </button>
             <button
-              className={document.settings.snapToPoints ? "active" : ""}
+              className={displayDocument.settings.snapToPoints ? "active" : ""}
               onClick={() => toggleSetting("snapToPoints")}
               type="button"
             >
               Points
             </button>
             <button
-              className={document.settings.snapToSegments ? "active" : ""}
+              className={displayDocument.settings.snapToSegments ? "active" : ""}
               onClick={() => toggleSetting("snapToSegments")}
               type="button"
             >
               Segments
             </button>
             <button
-              className={document.settings.snapToOrigin ? "active" : ""}
+              className={displayDocument.settings.snapToOrigin ? "active" : ""}
               onClick={() => toggleSetting("snapToOrigin")}
               type="button"
             >
               Origin
             </button>
             <button
-              className={document.settings.snapToAxes ? "active" : ""}
+              className={displayDocument.settings.snapToAxes ? "active" : ""}
               onClick={() => toggleSetting("snapToAxes")}
               type="button"
             >
@@ -1783,21 +2364,21 @@ function App() {
           <label>
             Point radius
             <input
-              value={`${document.settings.pointSnapPixelRadius}px`}
+              value={`${displayDocument.settings.pointSnapPixelRadius}px`}
               readOnly
             />
           </label>
           <label>
             Line radius
             <input
-              value={`${document.settings.segmentSnapPixelRadius}px`}
+              value={`${displayDocument.settings.segmentSnapPixelRadius}px`}
               readOnly
             />
           </label>
           <label>
             Axis radius
             <input
-              value={`${document.settings.axisSnapPixelRadius}px`}
+              value={`${displayDocument.settings.axisSnapPixelRadius}px`}
               readOnly
             />
           </label>
@@ -1807,14 +2388,14 @@ function App() {
           <h3>Drawing Plane</h3>
           <div className="setting-button-grid">
             <button
-              className={document.settings.showDrawingPlane ? "active" : ""}
+              className={displayDocument.settings.showDrawingPlane ? "active" : ""}
               onClick={() => toggleSetting("showDrawingPlane")}
               type="button"
             >
               Visible
             </button>
             <button
-              className={document.settings.drawingPlaneSolid ? "active" : ""}
+              className={displayDocument.settings.drawingPlaneSolid ? "active" : ""}
               onClick={() => toggleSetting("drawingPlaneSolid")}
               type="button"
             >
@@ -1830,7 +2411,7 @@ function App() {
           <label>
             Opacity
             <input
-              value={document.settings.drawingPlaneOpacity.toFixed(2)}
+              value={displayDocument.settings.drawingPlaneOpacity.toFixed(2)}
               readOnly
             />
           </label>
@@ -1843,7 +2424,7 @@ function App() {
               {entities.map((entity: BoardEntity) => (
                 <li
                   className={
-                    document.selectedEntityIds.includes(entity.id)
+                    displayDocument.selectedEntityIds.includes(entity.id)
                       ? "entity-list-item selected"
                       : "entity-list-item"
                   }
@@ -1868,7 +2449,7 @@ function App() {
                   <span className="entity-list-main">
                     <span className="entity-name">{entity.name ?? entity.id}</span>
                     <span className="entity-detail">
-                      {getEntityDetail(entity, document)}
+                      {getEntityDetail(entity, displayDocument)}
                     </span>
                   </span>
                   <span className="entity-kind-pill">{entity.kind}</span>
@@ -1881,6 +2462,76 @@ function App() {
         </section>
       </aside>
 
+      {showCoordinatePointModal ? (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            aria-label="按坐标创建点"
+            className="coordinate-point-modal"
+            role="dialog"
+          >
+            <header className="modal-header">
+              <h2>按坐标创建点</h2>
+              <button
+                aria-label="关闭"
+                onClick={closeCoordinatePointModal}
+                type="button"
+              >
+                ×
+              </button>
+            </header>
+            <div className="coordinate-point-form">
+              {(["x", "y", "z"] as const).map((axis) => (
+                <label className="form-field" key={axis}>
+                  <span>{axis.toUpperCase()}</span>
+                  <input
+                    autoFocus={axis === "x"}
+                    inputMode="decimal"
+                    value={coordinatePointInput[axis]}
+                    onChange={(event) =>
+                      updateCoordinatePointInput(axis, event.target.value)
+                    }
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        createCoordinatePoint();
+                      }
+                    }}
+                  />
+                </label>
+              ))}
+              <label className="form-field coordinate-point-name">
+                <span>Name，可选</span>
+                <input
+                  value={coordinatePointInput.name}
+                  onChange={(event) =>
+                    updateCoordinatePointInput("name", event.target.value)
+                  }
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      createCoordinatePoint();
+                    }
+                  }}
+                />
+              </label>
+              {coordinatePointError ? (
+                <span className="form-error">{coordinatePointError}</span>
+              ) : null}
+              <div className="modal-actions">
+                <button onClick={closeCoordinatePointModal} type="button">
+                  取消
+                </button>
+                <button onClick={createCoordinatePoint} type="button">
+                  创建点
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
       <footer className="status-bar">
         <span>
           File: {currentFileName}
@@ -1888,17 +2539,19 @@ function App() {
         </span>
         {fileStatusMessage ? <span>{fileStatusMessage}</span> : null}
         <span>Tool: {toolLabels[currentTool]}</span>
-        <span>Plane: {document.settings.activeDrawingPlane}</span>
-        <span>Snap: {document.settings.snapEnabled ? "On" : "Off"}</span>
+        <span>Plane: {displayDocument.settings.activeDrawingPlane}</span>
+        <span>Snap: {displayDocument.settings.snapEnabled ? "On" : "Off"}</span>
         <span>Entities: {entities.length}</span>
         {segmentToolStatus ? <span>{segmentToolStatus}</span> : null}
+        {pointDragStatus ? <span>{pointDragStatus}</span> : null}
         {measureLengthToolStatus ? <span>{measureLengthToolStatus}</span> : null}
         {measureAngleToolStatus ? <span>{measureAngleToolStatus}</span> : null}
         {deleteStatusMessage ? <span>{deleteStatusMessage}</span> : null}
+        {coordinatePointStatus ? <span>{coordinatePointStatus}</span> : null}
         <span>Raw: {formatVec3(lastPointerInfo?.worldPosition)}</span>
         <span>Snap: {formatVec3(lastSnapResult?.position)}</span>
         <span>Target: {getSnapDescription(lastSnapResult)}</span>
-        <span>Point Radius: {document.settings.pointSnapPixelRadius}px</span>
+        <span>Point Radius: {displayDocument.settings.pointSnapPixelRadius}px</span>
       </footer>
     </main>
   );

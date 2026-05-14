@@ -1,8 +1,23 @@
 import * as THREE from "three";
-import type { ActiveDrawingPlane } from "../../core/document/BoardDocument";
-import type { EntityKind } from "../../core/document/EntityTypes";
+import type {
+  ActiveDrawingPlane,
+  BoardDocument,
+} from "../../core/document/BoardDocument";
+import type {
+  EntityId,
+  EntityKind,
+  PointEntity,
+} from "../../core/document/EntityTypes";
 import type { Vec3 } from "../../core/geometry/Vec3";
 import type { PointerInfo } from "../../core/tool/ToolTypes";
+import {
+  distancePointToScreenPoint,
+  getPointerScreenPosition,
+  worldPositionToScreenPosition,
+  type ScreenPosition,
+} from "./screenSpaceUtils";
+
+const DEFAULT_POINT_PICK_PIXEL_RADIUS = 12;
 
 const PICKABLE_ENTITY_TYPES = new Set<EntityKind>([
   "point",
@@ -76,7 +91,12 @@ const getEntityHit = (
     const entityObject = findEntityObject(intersection.object);
     const entityType = entityObject?.userData.entityType as EntityKind | undefined;
 
-    if (entityObject && entityType && PICKABLE_ENTITY_TYPES.has(entityType)) {
+    if (
+      entityObject &&
+      entityType &&
+      entityType !== "point" &&
+      PICKABLE_ENTITY_TYPES.has(entityType)
+    ) {
       return {
         hitEntityId: entityObject.userData.entityId,
         hitEntityType: entityType,
@@ -90,11 +110,76 @@ const getEntityHit = (
   };
 };
 
+export interface ScreenPointPickResult {
+  readonly entityId: EntityId;
+  readonly entityType: "point";
+  readonly screenDistance: number;
+  readonly worldPosition: Vec3;
+}
+
+export const findNearestPointByScreenDistance = (
+  pointerScreenPosition: ScreenPosition,
+  document: BoardDocument,
+  camera: THREE.Camera,
+  canvas: HTMLCanvasElement,
+  options: {
+    readonly pointPickPixelRadius?: number;
+    readonly ignoredEntityIds?: readonly EntityId[];
+  } = {},
+): ScreenPointPickResult | null => {
+  const pointPickPixelRadius =
+    options.pointPickPixelRadius ?? DEFAULT_POINT_PICK_PIXEL_RADIUS;
+  let nearestPoint: PointEntity | null = null;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+
+  for (const entity of Object.values(document.entities)) {
+    if (
+      entity.kind !== "point" ||
+      !entity.visible ||
+      options.ignoredEntityIds?.includes(entity.id)
+    ) {
+      continue;
+    }
+
+    const screenPosition = worldPositionToScreenPosition(
+      entity.position,
+      camera,
+      canvas,
+    );
+
+    if (!screenPosition) {
+      continue;
+    }
+
+    const distance = distancePointToScreenPoint(
+      pointerScreenPosition,
+      screenPosition,
+    );
+
+    if (distance > pointPickPixelRadius || distance >= nearestDistance) {
+      continue;
+    }
+
+    nearestPoint = entity;
+    nearestDistance = distance;
+  }
+
+  return nearestPoint
+    ? {
+        entityId: nearestPoint.id,
+        entityType: "point",
+        screenDistance: nearestDistance,
+        worldPosition: nearestPoint.position,
+      }
+    : null;
+};
+
 export const getPointerInfoFromEvent = (
   event: PointerEvent,
-  element: HTMLElement,
+  element: HTMLCanvasElement,
   camera: THREE.Camera,
   scene: THREE.Scene,
+  document: BoardDocument,
   drawingPlane: ActiveDrawingPlane,
 ): PointerInfo => {
   const ndc = getPointerNdc(event, element);
@@ -103,17 +188,20 @@ export const getPointerInfoFromEvent = (
     ...raycaster.params.Line,
     threshold: 0.08,
   };
-  raycaster.params.Points = {
-    ...raycaster.params.Points,
-    threshold: 0.08,
-  };
   raycaster.setFromCamera(ndc, camera);
 
+  const pointHit = findNearestPointByScreenDistance(
+    getPointerScreenPosition(event, element),
+    document,
+    camera,
+    element,
+  );
   const intersections = raycaster.intersectObjects(scene.children, true);
   const entityHit = getEntityHit(intersections);
 
   return {
-    ...entityHit,
+    hitEntityId: pointHit?.entityId ?? entityHit.hitEntityId,
+    hitEntityType: pointHit?.entityType ?? entityHit.hitEntityType,
     worldPosition: getDrawingPlaneIntersection(raycaster, drawingPlane),
     drawingPlane,
     snapResult: null,

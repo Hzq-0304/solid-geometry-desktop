@@ -17,11 +17,21 @@ export class MovePointCommand implements Command {
   readonly name = "Move Point";
 
   private previousPoint: PointEntity | null = null;
+  private readonly previousPosition: Vec3 | null;
+  private readonly nextPosition: Vec3;
 
+  constructor(pointId: EntityId, nextPosition: Vec3);
+  constructor(pointId: EntityId, previousPosition: Vec3, nextPosition: Vec3);
   constructor(
     private readonly pointId: EntityId,
-    private readonly nextPosition: Vec3,
-  ) {}
+    previousPositionOrNextPosition: Vec3,
+    nextPosition?: Vec3,
+  ) {
+    this.previousPosition = nextPosition
+      ? cloneVec3(previousPositionOrNextPosition)
+      : null;
+    this.nextPosition = cloneVec3(nextPosition ?? previousPositionOrNextPosition);
+  }
 
   execute(document: BoardDocument): BoardDocument {
     const entity = document.entities[this.pointId];
@@ -54,13 +64,33 @@ export class MovePointCommand implements Command {
   }
 
   undo(document: BoardDocument): BoardDocument {
-    if (!this.previousPoint) {
+    if (!this.previousPoint && !this.previousPosition) {
+      return document;
+    }
+
+    const currentEntity = document.entities[this.pointId];
+
+    if (!currentEntity || currentEntity.kind !== "point") {
+      return document;
+    }
+
+    let restoredPoint: PointEntity;
+
+    if (this.previousPoint) {
+      restoredPoint = this.previousPoint;
+    } else if (this.previousPosition) {
+      restoredPoint = {
+        ...currentEntity,
+        position: cloneVec3(this.previousPosition),
+        updatedAt: new Date().toISOString(),
+      };
+    } else {
       return document;
     }
 
     const entities: Record<EntityId, BoardEntity> = {
       ...document.entities,
-      [this.previousPoint.id]: this.previousPoint,
+      [restoredPoint.id]: restoredPoint,
     };
 
     return touchDocument({

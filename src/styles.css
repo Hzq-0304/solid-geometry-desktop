@@ -135,6 +135,66 @@ input {
   background: #e8f0ff;
 }
 
+.split-tool-button {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  gap: 5px;
+}
+
+.split-tool-button .tool-button {
+  min-width: 0;
+}
+
+.split-tool-button .split-toggle {
+  justify-content: center;
+  padding: 0;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.point-tool-flyout {
+  position: fixed;
+  left: 168px;
+  top: 92px;
+  z-index: 30;
+  display: grid;
+  gap: 6px;
+  width: 132px;
+  padding: 8px;
+  border: 1px solid #d8dde6;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.16);
+}
+
+.angle-tool-flyout {
+  top: 186px;
+}
+
+.point-tool-flyout button {
+  min-height: 30px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: #536071;
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  text-align: left;
+}
+
+.point-tool-flyout button:hover {
+  border-color: #cfd6e2;
+  color: #1f2937;
+  background: #f0f3f8;
+}
+
+.point-tool-flyout button.active {
+  border-color: #a9c3f6;
+  color: #1f56b3;
+  background: #e8f0ff;
+}
+
 .solid-point-tool-icon {
   display: inline-grid;
   flex: 0 0 auto;
@@ -295,6 +355,10 @@ input {
   cursor: crosshair;
 }
 
+.scene-viewport.dragging-point canvas {
+  cursor: grabbing;
+}
+
 .geometry-overlay {
   position: absolute;
   inset: 0;
@@ -438,6 +502,127 @@ input {
   border-color: #a9c3f6;
   color: #1f56b3;
   background: #e8f0ff;
+}
+
+.coordinate-point-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.coordinate-point-form .form-error,
+.coordinate-point-form .form-hint {
+  width: 100%;
+}
+
+.form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.form-field span {
+  color: #374151;
+  font-size: 13px;
+}
+
+.form-field input {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  padding: 6px 8px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  color: #1f2937;
+  background: #ffffff;
+  font-size: 14px;
+  box-sizing: border-box;
+}
+
+.form-error,
+.form-hint {
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.form-error {
+  color: #b91c1c;
+}
+
+.form-hint {
+  color: #42625a;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  background: rgba(15, 23, 42, 0.18);
+}
+
+.coordinate-point-modal {
+  width: 380px;
+  max-width: calc(100vw - 48px);
+  padding: 20px;
+  border: 1px solid #d8dde6;
+  border-radius: 12px;
+  background: #ffffff;
+  box-sizing: border-box;
+  box-shadow: 0 20px 48px rgba(15, 23, 42, 0.22);
+}
+
+.coordinate-point-modal * {
+  box-sizing: border-box;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.coordinate-point-modal h2 {
+  margin: 0;
+  color: #18212f;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.modal-header button {
+  width: 30px;
+  height: 30px;
+  border: 1px solid #d8dde6;
+  border-radius: 7px;
+  color: #536071;
+  background: #ffffff;
+  cursor: pointer;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.modal-actions button {
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid #b9c4d3;
+  border-radius: 7px;
+  color: #1f2937;
+  background: #ffffff;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.modal-actions button:hover {
+  border-color: #91a4bd;
+  background: #f4f7fb;
 }
 
 .empty-state {

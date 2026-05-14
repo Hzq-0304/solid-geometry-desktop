@@ -50,7 +50,12 @@ interface SceneViewportProps {
   focusRequestId: number;
   onCanvasPointerDown(pointerInfo: PointerInfo): void;
   onCanvasPointerMove(pointerInfo: PointerInfo): void;
+  onSelectPointDragStart(pointerInfo: PointerInfo): void;
+  onSelectPointDragMove(pointerInfo: PointerInfo): void;
+  onSelectPointDragEnd(pointerInfo: PointerInfo): void;
+  onSelectPointDragCancel(): void;
   onOverlayEntityPointerDown(entityId: EntityId, additive: boolean): void;
+  isDraggingPoint: boolean;
 }
 
 const shouldShowPointLabel = (point: PointEntity): boolean =>
@@ -83,7 +88,12 @@ function SceneViewport({
   focusRequestId,
   onCanvasPointerDown,
   onCanvasPointerMove,
+  onSelectPointDragStart,
+  onSelectPointDragMove,
+  onSelectPointDragEnd,
+  onSelectPointDragCancel,
   onOverlayEntityPointerDown,
+  isDraggingPoint,
 }: SceneViewportProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
@@ -92,9 +102,14 @@ function SceneViewport({
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const focusRequestIdRef = useRef(focusRequestId);
   const documentRef = useRef(document);
+  const currentToolRef = useRef(currentTool);
   const highlightedPointIdsRef = useRef(highlightedPointIds);
   const onCanvasPointerDownRef = useRef(onCanvasPointerDown);
   const onCanvasPointerMoveRef = useRef(onCanvasPointerMove);
+  const onSelectPointDragStartRef = useRef(onSelectPointDragStart);
+  const onSelectPointDragMoveRef = useRef(onSelectPointDragMove);
+  const onSelectPointDragEndRef = useRef(onSelectPointDragEnd);
+  const onSelectPointDragCancelRef = useRef(onSelectPointDragCancel);
   const pointLabelsRef = useRef<readonly ProjectedPointLabel[]>([]);
   const [pointLabels, setPointLabels] = useState<readonly ProjectedPointLabel[]>(
     [],
@@ -103,6 +118,10 @@ function SceneViewport({
   useEffect(() => {
     documentRef.current = document;
   }, [document]);
+
+  useEffect(() => {
+    currentToolRef.current = currentTool;
+  }, [currentTool]);
 
   useEffect(() => {
     highlightedPointIdsRef.current = highlightedPointIds;
@@ -115,6 +134,22 @@ function SceneViewport({
   useEffect(() => {
     onCanvasPointerMoveRef.current = onCanvasPointerMove;
   }, [onCanvasPointerMove]);
+
+  useEffect(() => {
+    onSelectPointDragStartRef.current = onSelectPointDragStart;
+  }, [onSelectPointDragStart]);
+
+  useEffect(() => {
+    onSelectPointDragMoveRef.current = onSelectPointDragMove;
+  }, [onSelectPointDragMove]);
+
+  useEffect(() => {
+    onSelectPointDragEndRef.current = onSelectPointDragEnd;
+  }, [onSelectPointDragEnd]);
+
+  useEffect(() => {
+    onSelectPointDragCancelRef.current = onSelectPointDragCancel;
+  }, [onSelectPointDragCancel]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -139,6 +174,11 @@ function SceneViewport({
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
+    controls.rotateSpeed = 0.6;
+    controls.panSpeed = 0.6;
+    controls.zoomSpeed = 0.8;
+    controls.minDistance = 1;
+    controls.maxDistance = 200;
     controls.target.set(0, 0, 0);
     controlsRef.current = controls;
     focusCameraOnDrawingPlane(
@@ -171,12 +211,16 @@ function SceneViewport({
     resizeObserver.observe(host);
     resize();
 
-    const createPointerInfo = (event: PointerEvent): PointerInfo => {
+    const createPointerInfo = (
+      event: PointerEvent,
+      ignoredSnapEntityIds: readonly EntityId[] = [],
+    ): PointerInfo => {
       const pointerInfo = getPointerInfoFromEvent(
         event,
         renderer.domElement,
         camera,
         scene,
+        documentRef.current,
         documentRef.current.settings.activeDrawingPlane,
       );
 
@@ -194,6 +238,7 @@ function SceneViewport({
               ),
               camera,
               canvas: renderer.domElement,
+              ignoredEntityIds: ignoredSnapEntityIds,
             })
           : null,
       };
@@ -201,6 +246,15 @@ function SceneViewport({
 
     let pointerDownScreenPosition: ScreenPosition | null = null;
     let isDraggingView = false;
+    let selectPointDrag:
+      | {
+          pointerId: number;
+          pointId: EntityId;
+          startScreenPosition: ScreenPosition;
+          startPointerInfo: PointerInfo;
+          started: boolean;
+        }
+      | null = null;
 
     const handlePointerDown = (event: PointerEvent) => {
       if (event.button !== 0) {
@@ -212,9 +266,49 @@ function SceneViewport({
         renderer.domElement,
       );
       isDraggingView = false;
+
+      const pointerInfo = createPointerInfo(event);
+
+      if (
+        currentToolRef.current === "select" &&
+        pointerInfo.hitEntityId &&
+        pointerInfo.hitEntityType === "point"
+      ) {
+        selectPointDrag = {
+          pointerId: event.pointerId,
+          pointId: pointerInfo.hitEntityId,
+          startScreenPosition: pointerDownScreenPosition,
+          startPointerInfo: pointerInfo,
+          started: false,
+        };
+        controls.enabled = false;
+        renderer.domElement.setPointerCapture(event.pointerId);
+        onCanvasPointerDownRef.current(pointerInfo);
+      }
     };
 
     const handlePointerUp = (event: PointerEvent) => {
+      if (selectPointDrag && event.pointerId === selectPointDrag.pointerId) {
+        const currentDrag = selectPointDrag;
+
+        selectPointDrag = null;
+        pointerDownScreenPosition = null;
+        isDraggingView = false;
+        controls.enabled = true;
+
+        if (renderer.domElement.hasPointerCapture(event.pointerId)) {
+          renderer.domElement.releasePointerCapture(event.pointerId);
+        }
+
+        if (currentDrag.started) {
+          onSelectPointDragEndRef.current(
+            createPointerInfo(event, [currentDrag.pointId]),
+          );
+        }
+
+        return;
+      }
+
       if (event.button !== 0 || !pointerDownScreenPosition) {
         return;
       }
@@ -253,6 +347,7 @@ function SceneViewport({
         renderer.domElement,
         camera,
         scene,
+        documentRef.current,
         documentRef.current.settings.activeDrawingPlane,
       );
 
@@ -277,6 +372,36 @@ function SceneViewport({
     };
 
     const handlePointerMove = (event: PointerEvent) => {
+      if (selectPointDrag && event.pointerId === selectPointDrag.pointerId) {
+        if ((event.buttons & 1) !== 1) {
+          return;
+        }
+
+        const pointerScreenPosition = getPointerScreenPosition(
+          event,
+          renderer.domElement,
+        );
+        const moveDistance = distancePointToScreenPoint(
+          selectPointDrag.startScreenPosition,
+          pointerScreenPosition,
+        );
+
+        if (moveDistance >= CLICK_MOVE_THRESHOLD) {
+          const pointerInfo = createPointerInfo(event, [
+            selectPointDrag.pointId,
+          ]);
+
+          if (!selectPointDrag.started) {
+            selectPointDrag.started = true;
+            onSelectPointDragStartRef.current(selectPointDrag.startPointerInfo);
+          }
+
+          onSelectPointDragMoveRef.current(pointerInfo);
+        }
+
+        return;
+      }
+
       if (pointerDownScreenPosition && (event.buttons & 1) === 1) {
         const pointerScreenPosition = getPointerScreenPosition(
           event,
@@ -302,6 +427,10 @@ function SceneViewport({
     };
 
     const handlePointerLeave = () => {
+      if (selectPointDrag?.started) {
+        return;
+      }
+
       pointerDownScreenPosition = null;
       isDraggingView = false;
       latestPointerMoveEvent = null;
@@ -318,9 +447,36 @@ function SceneViewport({
     };
 
     const handlePointerCancel = () => {
+      if (selectPointDrag) {
+        if (renderer.domElement.hasPointerCapture(selectPointDrag.pointerId)) {
+          renderer.domElement.releasePointerCapture(selectPointDrag.pointerId);
+        }
+
+        selectPointDrag = null;
+        controls.enabled = true;
+        onSelectPointDragCancelRef.current();
+      }
+
       pointerDownScreenPosition = null;
       isDraggingView = false;
       latestPointerMoveEvent = null;
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || !selectPointDrag) {
+        return;
+      }
+
+      if (renderer.domElement.hasPointerCapture(selectPointDrag.pointerId)) {
+        renderer.domElement.releasePointerCapture(selectPointDrag.pointerId);
+      }
+
+      selectPointDrag = null;
+      pointerDownScreenPosition = null;
+      isDraggingView = false;
+      latestPointerMoveEvent = null;
+      controls.enabled = true;
+      onSelectPointDragCancelRef.current();
     };
 
     renderer.domElement.addEventListener("pointerdown", handlePointerDown);
@@ -328,6 +484,7 @@ function SceneViewport({
     renderer.domElement.addEventListener("pointermove", handlePointerMove);
     renderer.domElement.addEventListener("pointerleave", handlePointerLeave);
     renderer.domElement.addEventListener("pointercancel", handlePointerCancel);
+    window.addEventListener("keydown", handleKeyDown);
 
     let frameId = 0;
     const animate = () => {
@@ -379,6 +536,7 @@ function SceneViewport({
         "pointercancel",
         handlePointerCancel,
       );
+      window.removeEventListener("keydown", handleKeyDown);
       disposePreviewCursor(scene);
       disposeSegmentPreview(scene);
       disposeDrawingPlaneOverlay(scene);
@@ -471,9 +629,15 @@ function SceneViewport({
   return (
     <div
       className={
-        currentTool === "point" || currentTool === "segment"
-          ? "scene-viewport point-tool-active"
-          : "scene-viewport"
+        [
+          "scene-viewport",
+          currentTool === "point" || currentTool === "segment"
+            ? "point-tool-active"
+            : "",
+          isDraggingPoint ? "dragging-point" : "",
+        ]
+          .filter(Boolean)
+          .join(" ")
       }
       ref={hostRef}
     >

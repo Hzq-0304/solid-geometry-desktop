@@ -109,6 +109,59 @@ export const getAngleByPointIds = (
   return calculateAngleByThreePoints(pointA, vertexB, pointC);
 };
 
+export const calculateLinePlaneAngleByPoints = (
+  firstPoint: PointEntity,
+  secondPoint: PointEntity,
+): number | null => {
+  const dx = secondPoint.position.x - firstPoint.position.x;
+  const dy = secondPoint.position.y - firstPoint.position.y;
+  const dz = secondPoint.position.z - firstPoint.position.z;
+  const horizontalLength = Math.sqrt(dx * dx + dy * dy);
+
+  if (
+    horizontalLength <= Number.EPSILON &&
+    Math.abs(dz) <= Number.EPSILON
+  ) {
+    return null;
+  }
+
+  return (Math.atan2(Math.abs(dz), horizontalLength) * 180) / Math.PI;
+};
+
+export const getLinePlaneAngleBySegmentId = (
+  document: BoardDocument,
+  segmentId: EntityId,
+): number | null => {
+  const entity = document.entities[segmentId];
+
+  if (entity?.kind !== "segment") {
+    return null;
+  }
+
+  const [startPointId, endPointId] = entity.pointIds;
+  const startPoint = getPointFromDocument(document, startPointId);
+  const endPoint = getPointFromDocument(document, endPointId);
+
+  if (!startPoint || !endPoint) {
+    return null;
+  }
+
+  return calculateLinePlaneAngleByPoints(startPoint, endPoint);
+};
+
+export const getLinePlaneAngleByPointIds = (
+  document: BoardDocument,
+  firstPointId: EntityId,
+  secondPointId: EntityId,
+): number | null => {
+  const firstPoint = getPointFromDocument(document, firstPointId);
+  const secondPoint = getPointFromDocument(document, secondPointId);
+
+  return firstPoint && secondPoint
+    ? calculateLinePlaneAngleByPoints(firstPoint, secondPoint)
+    : null;
+};
+
 export interface MeasurementCalculationResult {
   readonly value: number;
   readonly unit: string;
@@ -206,6 +259,11 @@ const getAnglePrefix = (
     : null;
 };
 
+const getLinePlaneAnglePrefix = (
+  measurement: MeasurementEntity,
+  document: BoardDocument,
+): string | null => getLengthPrefix(measurement, document);
+
 export const calculateMeasurementValue = (
   measurement: MeasurementEntity,
   document: BoardDocument,
@@ -248,6 +306,25 @@ export const calculateMeasurementValue = (
         };
   }
 
+  if (measurement.measurementKind === "linePlaneAngle") {
+    const value =
+      targetIds.length === 1
+        ? getLinePlaneAngleBySegmentId(document, targetIds[0])
+        : targetIds.length === 2
+          ? getLinePlaneAngleByPointIds(document, targetIds[0], targetIds[1])
+          : null;
+    const prefix = getLinePlaneAnglePrefix(measurement, document) ?? "线段";
+    const plane = measurement.plane ?? "XY";
+
+    return value === null
+      ? null
+      : {
+          value,
+          unit: measurement.unit ?? "deg",
+          formattedText: `${prefix} 与 ${plane} 面 = ${value.toFixed(2)}°`,
+        };
+  }
+
   return null;
 };
 
@@ -283,6 +360,22 @@ export const formatMeasurementText = (
       valueText: calculation.value.toFixed(2),
       unitText,
       formattedText: `${prefix} = ${calculation.value.toFixed(2)}${unitText}`,
+      overlinePrefix: false,
+    };
+  }
+
+  if (measurement.measurementKind === "linePlaneAngle") {
+    const prefix = getLinePlaneAnglePrefix(measurement, document) ?? "线段";
+    const plane = measurement.plane ?? "XY";
+    const unitText = "\u00b0";
+
+    return {
+      prefix: `${prefix} 与 ${plane} 面`,
+      valueText: calculation.value.toFixed(2),
+      unitText,
+      formattedText: `${prefix} 与 ${plane} 面 = ${calculation.value.toFixed(
+        2,
+      )}${unitText}`,
       overlinePrefix: false,
     };
   }

@@ -59,6 +59,7 @@ export type MeasurementKind =
   | "length"
   | "distance"
   | "angle"
+  | "linePlaneAngle"
   | "area"
   | "volume";
 
@@ -74,6 +75,7 @@ export interface MeasurementEntity extends BaseEntity {
     readonly y: number;
     readonly z?: number;
   };
+  readonly plane?: "XY" | "XZ" | "YZ";
   readonly value?: number;
   readonly unit?: string;
 }
