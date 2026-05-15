@@ -67,6 +67,12 @@ import { isTauriEnvironment } from "./platform/platform";
 
 type PointCreationMode = "free" | "coordinate";
 type AngleMeasureMode = "threePoint" | "linePlane";
+type PreselectedEntityType = "point" | "segment" | "measurement";
+
+interface Preselection {
+  readonly entityId: EntityId;
+  readonly entityType: PreselectedEntityType;
+}
 
 interface ToolIconProps {
   readonly size?: string | number;
@@ -117,7 +123,7 @@ const drawingPlanes: readonly ActiveDrawingPlane[] = ["XY", "XZ", "YZ"];
 const TEST_POINT_A_ID = "debug-point-a";
 const TEST_POINT_B_ID = "debug-point-b";
 const TEST_SEGMENT_AB_ID = "debug-segment-ab";
-const DEFAULT_POINT_COLOR = "#2563eb";
+const DEFAULT_POINT_COLOR = "#111111";
 const MIN_DRAWING_PLANE_OPACITY = 0.04;
 const MAX_DRAWING_PLANE_OPACITY = 0.5;
 const DRAWING_PLANE_OPACITY_STEP = 0.06;
@@ -346,6 +352,43 @@ const getEntityDetail = (entity: BoardEntity, document: BoardDocument): string =
   }
 };
 
+const getSegmentDisplayName = (
+  document: BoardDocument,
+  segment: SegmentEntity,
+): string => {
+  const [startPointId, endPointId] = segment.pointIds;
+  const startName = getCompactPointNameById(document, startPointId);
+  const endName = getCompactPointNameById(document, endPointId);
+
+  return startName && endName ? `${startName}${endName}` : segment.name ?? segment.id;
+};
+
+const getPreselectionDescription = (
+  preselection: Preselection | null,
+  document: BoardDocument,
+): string | null => {
+  if (!preselection) {
+    return null;
+  }
+
+  const entity = document.entities[preselection.entityId];
+
+  if (!entity) {
+    return null;
+  }
+
+  switch (entity.kind) {
+    case "point":
+      return `point ${entity.name ?? entity.id}`;
+    case "segment":
+      return `segment ${getSegmentDisplayName(document, entity)}`;
+    case "measurement":
+      return `measurement ${entity.name ?? entity.id}`;
+    default:
+      return entity.kind;
+  }
+};
+
 const getSegmentToolStatus = (
   currentTool: ToolName,
   firstPointId: EntityId | null,
@@ -435,6 +478,7 @@ function App() {
     null,
   );
   const [lastSnapResult, setLastSnapResult] = useState<SnapResult | null>(null);
+  const [preselection, setPreselection] = useState<Preselection | null>(null);
   const [segmentFirstPointId, setSegmentFirstPointId] =
     useState<EntityId | null>(null);
   const [measureFirstPointId, setMeasureFirstPointId] =
@@ -482,6 +526,7 @@ function App() {
   >(null);
   const commandManagerRef = useRef<CommandManager | null>(null);
   const pointDragStateRef = useRef<PointDragState | null>(null);
+  const preselectionRef = useRef<Preselection | null>(null);
   const pointToolRef = useRef(new PointTool());
   const segmentToolRef = useRef(new SegmentTool());
   const measureLengthToolRef = useRef(new MeasureLengthTool());
@@ -493,6 +538,10 @@ function App() {
   }
 
   const commandManager = commandManagerRef.current;
+  const setCurrentPreselection = (nextPreselection: Preselection | null) => {
+    preselectionRef.current = nextPreselection;
+    setPreselection(nextPreselection);
+  };
   const displayDocument = dragPreviewDocument ?? document;
   const entities = Object.values(displayDocument.entities);
   const selectedEntities = displayDocument.selectedEntityIds
@@ -546,6 +595,10 @@ function App() {
           displayDocument.entities[draggedPointId],
         )}`
       : null;
+  const preselectionStatus = getPreselectionDescription(
+    preselection,
+    displayDocument,
+  );
   const highlightedPointIds = useMemo(() => {
     const pointIds: EntityId[] = [];
     const addPointId = (entityId: EntityId | null | undefined) => {
@@ -697,6 +750,7 @@ function App() {
     pointDragStateRef.current = null;
     setDragPreviewDocument(null);
     setDraggedPointId(null);
+    setCurrentPreselection(null);
   };
 
   const resetTransientToolState = () => {
@@ -711,6 +765,7 @@ function App() {
     setAngleStatusMessage(null);
     setLastPointerInfo(null);
     setLastSnapResult(null);
+    setCurrentPreselection(null);
   };
 
   const resetProjectDocument = (
@@ -1586,6 +1641,86 @@ function App() {
     );
   };
 
+  const getPointPreselection = (
+    pointerInfo: PointerInfo,
+    sourceDocument: BoardDocument,
+  ): Preselection | null => {
+    const entityId =
+      pointerInfo.hitEntityType === "point"
+        ? pointerInfo.hitEntityId
+        : pointerInfo.snapResult?.type === "point"
+          ? pointerInfo.snapResult.targetEntityId ?? null
+          : null;
+    const entity = entityId ? sourceDocument.entities[entityId] : null;
+
+    return entity?.kind === "point" && entity.visible
+      ? { entityId: entity.id, entityType: "point" }
+      : null;
+  };
+
+  const getSegmentPreselection = (
+    pointerInfo: PointerInfo,
+    sourceDocument: BoardDocument,
+  ): Preselection | null => {
+    const entityId =
+      pointerInfo.hitEntityType === "segment"
+        ? pointerInfo.hitEntityId
+        : pointerInfo.snapResult?.type === "segment"
+          ? pointerInfo.snapResult.targetEntityId ?? null
+          : null;
+    const entity = entityId ? sourceDocument.entities[entityId] : null;
+
+    return entity?.kind === "segment" && entity.visible
+      ? { entityId: entity.id, entityType: "segment" }
+      : null;
+  };
+
+  const getMeasurementPreselection = (
+    pointerInfo: PointerInfo,
+    sourceDocument: BoardDocument,
+  ): Preselection | null => {
+    const entity =
+      pointerInfo.hitEntityType === "measurement" && pointerInfo.hitEntityId
+        ? sourceDocument.entities[pointerInfo.hitEntityId]
+        : null;
+
+    return entity?.kind === "measurement" && entity.visible
+      ? { entityId: entity.id, entityType: "measurement" }
+      : null;
+  };
+
+  const getPointerPreselection = (
+    pointerInfo: PointerInfo,
+  ): Preselection | null => {
+    const sourceDocument = commandManager.getDocument();
+
+    if (pointDragStateRef.current) {
+      return null;
+    }
+
+    switch (currentTool) {
+      case "select":
+        return (
+          getPointPreselection(pointerInfo, sourceDocument) ??
+          getSegmentPreselection(pointerInfo, sourceDocument) ??
+          getMeasurementPreselection(pointerInfo, sourceDocument)
+        );
+      case "segment":
+        return getPointPreselection(pointerInfo, sourceDocument);
+      case "measureLength":
+        return (
+          getSegmentPreselection(pointerInfo, sourceDocument) ??
+          getPointPreselection(pointerInfo, sourceDocument)
+        );
+      case "measureAngle":
+        return angleMeasureMode === "linePlane"
+          ? getSegmentPreselection(pointerInfo, sourceDocument)
+          : getPointPreselection(pointerInfo, sourceDocument);
+      default:
+        return null;
+    }
+  };
+
   const handleSelectPointDragStart = (pointerInfo: PointerInfo) => {
     if (
       currentTool !== "select" ||
@@ -1606,6 +1741,7 @@ function App() {
       oldPosition: cloneVec3(entity.position),
       latestPosition: cloneVec3(entity.position),
     };
+    setCurrentPreselection(null);
     setDraggedPointId(entity.id);
     selectEntity(entity.id);
   };
@@ -1670,6 +1806,7 @@ function App() {
 
     setLastPointerInfo(nextPointerInfo);
     setLastSnapResult(snapResult);
+    setCurrentPreselection(getPointerPreselection(nextPointerInfo));
   };
 
   const handleCanvasPointerDown = (pointerInfo: PointerInfo) => {
@@ -1678,11 +1815,27 @@ function App() {
       ...pointerInfo,
       snapResult,
     };
+    const clickPreselection =
+      getPointerPreselection(nextPointerInfo) ?? preselectionRef.current;
 
     setLastPointerInfo(nextPointerInfo);
     setLastSnapResult(snapResult);
+    setCurrentPreselection(null);
 
     if (currentTool === "select") {
+      if (
+        clickPreselection &&
+        commandManager.getDocument().entities[clickPreselection.entityId]
+      ) {
+        if (nextPointerInfo.ctrlKey) {
+          toggleSelection(clickPreselection.entityId);
+        } else {
+          selectEntity(clickPreselection.entityId);
+        }
+
+        return;
+      }
+
       selectToolRef.current.onPointerDown(nextPointerInfo, createToolContext());
       return;
     }
@@ -1780,7 +1933,27 @@ function App() {
     selectEntity(entityId);
   };
 
+  const handleOverlayEntityPointerEnter = (entityId: EntityId) => {
+    if (currentTool !== "select" || pointDragStateRef.current) {
+      return;
+    }
+
+    const entity = commandManager.getDocument().entities[entityId];
+
+    if (entity?.kind === "measurement" && entity.visible) {
+      setCurrentPreselection({ entityId, entityType: "measurement" });
+    }
+  };
+
+  const handleOverlayEntityPointerLeave = (entityId: EntityId) => {
+    if (preselectionRef.current?.entityId === entityId) {
+      setCurrentPreselection(null);
+    }
+  };
+
   const changeTool = (nextTool: ToolName) => {
+    setCurrentPreselection(null);
+
     if (nextTool !== "point") {
       setShowPointToolPanel(false);
       setShowCoordinatePointModal(false);
@@ -1839,6 +2012,8 @@ function App() {
       if (event.key !== "Escape") {
         return;
       }
+
+      setCurrentPreselection(null);
 
       if (pointDragStateRef.current) {
         cancelPointDrag();
@@ -2192,6 +2367,7 @@ function App() {
           focusRequestId={focusRequestId}
           highlightedPointIds={highlightedPointIds}
           isDraggingPoint={draggedPointId !== null}
+          preselectedEntityId={preselection?.entityId ?? null}
           previewPosition={previewPosition}
           segmentPreviewStartPosition={segmentPreviewStartPosition}
           onCanvasPointerDown={handleCanvasPointerDown}
@@ -2201,6 +2377,8 @@ function App() {
           onSelectPointDragEnd={handleSelectPointDragEnd}
           onSelectPointDragCancel={cancelPointDrag}
           onOverlayEntityPointerDown={handleOverlayEntityPointerDown}
+          onOverlayEntityPointerEnter={handleOverlayEntityPointerEnter}
+          onOverlayEntityPointerLeave={handleOverlayEntityPointerLeave}
         />
       </section>
 
@@ -2548,6 +2726,7 @@ function App() {
         {measureAngleToolStatus ? <span>{measureAngleToolStatus}</span> : null}
         {deleteStatusMessage ? <span>{deleteStatusMessage}</span> : null}
         {coordinatePointStatus ? <span>{coordinatePointStatus}</span> : null}
+        {preselectionStatus ? <span>Preselect: {preselectionStatus}</span> : null}
         <span>Raw: {formatVec3(lastPointerInfo?.worldPosition)}</span>
         <span>Snap: {formatVec3(lastSnapResult?.position)}</span>
         <span>Target: {getSnapDescription(lastSnapResult)}</span>

@@ -13,7 +13,10 @@ export interface ProjectedPointLabel {
 interface GeometryOverlayProps {
   readonly document: BoardDocument;
   readonly pointLabels: readonly ProjectedPointLabel[];
+  readonly preselectedEntityId: EntityId | null;
   onMeasurementPointerDown(entityId: EntityId, additive: boolean): void;
+  onMeasurementPointerEnter(entityId: EntityId): void;
+  onMeasurementPointerLeave(entityId: EntityId): void;
 }
 
 const getMeasurements = (document: BoardDocument): readonly MeasurementEntity[] =>
@@ -25,7 +28,10 @@ const getMeasurements = (document: BoardDocument): readonly MeasurementEntity[] 
 function GeometryOverlay({
   document,
   pointLabels,
+  preselectedEntityId,
   onMeasurementPointerDown,
+  onMeasurementPointerEnter,
+  onMeasurementPointerLeave,
 }: GeometryOverlayProps) {
   const measurements = getMeasurements(document);
 
@@ -56,15 +62,21 @@ function GeometryOverlay({
           }
 
           const selected = document.selectedEntityIds.includes(measurement.id);
+          const preselected =
+            !selected && preselectedEntityId === measurement.id;
 
           return (
             <button
               className={
                 selected
                   ? "measurement-overlay-item selected"
+                  : preselected
+                    ? "measurement-overlay-item preselected"
                   : "measurement-overlay-item"
               }
               key={measurement.id}
+              onPointerEnter={() => onMeasurementPointerEnter(measurement.id)}
+              onPointerLeave={() => onMeasurementPointerLeave(measurement.id)}
               onPointerDown={(event) => {
                 event.stopPropagation();
                 onMeasurementPointerDown(measurement.id, event.ctrlKey);

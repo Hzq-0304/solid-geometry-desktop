@@ -20,7 +20,8 @@ import {
 } from "./materials";
 
 const POINT_PIXEL_SIZE = 8;
-const HIGHLIGHTED_POINT_PIXEL_SIZE = 11;
+const HOVERED_POINT_PIXEL_SIZE = 12;
+const HIGHLIGHTED_POINT_PIXEL_SIZE = 12;
 
 const findPointEntity = (
   document: BoardDocument,
@@ -340,15 +341,14 @@ export const createMeasurementObject = (
 export const createPointObject = (
   point: PointEntity,
   highlighted: boolean,
+  preselected: boolean,
 ): THREE.Points => {
   const canvas = globalThis.document.createElement("canvas");
   const context = canvas.getContext("2d");
   const size = 64;
   const center = size / 2;
   const fillColor = new THREE.Color(
-    highlighted
-      ? SELECTED_ENTITY_COLOR
-      : point.style?.color ?? DEFAULT_POINT_COLOR,
+    highlighted ? SELECTED_ENTITY_COLOR : DEFAULT_POINT_COLOR,
   ).getStyle();
 
   canvas.width = size;
@@ -357,7 +357,13 @@ export const createPointObject = (
   if (context) {
     context.clearRect(0, 0, size, size);
     context.beginPath();
-    context.arc(center, center, highlighted ? 22 : 23, 0, Math.PI * 2);
+    context.arc(
+      center,
+      center,
+      highlighted || preselected ? 22 : 23,
+      0,
+      Math.PI * 2,
+    );
     context.fillStyle = fillColor;
     context.fill();
 
@@ -377,7 +383,11 @@ export const createPointObject = (
 
   const material = new THREE.PointsMaterial({
     map: texture,
-    size: highlighted ? HIGHLIGHTED_POINT_PIXEL_SIZE : POINT_PIXEL_SIZE,
+    size: highlighted
+      ? HIGHLIGHTED_POINT_PIXEL_SIZE
+      : preselected
+        ? HOVERED_POINT_PIXEL_SIZE
+        : POINT_PIXEL_SIZE,
     sizeAttenuation: false,
     transparent: true,
     alphaTest: 0.45,
@@ -404,6 +414,7 @@ export const createPointObject = (
 export const createSegmentObject = (
   segment: SegmentEntity,
   document: BoardDocument,
+  preselected = false,
 ): Line2 | null => {
   const [startPointId, endPointId] = segment.pointIds;
   const startPoint = findPointEntity(document, startPointId);
@@ -425,6 +436,7 @@ export const createSegmentObject = (
   const material = createSegmentMaterial(
     segment.style?.color,
     document.selectedEntityIds.includes(segment.id),
+    preselected,
   );
   const line = new Line2(geometry, material);
   line.computeLineDistances();
@@ -438,6 +450,7 @@ export const createEntityObject = (
   entity: BoardEntity,
   document: BoardDocument,
   highlightedPointIds: readonly EntityId[] = [],
+  preselectedEntityId: EntityId | null = null,
 ): THREE.Object3D | null => {
   if (!entity.visible) {
     return null;
@@ -445,9 +458,19 @@ export const createEntityObject = (
 
   switch (entity.kind) {
     case "point":
-      return createPointObject(entity, highlightedPointIds.includes(entity.id));
+      return createPointObject(
+        entity,
+        highlightedPointIds.includes(entity.id),
+        preselectedEntityId === entity.id &&
+          !highlightedPointIds.includes(entity.id),
+      );
     case "segment":
-      return createSegmentObject(entity, document);
+      return createSegmentObject(
+        entity,
+        document,
+        preselectedEntityId === entity.id &&
+          !document.selectedEntityIds.includes(entity.id),
+      );
     case "measurement":
       return null;
     default:

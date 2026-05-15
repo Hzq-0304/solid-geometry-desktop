@@ -24,7 +24,7 @@ export class PointTool implements Tool {
     context.addPoint(snapResult.position, {
       id: createEntityId("point"),
       name: getNextPointName(context),
-      style: { color: "#2563eb" },
+      style: { color: "#111111" },
     });
   }
 }

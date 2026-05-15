@@ -1,6 +1,6 @@
 [package]
 name = "solid-geometry-desktop"
-version = "0.1.0"
+version = "0.0.4"
 description = "Solid geometry desktop workspace"
 authors = ["Solid Geometry Studio"]
 edition = "2021"

@@ -417,6 +417,7 @@ input {
 }
 
 .measurement-overlay-item:hover,
+.measurement-overlay-item.preselected,
 .measurement-overlay-item.selected {
   color: #2563eb;
   text-decoration: underline;

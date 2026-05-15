@@ -45,6 +45,7 @@ interface SceneViewportProps {
   document: BoardDocument;
   currentTool: ToolName;
   highlightedPointIds: readonly EntityId[];
+  preselectedEntityId: EntityId | null;
   previewPosition: Vec3 | null;
   segmentPreviewStartPosition: Vec3 | null;
   focusRequestId: number;
@@ -55,6 +56,8 @@ interface SceneViewportProps {
   onSelectPointDragEnd(pointerInfo: PointerInfo): void;
   onSelectPointDragCancel(): void;
   onOverlayEntityPointerDown(entityId: EntityId, additive: boolean): void;
+  onOverlayEntityPointerEnter(entityId: EntityId): void;
+  onOverlayEntityPointerLeave(entityId: EntityId): void;
   isDraggingPoint: boolean;
 }
 
@@ -83,6 +86,7 @@ function SceneViewport({
   document,
   currentTool,
   highlightedPointIds,
+  preselectedEntityId,
   previewPosition,
   segmentPreviewStartPosition,
   focusRequestId,
@@ -93,6 +97,8 @@ function SceneViewport({
   onSelectPointDragEnd,
   onSelectPointDragCancel,
   onOverlayEntityPointerDown,
+  onOverlayEntityPointerEnter,
+  onOverlayEntityPointerLeave,
   isDraggingPoint,
 }: SceneViewportProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -588,9 +594,14 @@ function SceneViewport({
       return;
     }
 
-    syncDocumentEntitiesToScene(sceneRef.current, document, highlightedPointIds);
+    syncDocumentEntitiesToScene(
+      sceneRef.current,
+      document,
+      highlightedPointIds,
+      preselectedEntityId,
+    );
     syncLineResolution();
-  }, [document, highlightedPointIds]);
+  }, [document, highlightedPointIds, preselectedEntityId]);
 
   useEffect(() => {
     if (!sceneRef.current) {
@@ -644,7 +655,10 @@ function SceneViewport({
       <GeometryOverlay
         document={document}
         pointLabels={pointLabels}
+        preselectedEntityId={preselectedEntityId}
         onMeasurementPointerDown={onOverlayEntityPointerDown}
+        onMeasurementPointerEnter={onOverlayEntityPointerEnter}
+        onMeasurementPointerLeave={onOverlayEntityPointerLeave}
       />
     </div>
   );

@@ -57,6 +57,7 @@ export const syncDocumentEntitiesToScene = (
   scene: THREE.Scene,
   document: BoardDocument,
   highlightedPointIds: readonly EntityId[] = [],
+  preselectedEntityId: EntityId | null = null,
 ): void => {
   const group = getEntityGroup(scene);
 
@@ -66,7 +67,12 @@ export const syncDocumentEntitiesToScene = (
   }
 
   Object.values(document.entities).forEach((entity) => {
-    const object = createEntityObject(entity, document, highlightedPointIds);
+    const object = createEntityObject(
+      entity,
+      document,
+      highlightedPointIds,
+      preselectedEntityId,
+    );
 
     if (object) {
       group.add(object);
