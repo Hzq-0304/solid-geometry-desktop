@@ -10,6 +10,9 @@ export const SEGMENT_LINE_WIDTH = 3;
 export const SELECTED_SEGMENT_LINE_WIDTH = 4.5;
 export const PRESELECTED_SEGMENT_LINE_WIDTH = 5;
 export const PREVIEW_SEGMENT_LINE_WIDTH = 2;
+export const PLANE_BOUNDARY_LINE_WIDTH = 2.2;
+export const SELECTED_PLANE_BOUNDARY_LINE_WIDTH = 4;
+export const PRESELECTED_PLANE_BOUNDARY_LINE_WIDTH = 3.4;
 
 export const createPointMaterial = (
   _color: THREE.ColorRepresentation = DEFAULT_POINT_COLOR,
@@ -52,6 +55,25 @@ export const createPreviewSegmentMaterial = (): LineMaterial =>
     worldUnits: false,
     transparent: true,
     opacity: 0.72,
+    depthTest: false,
+    depthWrite: false,
+  });
+
+export const createPlaneBoundaryMaterial = (
+  color: THREE.ColorRepresentation,
+  selected = false,
+  preselected = false,
+): LineMaterial =>
+  new LineMaterial({
+    color: selected || preselected ? SELECTED_ENTITY_COLOR : color,
+    linewidth: selected
+      ? SELECTED_PLANE_BOUNDARY_LINE_WIDTH
+      : preselected
+        ? PRESELECTED_PLANE_BOUNDARY_LINE_WIDTH
+        : PLANE_BOUNDARY_LINE_WIDTH,
+    worldUnits: false,
+    transparent: true,
+    opacity: selected || preselected ? 0.98 : 0.76,
     depthTest: false,
     depthWrite: false,
   });

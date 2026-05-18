@@ -14,12 +14,15 @@ export class PointTool implements Tool {
   readonly name = "point";
 
   onPointerDown(pointerInfo: PointerInfo, context: ToolContext): void {
-    if (!pointerInfo.worldPosition) {
+    const snapResult =
+      pointerInfo.snapResult ??
+      (pointerInfo.worldPosition
+        ? context.snapPosition(pointerInfo.worldPosition)
+        : null);
+
+    if (!snapResult) {
       return;
     }
-
-    const snapResult =
-      pointerInfo.snapResult ?? context.snapPosition(pointerInfo.worldPosition);
 
     context.addPoint(snapResult.position, {
       id: createEntityId("point"),

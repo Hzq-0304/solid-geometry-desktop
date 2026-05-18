@@ -6,6 +6,7 @@ import type {
   BoardEntity,
   EntityId,
   EntityStyle,
+  PlaneEntity,
   PointEntity,
   SegmentEntity,
 } from "../document/EntityTypes";
@@ -22,6 +23,7 @@ export interface AddPointOptions {
 export interface ToolContext {
   addPoint(position: Vec3, options?: AddPointOptions): void;
   addSegment(startPointId: EntityId, endPointId: EntityId): void;
+  addPlane(pointAId: EntityId, pointBId: EntityId, pointCId: EntityId): void;
   addLengthMeasurement(targetIds: readonly EntityId[]): void;
   addAngleMeasurement(
     pointAId: EntityId,
@@ -38,6 +40,7 @@ export interface ToolContext {
   getEntity(entityId: EntityId): BoardEntity | null;
   getPoint(entityId: EntityId): PointEntity | null;
   getSegment(entityId: EntityId): SegmentEntity | null;
+  getPlane(entityId: EntityId): PlaneEntity | null;
   getDocument(): BoardDocument;
   getActiveDrawingPlane(): ActiveDrawingPlane;
   snapPosition(position: Vec3): SnapResult;

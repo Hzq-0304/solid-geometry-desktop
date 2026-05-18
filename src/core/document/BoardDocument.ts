@@ -10,6 +10,7 @@ export interface BoardSettings {
   readonly snapToGrid: boolean;
   readonly snapToPoints: boolean;
   readonly snapToSegments: boolean;
+  readonly snapToPlanes: boolean;
   readonly snapToOrigin: boolean;
   readonly snapToAxes: boolean;
   readonly snapDistance: number;

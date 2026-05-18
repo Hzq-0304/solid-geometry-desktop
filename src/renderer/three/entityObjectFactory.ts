@@ -6,6 +6,7 @@ import type {
   BoardEntity,
   EntityId,
   MeasurementEntity,
+  PlaneEntity,
   PointEntity,
   SegmentEntity,
 } from "../../core/document/EntityTypes";
@@ -14,6 +15,14 @@ import {
   type MeasurementTextFormat,
 } from "../../core/geometry/measurementUtils";
 import {
+  getPlaneExtensionPatch,
+  getPlaneFromThreePoints,
+  getPlanePoints,
+  getPlaneStyle,
+  type PlaneExtensionPatch,
+} from "../../core/geometry/planeUtils";
+import {
+  createPlaneBoundaryMaterial,
   createSegmentMaterial,
   DEFAULT_POINT_COLOR,
   SELECTED_ENTITY_COLOR,
@@ -22,6 +31,9 @@ import {
 const POINT_PIXEL_SIZE = 8;
 const HOVERED_POINT_PIXEL_SIZE = 12;
 const HIGHLIGHTED_POINT_PIXEL_SIZE = 12;
+const PLANE_EXTENSION_RENDER_ORDER = 1;
+const PLANE_TRIANGLE_RENDER_ORDER = 2;
+const SEGMENT_RENDER_ORDER = 4;
 
 const findPointEntity = (
   document: BoardDocument,
@@ -440,10 +452,166 @@ export const createSegmentObject = (
   );
   const line = new Line2(geometry, material);
   line.computeLineDistances();
+  line.renderOrder = SEGMENT_RENDER_ORDER;
 
   applyEntityUserData(line, segment);
 
   return line;
+};
+
+const createPlaneTriangleGeometry = (
+  positions: readonly [PointEntity, PointEntity, PointEntity],
+): THREE.BufferGeometry => {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute(
+    "position",
+    new THREE.Float32BufferAttribute(
+      positions.flatMap((point) => [
+        point.position.x,
+        point.position.y,
+        point.position.z,
+      ]),
+      3,
+    ),
+  );
+  geometry.setIndex([0, 1, 2]);
+  geometry.computeVertexNormals();
+
+  return geometry;
+};
+
+const createPlaneExtensionGeometry = (
+  positions: PlaneExtensionPatch["vertices"],
+): THREE.BufferGeometry => {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute(
+    "position",
+    new THREE.Float32BufferAttribute(
+      positions.flatMap((position) => [position.x, position.y, position.z]),
+      3,
+    ),
+  );
+  geometry.setIndex([0, 1, 2, 0, 2, 3]);
+  geometry.computeVertexNormals();
+
+  return geometry;
+};
+
+const createPlaneBoundaryObject = (
+  plane: PlaneEntity,
+  points: readonly [PointEntity, PointEntity, PointEntity],
+  selected: boolean,
+  preselected: boolean,
+  color: string,
+): Line2 => {
+  const geometry = new LineGeometry();
+  geometry.setPositions([
+    points[0].position.x,
+    points[0].position.y,
+    points[0].position.z,
+    points[1].position.x,
+    points[1].position.y,
+    points[1].position.z,
+    points[2].position.x,
+    points[2].position.y,
+    points[2].position.z,
+    points[0].position.x,
+    points[0].position.y,
+    points[0].position.z,
+  ]);
+  const boundary = new Line2(
+    geometry,
+    createPlaneBoundaryMaterial(color, selected, preselected),
+  );
+  boundary.computeLineDistances();
+  boundary.renderOrder = SEGMENT_RENDER_ORDER + 1;
+  applyEntityUserData(boundary, plane);
+
+  return boundary;
+};
+
+export const createPlaneObject = (
+  plane: PlaneEntity,
+  document: BoardDocument,
+  preselected = false,
+): THREE.Group | null => {
+  const points = getPlanePoints(document, plane.pointIds);
+
+  if (!points) {
+    return null;
+  }
+
+  if (
+    !getPlaneFromThreePoints(
+      points[0].position,
+      points[1].position,
+      points[2].position,
+    )
+  ) {
+    return null;
+  }
+
+  const selected = document.selectedEntityIds.includes(plane.id);
+  const style = getPlaneStyle(plane);
+  const group = new THREE.Group();
+  const showExtension =
+    style.showExtensionWhenSelected !== false && (selected || preselected);
+  const extensionPatch = showExtension
+    ? getPlaneExtensionPatch(
+        points[0].position,
+        points[1].position,
+        points[2].position,
+      )
+    : null;
+
+  if (extensionPatch) {
+    const extensionMaterial = new THREE.MeshBasicMaterial({
+      color: style.extensionColor,
+      opacity: style.extensionOpacity,
+      transparent: true,
+      side: THREE.DoubleSide,
+      depthTest: true,
+      depthWrite: false,
+    });
+    const extensionMesh = new THREE.Mesh(
+      createPlaneExtensionGeometry(extensionPatch.vertices),
+      extensionMaterial,
+    );
+
+    extensionMesh.renderOrder = PLANE_EXTENSION_RENDER_ORDER;
+    extensionMesh.userData.ignorePicking = true;
+    group.add(extensionMesh);
+  }
+
+  const triangleOpacity = Math.min(1, Math.max(0.02, style.triangleOpacity));
+  const triangleMaterial = new THREE.MeshBasicMaterial({
+    color: selected || preselected ? SELECTED_ENTITY_COLOR : style.triangleColor,
+    opacity: selected || preselected ? Math.max(triangleOpacity, 0.92) : triangleOpacity,
+    transparent: triangleOpacity < 1 || selected || preselected,
+    side: THREE.DoubleSide,
+    depthTest: true,
+    depthWrite: false,
+  });
+  const triangleMesh = new THREE.Mesh(
+    createPlaneTriangleGeometry(points),
+    triangleMaterial,
+  );
+
+  triangleMesh.renderOrder = PLANE_TRIANGLE_RENDER_ORDER;
+  applyEntityUserData(triangleMesh, plane);
+  group.add(triangleMesh);
+  group.add(
+    createPlaneBoundaryObject(
+      plane,
+      points,
+      selected,
+      preselected,
+      selected || preselected ? SELECTED_ENTITY_COLOR : style.triangleColor,
+    ),
+  );
+  applyEntityUserData(group, plane);
+
+  return group;
 };
 
 export const createEntityObject = (
@@ -466,6 +634,13 @@ export const createEntityObject = (
       );
     case "segment":
       return createSegmentObject(
+        entity,
+        document,
+        preselectedEntityId === entity.id &&
+          !document.selectedEntityIds.includes(entity.id),
+      );
+    case "plane":
+      return createPlaneObject(
         entity,
         document,
         preselectedEntityId === entity.id &&

@@ -5,6 +5,7 @@ import type { PointerInfo, Tool } from "./ToolTypes";
 const SELECTABLE_ENTITY_KINDS = new Set<EntityKind>([
   "point",
   "segment",
+  "plane",
   "measurement",
   "polygon",
   "solid",

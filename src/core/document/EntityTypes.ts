@@ -5,6 +5,7 @@ export type EntityId = string;
 export type EntityKind =
   | "point"
   | "segment"
+  | "plane"
   | "polygon"
   | "solid"
   | "label"
@@ -36,6 +37,21 @@ export interface SegmentEntity extends BaseEntity {
   readonly pointIds: readonly [EntityId, EntityId];
 }
 
+export interface PlaneEntityStyle extends EntityStyle {
+  readonly triangleColor?: string;
+  readonly triangleOpacity?: number;
+  readonly extensionColor?: string;
+  readonly extensionOpacity?: number;
+  readonly showExtensionWhenSelected?: boolean;
+}
+
+export interface PlaneEntity extends BaseEntity {
+  readonly kind: "plane";
+  readonly type: "plane";
+  readonly pointIds: readonly [EntityId, EntityId, EntityId];
+  readonly style?: PlaneEntityStyle;
+}
+
 export interface PolygonEntity extends BaseEntity {
   readonly kind: "polygon";
   readonly pointIds: readonly [EntityId, EntityId, EntityId, ...EntityId[]];
@@ -60,6 +76,7 @@ export type MeasurementKind =
   | "distance"
   | "angle"
   | "linePlaneAngle"
+  | "planePlaneAngle"
   | "area"
   | "volume";
 
@@ -83,6 +100,7 @@ export interface MeasurementEntity extends BaseEntity {
 export type BoardEntity =
   | PointEntity
   | SegmentEntity
+  | PlaneEntity
   | PolygonEntity
   | SolidEntity
   | LabelEntity

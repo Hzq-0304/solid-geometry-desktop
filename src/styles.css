@@ -172,6 +172,29 @@ input {
   top: 186px;
 }
 
+.angle-line-plane-flyout {
+  left: 308px;
+  top: 228px;
+  width: 150px;
+}
+
+.angle-plane-plane-flyout {
+  left: 308px;
+  top: 264px;
+  width: 160px;
+}
+
+.angle-subtool-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 30px;
+  gap: 5px;
+}
+
+.angle-subtool-row button:last-child {
+  text-align: center;
+  font-weight: 700;
+}
+
 .point-tool-flyout button {
   min-height: 30px;
   border: 1px solid transparent;
@@ -206,6 +229,25 @@ input {
   height: 8px;
   border-radius: 999px;
   background: currentColor;
+}
+
+.solid-plane-tool-icon {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+}
+
+.solid-plane-tool-icon span {
+  width: 13px;
+  height: 10px;
+  border: 1.5px solid currentColor;
+  background: color-mix(in srgb, currentColor 24%, transparent);
+  transform: skewX(-18deg) rotate(-6deg);
+}
+
+.plane-tool-flyout {
+  top: 134px;
+  width: 144px;
 }
 
 .viewport-panel {

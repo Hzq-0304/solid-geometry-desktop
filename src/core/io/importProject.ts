@@ -1,8 +1,10 @@
 import type { BoardDocument } from "../document/BoardDocument";
+import type { BoardEntity, PlaneEntity } from "../document/EntityTypes";
 import {
   createDefaultBoardSettings,
   createDefaultCameraState,
 } from "../document/createEmptyDocument";
+import { DEFAULT_PLANE_STYLE } from "../geometry/planeUtils";
 import { PROJECT_FILE_VERSION, type ProjectFile } from "./projectFile";
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
@@ -19,6 +21,53 @@ const assertBoardDocument = (value: unknown): BoardDocument => {
 
   return value as unknown as BoardDocument;
 };
+
+const normalizeEntity = (entity: BoardEntity): BoardEntity => {
+  const rawEntity = entity as unknown as Record<string, unknown>;
+  const kind = rawEntity.kind ?? rawEntity.type;
+
+  if (
+    kind === "measurement" &&
+    (rawEntity.measurementKind === "linePlaneAngle" ||
+      rawEntity.measurementKind === "planePlaneAngle") &&
+    Array.isArray(rawEntity.targetIds) &&
+    rawEntity.targetIds.length === 1 &&
+    rawEntity.plane === undefined
+  ) {
+    return {
+      ...entity,
+      plane: "XY",
+    } as BoardEntity;
+  }
+
+  if (kind !== "plane") {
+    return entity;
+  }
+
+  const plane = rawEntity as unknown as PlaneEntity;
+
+  return {
+    ...plane,
+    kind: "plane",
+    type: "plane",
+    visible: plane.visible ?? true,
+    locked: plane.locked ?? false,
+    style: {
+      ...DEFAULT_PLANE_STYLE,
+      ...plane.style,
+    },
+  };
+};
+
+const normalizeEntities = (
+  entities: BoardDocument["entities"],
+): BoardDocument["entities"] =>
+  Object.fromEntries(
+    Object.entries(entities).map(([entityId, entity]) => [
+      entityId,
+      normalizeEntity(entity),
+    ]),
+  );
 
 export const importProject = (jsonText: string): BoardDocument => {
   let parsed: unknown;
@@ -55,6 +104,7 @@ export const importProject = (jsonText: string): BoardDocument => {
       ...(isObject(document.cameraState) ? document.cameraState : {}),
     },
     selectedEntityIds: [],
+    entities: normalizeEntities(document.entities),
     updatedAt: timestamp,
   };
 };

@@ -22,10 +22,20 @@ const DEFAULT_POINT_PICK_PIXEL_RADIUS = 12;
 const PICKABLE_ENTITY_TYPES = new Set<EntityKind>([
   "point",
   "segment",
+  "plane",
   "polygon",
   "solid",
   "measurement",
 ]);
+
+const ENTITY_PICK_PRIORITY: Partial<Record<EntityKind, number>> = {
+  point: 0,
+  segment: 1,
+  plane: 2,
+  measurement: 3,
+  polygon: 4,
+  solid: 5,
+};
 
 export const getPointerNdc = (
   event: PointerEvent,
@@ -87,6 +97,15 @@ const findEntityObject = (object: THREE.Object3D): THREE.Object3D | null => {
 const getEntityHit = (
   intersections: THREE.Intersection[],
 ): Pick<PointerInfo, "hitEntityId" | "hitEntityType"> => {
+  let bestHit:
+    | {
+        readonly entityId: EntityId;
+        readonly entityType: EntityKind;
+        readonly priority: number;
+        readonly intersectionIndex: number;
+      }
+    | null = null;
+
   for (const intersection of intersections) {
     const entityObject = findEntityObject(intersection.object);
     const entityType = entityObject?.userData.entityType as EntityKind | undefined;
@@ -97,17 +116,34 @@ const getEntityHit = (
       entityType !== "point" &&
       PICKABLE_ENTITY_TYPES.has(entityType)
     ) {
-      return {
-        hitEntityId: entityObject.userData.entityId,
-        hitEntityType: entityType,
-      };
+      const priority = ENTITY_PICK_PRIORITY[entityType] ?? 99;
+      const intersectionIndex = intersections.indexOf(intersection);
+
+      if (
+        !bestHit ||
+        priority < bestHit.priority ||
+        (priority === bestHit.priority &&
+          intersectionIndex < bestHit.intersectionIndex)
+      ) {
+        bestHit = {
+          entityId: entityObject.userData.entityId,
+          entityType,
+          priority,
+          intersectionIndex,
+        };
+      }
     }
   }
 
-  return {
-    hitEntityId: null,
-    hitEntityType: null,
-  };
+  return bestHit
+    ? {
+        hitEntityId: bestHit.entityId,
+        hitEntityType: bestHit.entityType,
+      }
+    : {
+        hitEntityId: null,
+        hitEntityType: null,
+      };
 };
 
 export interface ScreenPointPickResult {
@@ -181,6 +217,7 @@ export const getPointerInfoFromEvent = (
   scene: THREE.Scene,
   document: BoardDocument,
   drawingPlane: ActiveDrawingPlane,
+  ignoredEntityIds: readonly EntityId[] = [],
 ): PointerInfo => {
   const ndc = getPointerNdc(event, element);
   const raycaster = new THREE.Raycaster();
@@ -195,6 +232,7 @@ export const getPointerInfoFromEvent = (
     document,
     camera,
     element,
+    { ignoredEntityIds },
   );
   const intersections = raycaster.intersectObjects(scene.children, true);
   const entityHit = getEntityHit(intersections);

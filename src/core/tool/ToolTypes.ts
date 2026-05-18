@@ -8,6 +8,7 @@ export type ToolName =
   | "select"
   | "point"
   | "segment"
+  | "plane"
   | "move"
   | "measureLength"
   | "measureAngle";

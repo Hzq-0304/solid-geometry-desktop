@@ -19,6 +19,7 @@ export const createDefaultBoardSettings = (): BoardSettings => ({
   snapToGrid: true,
   snapToPoints: true,
   snapToSegments: true,
+  snapToPlanes: true,
   snapToOrigin: true,
   snapToAxes: true,
   snapDistance: 0.12,

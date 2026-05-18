@@ -397,17 +397,6 @@ export const getSnapResult = (
     }
   }
 
-  if (document.settings.snapToAxes && document.settings.snapToGrid) {
-    const axisGridPointSnap = getNearestAxisGridPointSnap(
-      planePosition,
-      document,
-    );
-
-    if (axisGridPointSnap) {
-      return axisGridPointSnap;
-    }
-  }
-
   if (document.settings.snapToSegments) {
     const segmentSnap = getNearestSegmentSnap(
       planePosition,
@@ -425,6 +414,17 @@ export const getSnapResult = (
 
     if (axisSnap) {
       return axisSnap;
+    }
+  }
+
+  if (document.settings.snapToAxes && document.settings.snapToGrid) {
+    const axisGridPointSnap = getNearestAxisGridPointSnap(
+      planePosition,
+      document,
+    );
+
+    if (axisGridPointSnap) {
+      return axisGridPointSnap;
     }
   }
 

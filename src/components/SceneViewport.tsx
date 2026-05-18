@@ -228,6 +228,7 @@ function SceneViewport({
         scene,
         documentRef.current,
         documentRef.current.settings.activeDrawingPlane,
+        ignoredSnapEntityIds,
       );
 
       return {
@@ -245,6 +246,10 @@ function SceneViewport({
               camera,
               canvas: renderer.domElement,
               ignoredEntityIds: ignoredSnapEntityIds,
+              planeSnapEntityId:
+                pointerInfo.hitEntityType === "plane"
+                  ? pointerInfo.hitEntityId
+                  : null,
             })
           : null,
       };
@@ -371,6 +376,10 @@ function SceneViewport({
               ),
               camera,
               canvas: renderer.domElement,
+              planeSnapEntityId:
+                pointerInfo.hitEntityType === "plane"
+                  ? pointerInfo.hitEntityId
+                  : null,
             })
           : null,
       });
@@ -642,7 +651,9 @@ function SceneViewport({
       className={
         [
           "scene-viewport",
-          currentTool === "point" || currentTool === "segment"
+          currentTool === "point" ||
+          currentTool === "segment" ||
+          currentTool === "plane"
             ? "point-tool-active"
             : "",
           isDraggingPoint ? "dragging-point" : "",

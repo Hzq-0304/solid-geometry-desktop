@@ -5,6 +5,7 @@ import type {
 } from "../../core/document/BoardDocument";
 import type {
   EntityId,
+  PlaneEntity,
   PointEntity,
   SegmentEntity,
 } from "../../core/document/EntityTypes";
@@ -12,6 +13,10 @@ import {
   createVec3,
   snapNumberToGrid,
 } from "../../core/geometry/geometryUtils";
+import {
+  getPlaneFromThreePoints,
+  getPlanePoints,
+} from "../../core/geometry/planeUtils";
 import type { Vec3 } from "../../core/geometry/Vec3";
 import type { SnapResult } from "../../core/snap/SnapTypes";
 import type { ScreenPosition } from "./screenSpaceUtils";
@@ -30,6 +35,7 @@ interface ScreenSpaceSnapContext {
   readonly camera: THREE.Camera;
   readonly canvas: HTMLCanvasElement;
   readonly ignoredEntityIds?: readonly EntityId[];
+  readonly planeSnapEntityId?: EntityId | null;
 }
 
 interface PointCandidate {
@@ -57,12 +63,15 @@ const SCREEN_DISTANCE_TIE_THRESHOLD = 3;
 const SNAP_PRIORITIES = {
   point: 0,
   origin: 1,
-  axisGridPoint: 2,
-  segment: 3,
-  axis: 4,
-  grid: 5,
-  plane: 6,
+  segment: 2,
+  axis: 3,
+  axisGridPoint: 4,
+  entityPlane: 5,
+  grid: 6,
+  drawingPlane: 7,
 } as const;
+
+const MAX_PLANE_SNAP_COORDINATE = 10000;
 
 type ScreenSpaceSnapCandidate = SnapResult & {
   readonly screenDistance: number;
@@ -261,6 +270,26 @@ const getPointName = (point: PointEntity): string => point.name ?? point.id;
 
 const getSegmentName = (segment: SegmentEntity): string =>
   segment.name ?? segment.id;
+
+const getPlaneName = (plane: PlaneEntity, document: BoardDocument): string => {
+  if (plane.name?.trim()) {
+    return plane.name.trim();
+  }
+
+  const points = getPlanePoints(document, plane.pointIds);
+
+  return points
+    ? points.map((point) => point.name ?? point.id).join("")
+    : plane.id;
+};
+
+const isFiniteSnapPosition = (position: Vec3): boolean =>
+  Number.isFinite(position.x) &&
+  Number.isFinite(position.y) &&
+  Number.isFinite(position.z) &&
+  Math.abs(position.x) <= MAX_PLANE_SNAP_COORDINATE &&
+  Math.abs(position.y) <= MAX_PLANE_SNAP_COORDINATE &&
+  Math.abs(position.z) <= MAX_PLANE_SNAP_COORDINATE;
 
 const getNearestPointSnap = (
   context: ScreenSpaceSnapContext,
@@ -625,8 +654,81 @@ const getPlaneSnap = (
     type: "plane",
     description: "plane raw position",
     screenDistance: 0,
-    priority: SNAP_PRIORITIES.plane,
+    priority: SNAP_PRIORITIES.drawingPlane,
   });
+
+const getEntityPlaneSnap = (
+  context: ScreenSpaceSnapContext,
+): ScreenSpaceSnapCandidate | null => {
+  if (
+    !context.document.settings.snapToPlanes ||
+    !context.planeSnapEntityId ||
+    context.ignoredEntityIds?.includes(context.planeSnapEntityId)
+  ) {
+    return null;
+  }
+
+  const entity = context.document.entities[context.planeSnapEntityId];
+
+  if (entity?.kind !== "plane" || !entity.visible) {
+    return null;
+  }
+
+  if (
+    entity.pointIds.some((pointId) => context.ignoredEntityIds?.includes(pointId))
+  ) {
+    return null;
+  }
+
+  const points = getPlanePoints(context.document, entity.pointIds);
+
+  if (!points) {
+    return null;
+  }
+
+  const planeEquation = getPlaneFromThreePoints(
+    points[0].position,
+    points[1].position,
+    points[2].position,
+  );
+
+  if (!planeEquation) {
+    return null;
+  }
+
+  const intersection = new THREE.Vector3();
+  const hasIntersection = getPointerRay(context).intersectPlane(
+    new THREE.Plane(
+      new THREE.Vector3(
+        planeEquation.normal.x,
+        planeEquation.normal.y,
+        planeEquation.normal.z,
+      ),
+      planeEquation.d,
+    ),
+    intersection,
+  );
+
+  if (!hasIntersection) {
+    return null;
+  }
+
+  const position = fromThreeVector(intersection);
+
+  if (!isFiniteSnapPosition(position)) {
+    return null;
+  }
+
+  return createCandidate(context, {
+    position,
+    type: "plane",
+    targetEntityId: entity.id,
+    targetEntityType: "plane",
+    description: `plane ${getPlaneName(entity, context.document)}`,
+    screenDistance: 0,
+    priority: SNAP_PRIORITIES.entityPlane,
+  });
+};
 
 export const getScreenSpaceSnapResult = (
   context: ScreenSpaceSnapContext,
@@ -686,6 +788,12 @@ export const getScreenSpaceSnapResult = (
     if (axisSnap) {
       candidates.push(axisSnap);
     }
+  }
+
+  const entityPlaneSnap = getEntityPlaneSnap(context);
+
+  if (entityPlaneSnap) {
+    candidates.push(entityPlaneSnap);
   }
 
   if (context.document.settings.snapToGrid) {
