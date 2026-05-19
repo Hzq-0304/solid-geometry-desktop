@@ -2,12 +2,18 @@ import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import type { BoardDocument } from "../core/document/BoardDocument";
-import type { EntityId, PointEntity } from "../core/document/EntityTypes";
+import type {
+  EntityId,
+  PlaneEntity,
+  PointEntity,
+  SegmentEntity,
+} from "../core/document/EntityTypes";
 import type { PointerInfo, ToolName } from "../core/tool/ToolTypes";
 import type { Vec3 } from "../core/geometry/Vec3";
 import GeometryOverlay, {
-  type ProjectedPointLabel,
+  type ProjectedObjectLabel,
 } from "./GeometryOverlay";
+import { getPlanePoints } from "../core/geometry/planeUtils";
 import {
   createAxesWithLabels,
   disposeAxesWithLabels,
@@ -61,12 +67,55 @@ interface SceneViewportProps {
   isDraggingPoint: boolean;
 }
 
-const shouldShowPointLabel = (point: PointEntity): boolean =>
-  point.visible && point.nameSource === "manual" && Boolean(point.name?.trim());
+const getPointLabelName = (point: PointEntity | null): string | null => {
+  if (point?.nameSource !== "manual") {
+    return null;
+  }
 
-const arePointLabelsEqual = (
-  first: readonly ProjectedPointLabel[],
-  second: readonly ProjectedPointLabel[],
+  return point.name?.trim() || null;
+};
+
+const shouldShowPointLabel = (point: PointEntity): boolean =>
+  point.visible && Boolean(getPointLabelName(point));
+
+const getPointEntity = (
+  document: BoardDocument,
+  pointId: EntityId,
+): PointEntity | null => {
+  const entity = document.entities[pointId];
+
+  return entity?.kind === "point" ? entity : null;
+};
+
+const getSegmentLabelName = (
+  segment: SegmentEntity,
+): string | null => {
+  if (segment.nameSource !== "manual") {
+    return null;
+  }
+
+  const name = segment.name?.trim();
+
+  if (name) {
+    return name;
+  }
+
+  return null;
+};
+
+const getPlaneLabelName = (
+  plane: PlaneEntity,
+): string | null => {
+  if (plane.nameSource === "manual" && plane.name?.trim()) {
+    return plane.name.trim();
+  }
+
+  return null;
+};
+
+const areObjectLabelsEqual = (
+  first: readonly ProjectedObjectLabel[],
+  second: readonly ProjectedObjectLabel[],
 ): boolean =>
   first.length === second.length &&
   first.every((label, index) => {
@@ -77,6 +126,8 @@ const arePointLabelsEqual = (
       label.id === other.id &&
       label.name === other.name &&
       label.selected === other.selected &&
+      label.offsetX === other.offsetX &&
+      label.offsetY === other.offsetY &&
       Math.abs(label.x - other.x) < 0.5 &&
       Math.abs(label.y - other.y) < 0.5
     );
@@ -116,10 +167,11 @@ function SceneViewport({
   const onSelectPointDragMoveRef = useRef(onSelectPointDragMove);
   const onSelectPointDragEndRef = useRef(onSelectPointDragEnd);
   const onSelectPointDragCancelRef = useRef(onSelectPointDragCancel);
-  const pointLabelsRef = useRef<readonly ProjectedPointLabel[]>([]);
-  const [pointLabels, setPointLabels] = useState<readonly ProjectedPointLabel[]>(
-    [],
-  );
+  const preselectedEntityIdRef = useRef(preselectedEntityId);
+  const objectLabelsRef = useRef<readonly ProjectedObjectLabel[]>([]);
+  const [objectLabels, setObjectLabels] = useState<
+    readonly ProjectedObjectLabel[]
+  >([]);
 
   useEffect(() => {
     documentRef.current = document;
@@ -132,6 +184,10 @@ function SceneViewport({
   useEffect(() => {
     highlightedPointIdsRef.current = highlightedPointIds;
   }, [highlightedPointIds]);
+
+  useEffect(() => {
+    preselectedEntityIdRef.current = preselectedEntityId;
+  }, [preselectedEntityId]);
 
   useEffect(() => {
     onCanvasPointerDownRef.current = onCanvasPointerDown;
@@ -505,32 +561,136 @@ function SceneViewport({
     const animate = () => {
       controls.update();
 
-      const nextPointLabels = Object.values(documentRef.current.entities)
-        .filter((entity): entity is PointEntity =>
-          entity.kind === "point" && shouldShowPointLabel(entity),
-        )
-        .map((point) => {
-          const screenPosition = worldPositionToScreenPosition(
-            point.position,
-            camera,
-            renderer.domElement,
-          );
+      const currentDocument = documentRef.current;
+      const selectedEntityIds = currentDocument.selectedEntityIds;
+      const preselectedId = preselectedEntityIdRef.current;
+      const nextObjectLabels = Object.values(currentDocument.entities)
+        .flatMap((entity): (ProjectedObjectLabel | null)[] => {
+          if (entity.kind === "point") {
+            if (!shouldShowPointLabel(entity)) {
+              return [];
+            }
 
-          return screenPosition
-            ? {
-                id: point.id,
-                name: point.name?.trim() ?? "",
-                x: screenPosition.x,
-                y: screenPosition.y,
-                selected: highlightedPointIdsRef.current.includes(point.id),
-              }
-            : null;
+            const labelName = getPointLabelName(entity);
+            const screenPosition = worldPositionToScreenPosition(
+              entity.position,
+              camera,
+              renderer.domElement,
+            );
+
+            return screenPosition && labelName
+              ? [
+                  {
+                    id: entity.id,
+                    name: labelName,
+                    x: screenPosition.x,
+                    y: screenPosition.y,
+                    offsetX: 7,
+                    offsetY: -10,
+                    selected:
+                      highlightedPointIdsRef.current.includes(entity.id) ||
+                      selectedEntityIds.includes(entity.id) ||
+                      preselectedId === entity.id,
+                  },
+                ]
+              : [];
+          }
+
+          if (entity.kind === "segment" && entity.visible) {
+            const labelName = getSegmentLabelName(entity);
+            const startPoint = getPointEntity(
+              currentDocument,
+              entity.pointIds[0],
+            );
+            const endPoint = getPointEntity(currentDocument, entity.pointIds[1]);
+
+            if (!labelName || !startPoint || !endPoint) {
+              return [];
+            }
+
+            const midpoint: Vec3 = {
+              x: (startPoint.position.x + endPoint.position.x) / 2,
+              y: (startPoint.position.y + endPoint.position.y) / 2,
+              z: (startPoint.position.z + endPoint.position.z) / 2,
+            };
+            const screenPosition = worldPositionToScreenPosition(
+              midpoint,
+              camera,
+              renderer.domElement,
+            );
+
+            return screenPosition
+              ? [
+                  {
+                    id: entity.id,
+                    name: labelName,
+                    x: screenPosition.x,
+                    y: screenPosition.y,
+                    offsetX: 8,
+                    offsetY: -12,
+                    selected:
+                      selectedEntityIds.includes(entity.id) ||
+                      preselectedId === entity.id,
+                  },
+                ]
+              : [];
+          }
+
+          if (entity.kind === "plane" && (entity.visible ?? true)) {
+            const labelName = getPlaneLabelName(entity);
+            const points = getPlanePoints(currentDocument, entity.pointIds);
+
+            if (!labelName || !points) {
+              return [];
+            }
+
+            const centroid: Vec3 = {
+              x:
+                (points[0].position.x +
+                  points[1].position.x +
+                  points[2].position.x) /
+                3,
+              y:
+                (points[0].position.y +
+                  points[1].position.y +
+                  points[2].position.y) /
+                3,
+              z:
+                (points[0].position.z +
+                  points[1].position.z +
+                  points[2].position.z) /
+                3,
+            };
+            const screenPosition = worldPositionToScreenPosition(
+              centroid,
+              camera,
+              renderer.domElement,
+            );
+
+            return screenPosition
+              ? [
+                  {
+                    id: entity.id,
+                    name: labelName,
+                    x: screenPosition.x,
+                    y: screenPosition.y,
+                    offsetX: 10,
+                    offsetY: -14,
+                    selected:
+                      selectedEntityIds.includes(entity.id) ||
+                      preselectedId === entity.id,
+                  },
+                ]
+              : [];
+          }
+
+          return [];
         })
-        .filter((label): label is ProjectedPointLabel => Boolean(label));
+        .filter((label): label is ProjectedObjectLabel => Boolean(label));
 
-      if (!arePointLabelsEqual(pointLabelsRef.current, nextPointLabels)) {
-        pointLabelsRef.current = nextPointLabels;
-        setPointLabels(nextPointLabels);
+      if (!areObjectLabelsEqual(objectLabelsRef.current, nextObjectLabels)) {
+        objectLabelsRef.current = nextObjectLabels;
+        setObjectLabels(nextObjectLabels);
       }
 
       renderer.render(scene, camera);
@@ -665,7 +825,7 @@ function SceneViewport({
     >
       <GeometryOverlay
         document={document}
-        pointLabels={pointLabels}
+        objectLabels={objectLabels}
         preselectedEntityId={preselectedEntityId}
         onMeasurementPointerDown={onOverlayEntityPointerDown}
         onMeasurementPointerEnter={onOverlayEntityPointerEnter}

@@ -332,6 +332,10 @@ const getLengthPrefix = (
       return null;
     }
 
+    if (target.name?.trim()) {
+      return target.name.trim();
+    }
+
     const [startPointId, endPointId] = target.pointIds;
     const startName = getCompactPointName(
       getPointFromDocument(document, startPointId),
@@ -391,6 +395,10 @@ const getSegmentPrefixById = (
     return null;
   }
 
+  if (segment.name?.trim()) {
+    return segment.name.trim();
+  }
+
   const [startPointId, endPointId] = segment.pointIds;
   const startName = getCompactPointName(
     getPointFromDocument(document, startPointId),
@@ -399,7 +407,7 @@ const getSegmentPrefixById = (
     getPointFromDocument(document, endPointId),
   );
 
-  return startName && endName ? `${startName}${endName}` : segment.name ?? null;
+  return startName && endName ? `${startName}${endName}` : null;
 };
 
 const getPlaneDisplayNameById = (
@@ -412,14 +420,16 @@ const getPlaneDisplayNameById = (
     return null;
   }
 
-  if (plane.name?.trim()) {
+  if (plane.nameSource === "manual" && plane.name?.trim()) {
     return plane.name.trim();
   }
 
   const points = getPlanePoints(document, plane.pointIds);
   const pointNames = points?.map((point) => getCompactPointName(point));
 
-  return pointNames?.every(Boolean) ? pointNames.join("") : plane.id;
+  return pointNames?.every(Boolean)
+    ? pointNames.join("")
+    : plane.name?.trim() || plane.id;
 };
 
 const getLinePlaneAngleTextParts = (

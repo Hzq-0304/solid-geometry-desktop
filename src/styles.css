@@ -409,27 +409,30 @@ input {
   overflow: hidden;
 }
 
-.point-label-layer {
+.object-label-layer {
   position: absolute;
   inset: 0;
   pointer-events: none;
 }
 
-.point-name-label {
+.geometry-object-label {
   position: absolute;
   left: 0;
   top: 0;
-  color: #2563eb;
-  font: 400 12px Arial, Helvetica, sans-serif;
+  color: #111111;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  font: 500 14px Arial, Helvetica, sans-serif;
   line-height: 1;
   white-space: nowrap;
   pointer-events: none;
   user-select: none;
 }
 
-.point-name-label.selected {
-  color: #1d4ed8;
-  font-weight: 500;
+.geometry-object-label.selected {
+  color: #000000;
+  font-weight: 650;
 }
 
 .measurement-list {
@@ -449,22 +452,26 @@ input {
   padding: 0;
   border: 0;
   border-radius: 0;
-  color: #111827;
+  color: #111111;
   background: transparent;
   box-shadow: none;
   cursor: pointer;
-  font: 400 13px Arial, Helvetica, sans-serif;
-  line-height: 1.2;
+  font: 500 16px Arial, Helvetica, sans-serif;
+  line-height: 1.35;
   pointer-events: auto;
 }
 
 .measurement-overlay-item:hover,
 .measurement-overlay-item.preselected,
 .measurement-overlay-item.selected {
-  color: #2563eb;
+  color: #111111;
   text-decoration: underline;
   text-decoration-style: dotted;
   text-underline-offset: 3px;
+}
+
+.measurement-overlay-item.selected {
+  font-weight: 650;
 }
 
 .segment-name-overline {
@@ -517,6 +524,34 @@ input {
   border-radius: 7px;
   color: #1f2937;
   background: #ffffff;
+}
+
+.greek-letter-keyboard {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.greek-letter-keyboard.compact {
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+}
+
+.greek-letter-keyboard button {
+  min-width: 0;
+  min-height: 26px;
+  padding: 0 4px;
+  border: 1px solid #d8dde6;
+  border-radius: 6px;
+  color: #111111;
+  background: #ffffff;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.greek-letter-keyboard button:hover {
+  border-color: #b9c4d3;
+  background: #f0f3f8;
 }
 
 .setting-button-grid {

@@ -10,6 +10,7 @@ import {
   MousePointer2,
   Ruler,
 } from "lucide-react";
+import GreekLetterKeyboard from "./components/GreekLetterKeyboard";
 import SceneViewport from "./components/SceneViewport";
 import { AddMeasurementCommand } from "./core/command/AddMeasurementCommand";
 import { AddPlaneCommand } from "./core/command/AddPlaneCommand";
@@ -202,6 +203,7 @@ const createSegmentEntity = (
     visible: true,
     locked: false,
     pointIds: [startPointId, endPointId],
+    nameSource: "auto",
     createdAt: timestamp,
     updatedAt: timestamp,
   };
@@ -224,6 +226,7 @@ const createPlaneEntity = (
     visible: true,
     locked: false,
     pointIds: [pointAId, pointBId, pointCId],
+    nameSource: "auto",
     style: {
       triangleColor: "#cbd5e1",
       triangleOpacity: 1,
@@ -404,13 +407,17 @@ const getPlaneDisplayName = (
   document: BoardDocument,
   plane: PlaneEntity,
 ): string => {
+  if (plane.nameSource === "manual" && plane.name?.trim()) {
+    return plane.name.trim();
+  }
+
   const pointNames = plane.pointIds.map((pointId) =>
     getCompactPointNameById(document, pointId),
   );
 
   return pointNames.every(Boolean)
     ? pointNames.join("")
-    : plane.name ?? plane.id;
+    : plane.name?.trim() || plane.id;
 };
 
 const getPlaneStatusText = (
@@ -477,12 +484,27 @@ const getSegmentDisplayName = (
   document: BoardDocument,
   segment: SegmentEntity,
 ): string => {
+  if (segment.nameSource === "manual" && segment.name?.trim()) {
+    return segment.name.trim();
+  }
+
   const [startPointId, endPointId] = segment.pointIds;
   const startName = getCompactPointNameById(document, startPointId);
   const endName = getCompactPointNameById(document, endPointId);
 
-  return startName && endName ? `${startName}${endName}` : segment.name ?? segment.id;
+  return startName && endName ? `${startName}${endName}` : segment.id;
 };
+
+const isNameableEntity = (
+  entity: BoardEntity | null,
+): entity is PointEntity | SegmentEntity | PlaneEntity =>
+  entity?.kind === "point" ||
+  entity?.kind === "segment" ||
+  entity?.kind === "plane";
+
+const getManualNameDraft = (
+  entity: PointEntity | SegmentEntity | PlaneEntity,
+): string => (entity.nameSource === "manual" ? entity.name?.trim() ?? "" : "");
 
 const getPreselectionDescription = (
   preselection: Preselection | null,
@@ -672,6 +694,7 @@ function App() {
     null,
   );
   const [batchNameStart, setBatchNameStart] = useState("A");
+  const [draftName, setDraftName] = useState("");
   const [currentFilePath, setCurrentFilePath] = useState<string | null>(null);
   const [isDirty, setIsDirty] = useState(false);
   const [fileStatusMessage, setFileStatusMessage] = useState<string | null>(
@@ -738,6 +761,9 @@ function App() {
   const selectedPointCount = selectedPointEntities.length;
   const singleSelectedEntity =
     selectedEntityCount === 1 ? selectedEntities[0] : null;
+  const selectedNameableEntity = isNameableEntity(singleSelectedEntity)
+    ? singleSelectedEntity
+    : null;
   const hasPointA = Boolean(displayDocument.entities[TEST_POINT_A_ID]);
   const hasPointB = Boolean(displayDocument.entities[TEST_POINT_B_ID]);
   const hasSegmentAB = Boolean(displayDocument.entities[TEST_SEGMENT_AB_ID]);
@@ -758,6 +784,20 @@ function App() {
     displayDocument.entities[segmentFirstPointId]?.kind === "point"
       ? displayDocument.entities[segmentFirstPointId].position
       : null;
+
+  useEffect(() => {
+    if (!selectedNameableEntity) {
+      setDraftName("");
+      return;
+    }
+
+    setDraftName(getManualNameDraft(selectedNameableEntity));
+  }, [
+    selectedNameableEntity?.id,
+    selectedNameableEntity?.kind,
+    selectedNameableEntity?.name,
+    selectedNameableEntity?.nameSource,
+  ]);
   const segmentToolStatus = getSegmentToolStatus(
     currentTool,
     segmentFirstPointId,
@@ -1225,21 +1265,32 @@ function App() {
     executeCommand(new UpdateEntityCommand(entityId, patch));
   };
 
-  const renamePoint = (point: PointEntity, nextName: string) => {
-    const trimmedName = nextName.trim();
-
-    if (!trimmedName) {
-      return false;
+  const commitDraftName = () => {
+    if (!selectedNameableEntity) {
+      return;
     }
 
-    if (trimmedName !== point.name || point.nameSource !== "manual") {
-      updateEntity(point.id, {
-        name: trimmedName,
-        nameSource: "manual",
-      });
+    const trimmedName = draftName.trim();
+    const nextPatch = trimmedName
+      ? {
+          name: trimmedName,
+          nameSource: "manual" as const,
+        }
+      : {
+          name: "",
+          nameSource: "auto" as const,
+        };
+    const currentName = selectedNameableEntity.name?.trim() ?? "";
+    const currentNameSource = selectedNameableEntity.nameSource ?? "auto";
+    const hasChanged = trimmedName
+      ? currentName !== trimmedName || currentNameSource !== "manual"
+      : currentName !== "" || currentNameSource !== "auto";
+
+    if (hasChanged) {
+      updateEntity(selectedNameableEntity.id, nextPatch);
     }
 
-    return true;
+    setDraftName(trimmedName);
   };
 
   const renameSelectedPoints = () => {
@@ -3337,31 +3388,36 @@ function App() {
         {selectedEntityCount > 0 ? (
           <section className="property-group selection-actions">
             <h3>Selection</h3>
-            {singleSelectedEntity?.kind === "point" ? (
-              <label>
-                Name
-                <input
-                  defaultValue={singleSelectedEntity.name ?? ""}
-                  key={singleSelectedEntity.id}
-                  onBlur={(event) => {
-                    if (
-                      !renamePoint(
-                        singleSelectedEntity,
-                        event.currentTarget.value,
+            {selectedNameableEntity ? (
+              <div className="batch-naming name-editor">
+                <label>
+                  Name
+                  <input
+                    value={draftName}
+                    onChange={(event) => setDraftName(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        commitDraftName();
+                      }
+                    }}
+                  />
+                </label>
+                {selectedNameableEntity.kind === "plane" ? (
+                  <GreekLetterKeyboard
+                    compact
+                    onInsert={(letter) =>
+                      setDraftName((currentDraftName) =>
+                        `${currentDraftName}${letter}`,
                       )
-                    ) {
-                      event.currentTarget.value = singleSelectedEntity.name ?? "";
                     }
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      event.preventDefault();
-                      event.stopPropagation();
-                      event.currentTarget.blur();
-                    }
-                  }}
-                />
-              </label>
+                  />
+                ) : null}
+                <button onClick={commitDraftName} type="button">
+                  {"\u547d\u540d"}
+                </button>
+              </div>
             ) : null}
             {selectedPointCount > 1 ? (
               <div className="batch-naming">
@@ -3388,7 +3444,10 @@ function App() {
             {singleSelectedEntity?.kind === "plane" ? (
               <div className="batch-naming">
                 <span>类型：平面</span>
-                <span>名称：{singleSelectedEntity.name ?? singleSelectedEntity.id}</span>
+                <span>
+                  名称：
+                  {getPlaneDisplayName(displayDocument, singleSelectedEntity)}
+                </span>
                 <span>
                   由三点确定：
                   {singleSelectedEntity.pointIds

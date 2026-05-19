@@ -145,9 +145,23 @@ const createAxisGridPoint = (
   }
 };
 
+const getDrawingPlaneAxisNames = (
+  activeDrawingPlane: ActiveDrawingPlane,
+): ReadonlyArray<"X" | "Y" | "Z"> => {
+  switch (activeDrawingPlane) {
+    case "XY":
+      return ["X", "Y"];
+    case "XZ":
+      return ["X", "Z"];
+    case "YZ":
+      return ["Y", "Z"];
+  }
+};
+
 const getNearestAxisGridPointSnap = (
   rawPosition: Vec3,
   document: BoardDocument,
+  activeDrawingPlane: ActiveDrawingPlane,
 ): SnapResult | null => {
   const gridSize = Math.max(document.settings.gridSize, 0.01);
   const scanLength = 10;
@@ -155,7 +169,7 @@ const getNearestAxisGridPointSnap = (
   const maxIndex = Math.floor(scanLength / gridSize);
   let nearestCandidate: AxisGridPointSnapCandidate | null = null;
 
-  for (const axisName of ["X", "Y", "Z"] as const) {
+  for (const axisName of getDrawingPlaneAxisNames(activeDrawingPlane)) {
     for (let index = minIndex; index <= maxIndex; index += 1) {
       const value = index * gridSize;
 
@@ -397,6 +411,18 @@ export const getSnapResult = (
     }
   }
 
+  if (document.settings.snapToAxes && document.settings.snapToGrid) {
+    const axisGridPointSnap = getNearestAxisGridPointSnap(
+      planePosition,
+      document,
+      activeDrawingPlane,
+    );
+
+    if (axisGridPointSnap) {
+      return axisGridPointSnap;
+    }
+  }
+
   if (document.settings.snapToSegments) {
     const segmentSnap = getNearestSegmentSnap(
       planePosition,
@@ -414,17 +440,6 @@ export const getSnapResult = (
 
     if (axisSnap) {
       return axisSnap;
-    }
-  }
-
-  if (document.settings.snapToAxes && document.settings.snapToGrid) {
-    const axisGridPointSnap = getNearestAxisGridPointSnap(
-      planePosition,
-      document,
-    );
-
-    if (axisGridPointSnap) {
-      return axisGridPointSnap;
     }
   }
 

@@ -2,17 +2,19 @@ import type { BoardDocument } from "../core/document/BoardDocument";
 import type { EntityId, MeasurementEntity } from "../core/document/EntityTypes";
 import { formatMeasurementText } from "../core/geometry/measurementUtils";
 
-export interface ProjectedPointLabel {
+export interface ProjectedObjectLabel {
   readonly id: EntityId;
   readonly name: string;
   readonly x: number;
   readonly y: number;
+  readonly offsetX: number;
+  readonly offsetY: number;
   readonly selected: boolean;
 }
 
 interface GeometryOverlayProps {
   readonly document: BoardDocument;
-  readonly pointLabels: readonly ProjectedPointLabel[];
+  readonly objectLabels: readonly ProjectedObjectLabel[];
   readonly preselectedEntityId: EntityId | null;
   onMeasurementPointerDown(entityId: EntityId, additive: boolean): void;
   onMeasurementPointerEnter(entityId: EntityId): void;
@@ -27,7 +29,7 @@ const getMeasurements = (document: BoardDocument): readonly MeasurementEntity[] 
 
 function GeometryOverlay({
   document,
-  pointLabels,
+  objectLabels,
   preselectedEntityId,
   onMeasurementPointerDown,
   onMeasurementPointerEnter,
@@ -37,15 +39,19 @@ function GeometryOverlay({
 
   return (
     <div className="geometry-overlay" aria-hidden={false}>
-      <div className="point-label-layer" aria-hidden="true">
-        {pointLabels.map((label) => (
+      <div className="object-label-layer" aria-hidden="true">
+        {objectLabels.map((label) => (
           <span
             className={
-              label.selected ? "point-name-label selected" : "point-name-label"
+              label.selected
+                ? "geometry-object-label selected"
+                : "geometry-object-label"
             }
             key={label.id}
             style={{
-              transform: `translate(${label.x + 7}px, ${label.y - 10}px)`,
+              transform: `translate(${label.x + label.offsetX}px, ${
+                label.y + label.offsetY
+              }px)`,
             }}
           >
             {label.name}

@@ -35,6 +35,7 @@ export interface PointEntity extends BaseEntity {
 export interface SegmentEntity extends BaseEntity {
   readonly kind: "segment";
   readonly pointIds: readonly [EntityId, EntityId];
+  readonly nameSource?: "auto" | "manual";
 }
 
 export interface PlaneEntityStyle extends EntityStyle {
@@ -49,6 +50,7 @@ export interface PlaneEntity extends BaseEntity {
   readonly kind: "plane";
   readonly type: "plane";
   readonly pointIds: readonly [EntityId, EntityId, EntityId];
+  readonly nameSource?: "auto" | "manual";
   readonly style?: PlaneEntityStyle;
 }
 

@@ -28,7 +28,7 @@ export const createDefaultBoardSettings = (): BoardSettings => ({
   segmentSnapPixelRadius: 10,
   axisSnapPixelRadius: 8,
   originSnapPixelRadius: 8,
-  axisGridPointSnapPixelRadius: 7,
+  axisGridPointSnapPixelRadius: 10,
   gridSnapPixelRadius: 8,
   forceGridSnap: false,
   gridSize: 1,

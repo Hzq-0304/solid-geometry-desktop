@@ -63,9 +63,9 @@ const SCREEN_DISTANCE_TIE_THRESHOLD = 3;
 const SNAP_PRIORITIES = {
   point: 0,
   origin: 1,
-  segment: 2,
-  axis: 3,
-  axisGridPoint: 4,
+  axisGridPoint: 2,
+  segment: 3,
+  axis: 4,
   entityPlane: 5,
   grid: 6,
   drawingPlane: 7,
@@ -272,7 +272,7 @@ const getSegmentName = (segment: SegmentEntity): string =>
   segment.name ?? segment.id;
 
 const getPlaneName = (plane: PlaneEntity, document: BoardDocument): string => {
-  if (plane.name?.trim()) {
+  if (plane.nameSource === "manual" && plane.name?.trim()) {
     return plane.name.trim();
   }
 
@@ -280,7 +280,7 @@ const getPlaneName = (plane: PlaneEntity, document: BoardDocument): string => {
 
   return points
     ? points.map((point) => point.name ?? point.id).join("")
-    : plane.id;
+    : plane.name?.trim() || plane.id;
 };
 
 const isFiniteSnapPosition = (position: Vec3): boolean =>
@@ -464,6 +464,19 @@ const createAxisGridPoint = (
   }
 };
 
+const getDrawingPlaneAxisNames = (
+  activeDrawingPlane: ActiveDrawingPlane,
+): ReadonlyArray<"X" | "Y" | "Z"> => {
+  switch (activeDrawingPlane) {
+    case "XY":
+      return ["X", "Y"];
+    case "XZ":
+      return ["X", "Z"];
+    case "YZ":
+      return ["Y", "Z"];
+  }
+};
+
 const getAxisGridPointSnap = (
   context: ScreenSpaceSnapContext,
 ): ScreenSpaceSnapCandidate | null => {
@@ -473,7 +486,7 @@ const getAxisGridPointSnap = (
   const maxIndex = Math.floor(halfLength / gridSize);
   let nearestCandidate: AxisGridPointCandidate | null = null;
 
-  for (const axisName of ["X", "Y", "Z"] as const) {
+  for (const axisName of getDrawingPlaneAxisNames(context.activeDrawingPlane)) {
     for (let index = minIndex; index <= maxIndex; index += 1) {
       const value = index * gridSize;
 

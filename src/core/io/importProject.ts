@@ -1,5 +1,9 @@
 import type { BoardDocument } from "../document/BoardDocument";
-import type { BoardEntity, PlaneEntity } from "../document/EntityTypes";
+import type {
+  BoardEntity,
+  PlaneEntity,
+  SegmentEntity,
+} from "../document/EntityTypes";
 import {
   createDefaultBoardSettings,
   createDefaultCameraState,
@@ -22,7 +26,52 @@ const assertBoardDocument = (value: unknown): BoardDocument => {
   return value as unknown as BoardDocument;
 };
 
-const normalizeEntity = (entity: BoardEntity): BoardEntity => {
+const getImportedPlaneNameSource = (
+  plane: PlaneEntity,
+  entities: BoardDocument["entities"],
+): "auto" | "manual" => {
+  if (plane.nameSource) {
+    return plane.nameSource;
+  }
+
+  const pointNames = plane.pointIds.map((pointId) => {
+    const point = entities[pointId];
+
+    return point?.kind === "point" ? point.name ?? point.id : null;
+  });
+
+  return plane.name?.trim() &&
+    pointNames.every(Boolean) &&
+    plane.name.trim() !== pointNames.join("")
+    ? "manual"
+    : "auto";
+};
+
+const getImportedSegmentNameSource = (
+  segment: SegmentEntity,
+  entities: BoardDocument["entities"],
+): "auto" | "manual" => {
+  if (segment.nameSource) {
+    return segment.nameSource;
+  }
+
+  const pointNames = segment.pointIds.map((pointId) => {
+    const point = entities[pointId];
+
+    return point?.kind === "point" ? point.name ?? point.id : null;
+  });
+
+  return segment.name?.trim() &&
+    pointNames.every(Boolean) &&
+    segment.name.trim() !== pointNames.join("")
+    ? "manual"
+    : "auto";
+};
+
+const normalizeEntity = (
+  entity: BoardEntity,
+  entities: BoardDocument["entities"],
+): BoardEntity => {
   const rawEntity = entity as unknown as Record<string, unknown>;
   const kind = rawEntity.kind ?? rawEntity.type;
 
@@ -40,6 +89,18 @@ const normalizeEntity = (entity: BoardEntity): BoardEntity => {
     } as BoardEntity;
   }
 
+  if (kind === "segment") {
+    const segment = rawEntity as unknown as SegmentEntity;
+
+    return {
+      ...segment,
+      kind: "segment",
+      visible: segment.visible ?? true,
+      locked: segment.locked ?? false,
+      nameSource: getImportedSegmentNameSource(segment, entities),
+    };
+  }
+
   if (kind !== "plane") {
     return entity;
   }
@@ -52,6 +113,7 @@ const normalizeEntity = (entity: BoardEntity): BoardEntity => {
     type: "plane",
     visible: plane.visible ?? true,
     locked: plane.locked ?? false,
+    nameSource: getImportedPlaneNameSource(plane, entities),
     style: {
       ...DEFAULT_PLANE_STYLE,
       ...plane.style,
@@ -65,7 +127,7 @@ const normalizeEntities = (
   Object.fromEntries(
     Object.entries(entities).map(([entityId, entity]) => [
       entityId,
-      normalizeEntity(entity),
+      normalizeEntity(entity, entities),
     ]),
   );
 
