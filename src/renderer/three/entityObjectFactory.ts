@@ -5,7 +5,10 @@ import type { BoardDocument } from "../../core/document/BoardDocument";
 import type {
   BoardEntity,
   EntityId,
+  ExtensionEntity,
+  LinePlanePerpendicularEntity,
   MeasurementEntity,
+  PerpendicularLineEntity,
   PlaneEntity,
   PointEntity,
   SegmentEntity,
@@ -17,10 +20,24 @@ import {
 import {
   getPlaneExtensionPatch,
   getPlaneFromThreePoints,
-  getPlanePoints,
   getPlaneStyle,
   type PlaneExtensionPatch,
 } from "../../core/geometry/planeUtils";
+import {
+  projectPointToLine,
+} from "../../core/geometry/geometryUtils";
+import {
+  calculatePlaneBoundaryExtension,
+  calculateSegmentBoundaryExtension,
+} from "../../core/geometry/extensionUtils";
+import {
+  calculateLinePlanePerpendicular,
+} from "../../core/geometry/linePlanePerpendicularUtils";
+import {
+  getPlaneWorldPositions,
+  getPointWorldPosition,
+  getSegmentWorldPositions,
+} from "../../core/geometry/pointPositionUtils";
 import {
   createPlaneBoundaryMaterial,
   createSegmentMaterial,
@@ -34,6 +51,13 @@ const HIGHLIGHTED_POINT_PIXEL_SIZE = 12;
 const PLANE_EXTENSION_RENDER_ORDER = 1;
 const PLANE_TRIANGLE_RENDER_ORDER = 2;
 const SEGMENT_RENDER_ORDER = 4;
+const PERPENDICULAR_RENDER_ORDER = 5;
+const LINE_PLANE_EXTENSION_RENDER_ORDER = 3;
+const LINE_PLANE_HELPER_RENDER_ORDER = 4;
+const LINE_PLANE_PERPENDICULAR_RENDER_ORDER = 6;
+const FOOT_MARKER_RENDER_ORDER = 10;
+const EXTENSION_PLANE_RENDER_ORDER = 3;
+const EXTENSION_LINE_RENDER_ORDER = 3;
 
 const findPointEntity = (
   document: BoardDocument,
@@ -42,6 +66,24 @@ const findPointEntity = (
   const entity = document.entities[pointId];
 
   return entity?.kind === "point" ? entity : null;
+};
+
+const findSegmentEntity = (
+  document: BoardDocument,
+  segmentId: EntityId,
+): SegmentEntity | null => {
+  const entity = document.entities[segmentId];
+
+  return entity?.kind === "segment" ? entity : null;
+};
+
+const findPlaneEntity = (
+  document: BoardDocument,
+  planeId: EntityId,
+): PlaneEntity | null => {
+  const entity = document.entities[planeId];
+
+  return entity?.kind === "plane" ? entity : null;
 };
 
 const applyEntityUserData = (
@@ -66,10 +108,13 @@ const getMeasurementTargetIds = (
   return measurement.pointIds;
 };
 
-const getMidpoint = (firstPoint: PointEntity, secondPoint: PointEntity) => ({
-  x: (firstPoint.position.x + secondPoint.position.x) / 2,
-  y: (firstPoint.position.y + secondPoint.position.y) / 2,
-  z: (firstPoint.position.z + secondPoint.position.z) / 2,
+const getMidpoint = (
+  firstPoint: { readonly x: number; readonly y: number; readonly z: number },
+  secondPoint: { readonly x: number; readonly y: number; readonly z: number },
+) => ({
+  x: (firstPoint.x + secondPoint.x) / 2,
+  y: (firstPoint.y + secondPoint.y) / 2,
+  z: (firstPoint.z + secondPoint.z) / 2,
 });
 
 const normalize = (value: { x: number; y: number; z: number }) => {
@@ -99,8 +144,8 @@ const getMeasurementLabelPosition = (
       }
 
       const [startPointId, endPointId] = segment.pointIds;
-      const startPoint = findPointEntity(document, startPointId);
-      const endPoint = findPointEntity(document, endPointId);
+      const startPoint = getPointWorldPosition(document, startPointId);
+      const endPoint = getPointWorldPosition(document, endPointId);
 
       if (!startPoint || !endPoint) {
         return null;
@@ -111,8 +156,8 @@ const getMeasurementLabelPosition = (
     }
 
     if (targetIds.length === 2) {
-      const firstPoint = findPointEntity(document, targetIds[0]);
-      const secondPoint = findPointEntity(document, targetIds[1]);
+      const firstPoint = getPointWorldPosition(document, targetIds[0]);
+      const secondPoint = getPointWorldPosition(document, targetIds[1]);
 
       if (!firstPoint || !secondPoint) {
         return null;
@@ -124,23 +169,23 @@ const getMeasurementLabelPosition = (
   }
 
   if (measurement.measurementKind === "angle" && targetIds.length === 3) {
-    const pointA = findPointEntity(document, targetIds[0]);
-    const vertexB = findPointEntity(document, targetIds[1]);
-    const pointC = findPointEntity(document, targetIds[2]);
+    const pointA = getPointWorldPosition(document, targetIds[0]);
+    const vertexB = getPointWorldPosition(document, targetIds[1]);
+    const pointC = getPointWorldPosition(document, targetIds[2]);
 
     if (!pointA || !vertexB || !pointC) {
       return null;
     }
 
     const ba = normalize({
-      x: pointA.position.x - vertexB.position.x,
-      y: pointA.position.y - vertexB.position.y,
-      z: pointA.position.z - vertexB.position.z,
+      x: pointA.x - vertexB.x,
+      y: pointA.y - vertexB.y,
+      z: pointA.z - vertexB.z,
     });
     const bc = normalize({
-      x: pointC.position.x - vertexB.position.x,
-      y: pointC.position.y - vertexB.position.y,
-      z: pointC.position.z - vertexB.position.z,
+      x: pointC.x - vertexB.x,
+      y: pointC.y - vertexB.y,
+      z: pointC.z - vertexB.z,
     });
     const bisector =
       ba && bc
@@ -153,9 +198,9 @@ const getMeasurementLabelPosition = (
     const direction = bisector ?? { x: 0.55, y: 0.25, z: 0.25 };
 
     return {
-      x: vertexB.position.x + direction.x * 0.42,
-      y: vertexB.position.y + direction.y * 0.42,
-      z: vertexB.position.z + direction.z * 0.42 + 0.12,
+      x: vertexB.x + direction.x * 0.42,
+      y: vertexB.y + direction.y * 0.42,
+      z: vertexB.z + direction.z * 0.42 + 0.12,
     };
   }
 
@@ -352,9 +397,16 @@ export const createMeasurementObject = (
 
 export const createPointObject = (
   point: PointEntity,
+  document: BoardDocument,
   highlighted: boolean,
   preselected: boolean,
-): THREE.Points => {
+): THREE.Points | null => {
+  const position = getPointWorldPosition(document, point.id);
+
+  if (!position) {
+    return null;
+  }
+
   const canvas = globalThis.document.createElement("canvas");
   const context = canvas.getContext("2d");
   const size = 64;
@@ -411,7 +463,7 @@ export const createPointObject = (
   geometry.setAttribute(
     "position",
     new THREE.Float32BufferAttribute(
-      [point.position.x, point.position.y, point.position.z],
+      [position.x, position.y, position.z],
       3,
     ),
   );
@@ -427,10 +479,11 @@ export const createSegmentObject = (
   segment: SegmentEntity,
   document: BoardDocument,
   preselected = false,
+  highlighted = false,
 ): Line2 | null => {
   const [startPointId, endPointId] = segment.pointIds;
-  const startPoint = findPointEntity(document, startPointId);
-  const endPoint = findPointEntity(document, endPointId);
+  const startPoint = getPointWorldPosition(document, startPointId);
+  const endPoint = getPointWorldPosition(document, endPointId);
 
   if (!startPoint || !endPoint) {
     return null;
@@ -438,16 +491,16 @@ export const createSegmentObject = (
 
   const geometry = new LineGeometry();
   geometry.setPositions([
-    startPoint.position.x,
-    startPoint.position.y,
-    startPoint.position.z,
-    endPoint.position.x,
-    endPoint.position.y,
-    endPoint.position.z,
+    startPoint.x,
+    startPoint.y,
+    startPoint.z,
+    endPoint.x,
+    endPoint.y,
+    endPoint.z,
   ]);
   const material = createSegmentMaterial(
     segment.style?.color,
-    document.selectedEntityIds.includes(segment.id),
+    highlighted || document.selectedEntityIds.includes(segment.id),
     preselected,
   );
   const line = new Line2(geometry, material);
@@ -459,17 +512,311 @@ export const createSegmentObject = (
   return line;
 };
 
+const createLineGeometryFromVec3 = (
+  start: { readonly x: number; readonly y: number; readonly z: number },
+  end: { readonly x: number; readonly y: number; readonly z: number },
+): LineGeometry => {
+  const geometry = new LineGeometry();
+  geometry.setPositions([start.x, start.y, start.z, end.x, end.y, end.z]);
+
+  return geometry;
+};
+
+export const createPerpendicularLineObject = (
+  perpendicularLine: PerpendicularLineEntity,
+  document: BoardDocument,
+  preselected = false,
+): THREE.Group | null => {
+  const point = findPointEntity(document, perpendicularLine.pointId);
+  const segment = findSegmentEntity(document, perpendicularLine.segmentId);
+
+  if (!point || !segment) {
+    return null;
+  }
+
+  const pointPosition = getPointWorldPosition(document, point.id);
+  const segmentPositions = getSegmentWorldPositions(document, segment.id);
+  const footPosition = perpendicularLine.footPointId
+    ? getPointWorldPosition(document, perpendicularLine.footPointId)
+    : null;
+  const directionPosition = perpendicularLine.directionPointId
+    ? getPointWorldPosition(document, perpendicularLine.directionPointId)
+    : null;
+
+  if (!pointPosition || !segmentPositions) {
+    return null;
+  }
+
+  const projection = projectPointToLine(
+    pointPosition,
+    segmentPositions[0],
+    segmentPositions[1],
+  );
+
+  if (!projection) {
+    return null;
+  }
+
+  const selected = document.selectedEntityIds.includes(perpendicularLine.id);
+  const style = perpendicularLine.style ?? {};
+  const color = style.lineColor ?? "#111827";
+  const group = new THREE.Group();
+  const perpendicularSegment = new Line2(
+    createLineGeometryFromVec3(
+      pointPosition,
+      perpendicularLine.constructionMode === "userDirection" && directionPosition
+        ? directionPosition
+        : footPosition ?? projection.foot,
+    ),
+    createSegmentMaterial(color, selected, preselected),
+  );
+
+  perpendicularSegment.computeLineDistances();
+  perpendicularSegment.renderOrder = PERPENDICULAR_RENDER_ORDER;
+  applyEntityUserData(perpendicularSegment, perpendicularLine);
+  group.add(perpendicularSegment);
+
+  const extensionStart =
+        projection.t < 0
+      ? segmentPositions[0]
+      : projection.t > 1
+        ? segmentPositions[1]
+        : null;
+
+  if (extensionStart && perpendicularLine.constructionMode !== "userDirection") {
+    const extensionGeometry = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(
+        extensionStart.x,
+        extensionStart.y,
+        extensionStart.z,
+      ),
+      new THREE.Vector3(
+        (footPosition ?? projection.foot).x,
+        (footPosition ?? projection.foot).y,
+        (footPosition ?? projection.foot).z,
+      ),
+    ]);
+    const extensionMaterial = new THREE.LineDashedMaterial({
+      color: style.extensionColor ?? "#64748b",
+      dashSize: 0.14,
+      gapSize: 0.08,
+      linewidth: style.extensionLineWidth ?? 1,
+      transparent: true,
+      opacity: 0.82,
+      depthTest: true,
+      depthWrite: false,
+    });
+    const extensionLine = new THREE.Line(extensionGeometry, extensionMaterial);
+
+    extensionLine.computeLineDistances();
+    extensionLine.renderOrder = PERPENDICULAR_RENDER_ORDER - 1;
+    extensionLine.userData.ignorePicking = true;
+    group.add(extensionLine);
+  }
+
+  applyEntityUserData(group, perpendicularLine);
+
+  return group;
+};
+
+const createVec3TriangleGeometry = (
+  positions: readonly [
+    { readonly x: number; readonly y: number; readonly z: number },
+    { readonly x: number; readonly y: number; readonly z: number },
+    { readonly x: number; readonly y: number; readonly z: number },
+  ],
+): THREE.BufferGeometry => {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute(
+    "position",
+    new THREE.Float32BufferAttribute(
+      positions.flatMap((position) => [position.x, position.y, position.z]),
+      3,
+    ),
+  );
+  geometry.setIndex([0, 1, 2]);
+  geometry.computeVertexNormals();
+
+  return geometry;
+};
+
+const createDashedHelperLine = (
+  start: { readonly x: number; readonly y: number; readonly z: number },
+  end: { readonly x: number; readonly y: number; readonly z: number },
+  color: THREE.ColorRepresentation,
+): THREE.Line => {
+  const geometry = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(start.x, start.y, start.z),
+    new THREE.Vector3(end.x, end.y, end.z),
+  ]);
+  const material = new THREE.LineDashedMaterial({
+    color,
+    dashSize: 0.12,
+    gapSize: 0.08,
+    transparent: true,
+    opacity: 0.72,
+    depthTest: true,
+    depthWrite: false,
+  });
+  const line = new THREE.Line(geometry, material);
+
+  line.computeLineDistances();
+  line.renderOrder = LINE_PLANE_HELPER_RENDER_ORDER;
+  line.userData.ignorePicking = true;
+
+  return line;
+};
+
+const createTextSprite = (
+  text: string,
+  color = "#111111",
+): THREE.Sprite => {
+  const canvas = globalThis.document.createElement("canvas");
+  const context = canvas.getContext("2d");
+  const fontSize = 32;
+  const padding = 8;
+
+  if (!context) {
+    canvas.width = 1;
+    canvas.height = 1;
+  } else {
+    context.font = `600 ${fontSize}px Arial, Helvetica, sans-serif`;
+    const metrics = context.measureText(text);
+    canvas.width = Math.ceil(metrics.width + padding * 2);
+    canvas.height = fontSize + padding * 2;
+    context.font = `600 ${fontSize}px Arial, Helvetica, sans-serif`;
+    context.textBaseline = "middle";
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.fillStyle = color;
+    context.fillText(text, padding, canvas.height / 2);
+  }
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+
+  const sprite = new THREE.Sprite(
+    new THREE.SpriteMaterial({
+      map: texture,
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+      sizeAttenuation: false,
+    }),
+  );
+  const aspect = texture.image.width / texture.image.height;
+
+  sprite.scale.set(aspect * 0.06, 0.06, 1);
+  sprite.userData.ignorePicking = true;
+
+  return sprite;
+};
+
+export const createLinePlanePerpendicularObject = (
+  linePlanePerpendicular: LinePlanePerpendicularEntity,
+  document: BoardDocument,
+  preselected = false,
+): THREE.Group | null => {
+  const point = findPointEntity(document, linePlanePerpendicular.pointId);
+  const plane = findPlaneEntity(document, linePlanePerpendicular.planeId);
+
+  if (!point || !plane) {
+    return null;
+  }
+
+  const projection = calculateLinePlanePerpendicular(point, plane, document);
+
+  if (!projection) {
+    return null;
+  }
+
+  const sourcePosition = getPointWorldPosition(
+    document,
+    linePlanePerpendicular.pointId,
+  );
+  const footPosition = getPointWorldPosition(
+    document,
+    linePlanePerpendicular.footPointId ?? "",
+  );
+  const directionPosition = linePlanePerpendicular.directionPointId
+    ? getPointWorldPosition(document, linePlanePerpendicular.directionPointId)
+    : null;
+
+  const endPosition =
+    linePlanePerpendicular.constructionMode === "userDirection"
+      ? directionPosition
+      : footPosition;
+
+  if (!sourcePosition || !endPosition) {
+    return null;
+  }
+
+  const selected = document.selectedEntityIds.includes(
+    linePlanePerpendicular.id,
+  );
+  const style = linePlanePerpendicular.style ?? {};
+  const lineColor = style.lineColor ?? "#111827";
+  const helperLineColor = style.helperLineColor ?? "#64748b";
+  const fillColor = style.extensionFillColor ?? "#93c5fd";
+  const fillOpacity = style.extensionFillOpacity ?? 0.14;
+  const group = new THREE.Group();
+
+  const showFootHelpers =
+    linePlanePerpendicular.constructionMode !== "userDirection";
+
+  if (showFootHelpers) {
+    projection.extensionTriangles.forEach((triangle) => {
+    const mesh = new THREE.Mesh(
+      createVec3TriangleGeometry(triangle),
+      new THREE.MeshBasicMaterial({
+        color: fillColor,
+        opacity: fillOpacity,
+        transparent: true,
+        side: THREE.DoubleSide,
+        depthTest: true,
+        depthWrite: false,
+      }),
+    );
+
+    mesh.renderOrder = LINE_PLANE_EXTENSION_RENDER_ORDER;
+    mesh.userData.ignorePicking = true;
+    group.add(mesh);
+    });
+
+    projection.helperSegments.forEach(([start, end]) => {
+      group.add(createDashedHelperLine(start, end, helperLineColor));
+    });
+  }
+
+  const perpendicularSegment = new Line2(
+    createLineGeometryFromVec3(sourcePosition, endPosition),
+    createSegmentMaterial(lineColor, selected, preselected),
+  );
+
+  perpendicularSegment.computeLineDistances();
+  perpendicularSegment.renderOrder = LINE_PLANE_PERPENDICULAR_RENDER_ORDER;
+  applyEntityUserData(perpendicularSegment, linePlanePerpendicular);
+  group.add(perpendicularSegment);
+
+  applyEntityUserData(group, linePlanePerpendicular);
+
+  return group;
+};
+
 const createPlaneTriangleGeometry = (
-  positions: readonly [PointEntity, PointEntity, PointEntity],
+  positions: readonly [
+    { readonly x: number; readonly y: number; readonly z: number },
+    { readonly x: number; readonly y: number; readonly z: number },
+    { readonly x: number; readonly y: number; readonly z: number },
+  ],
 ): THREE.BufferGeometry => {
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute(
     "position",
     new THREE.Float32BufferAttribute(
       positions.flatMap((point) => [
-        point.position.x,
-        point.position.y,
-        point.position.z,
+        point.x,
+        point.y,
+        point.z,
       ]),
       3,
     ),
@@ -499,25 +846,29 @@ const createPlaneExtensionGeometry = (
 
 const createPlaneBoundaryObject = (
   plane: PlaneEntity,
-  points: readonly [PointEntity, PointEntity, PointEntity],
+  points: readonly [
+    { readonly x: number; readonly y: number; readonly z: number },
+    { readonly x: number; readonly y: number; readonly z: number },
+    { readonly x: number; readonly y: number; readonly z: number },
+  ],
   selected: boolean,
   preselected: boolean,
   color: string,
 ): Line2 => {
   const geometry = new LineGeometry();
   geometry.setPositions([
-    points[0].position.x,
-    points[0].position.y,
-    points[0].position.z,
-    points[1].position.x,
-    points[1].position.y,
-    points[1].position.z,
-    points[2].position.x,
-    points[2].position.y,
-    points[2].position.z,
-    points[0].position.x,
-    points[0].position.y,
-    points[0].position.z,
+    points[0].x,
+    points[0].y,
+    points[0].z,
+    points[1].x,
+    points[1].y,
+    points[1].z,
+    points[2].x,
+    points[2].y,
+    points[2].z,
+    points[0].x,
+    points[0].y,
+    points[0].z,
   ]);
   const boundary = new Line2(
     geometry,
@@ -534,8 +885,9 @@ export const createPlaneObject = (
   plane: PlaneEntity,
   document: BoardDocument,
   preselected = false,
+  highlighted = false,
 ): THREE.Group | null => {
-  const points = getPlanePoints(document, plane.pointIds);
+  const points = getPlaneWorldPositions(document, plane.pointIds);
 
   if (!points) {
     return null;
@@ -543,24 +895,24 @@ export const createPlaneObject = (
 
   if (
     !getPlaneFromThreePoints(
-      points[0].position,
-      points[1].position,
-      points[2].position,
+      points[0],
+      points[1],
+      points[2],
     )
   ) {
     return null;
   }
 
-  const selected = document.selectedEntityIds.includes(plane.id);
+  const selected = document.selectedEntityIds.includes(plane.id) || highlighted;
   const style = getPlaneStyle(plane);
   const group = new THREE.Group();
   const showExtension =
     style.showExtensionWhenSelected !== false && (selected || preselected);
   const extensionPatch = showExtension
     ? getPlaneExtensionPatch(
-        points[0].position,
-        points[1].position,
-        points[2].position,
+        points[0],
+        points[1],
+        points[2],
       )
     : null;
 
@@ -614,10 +966,174 @@ export const createPlaneObject = (
   return group;
 };
 
+const createDashedLineObject = (
+  start: { readonly x: number; readonly y: number; readonly z: number },
+  end: { readonly x: number; readonly y: number; readonly z: number },
+  color: THREE.ColorRepresentation,
+  selected: boolean,
+  preselected: boolean,
+): THREE.Line => {
+  const geometry = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(start.x, start.y, start.z),
+    new THREE.Vector3(end.x, end.y, end.z),
+  ]);
+  const material = new THREE.LineDashedMaterial({
+    color: selected || preselected ? SELECTED_ENTITY_COLOR : color,
+    dashSize: 0.16,
+    gapSize: 0.1,
+    linewidth: selected || preselected ? 2 : 1,
+    transparent: true,
+    opacity: selected || preselected ? 0.95 : 0.78,
+    depthTest: true,
+    depthWrite: false,
+  });
+  const line = new THREE.Line(geometry, material);
+
+  line.computeLineDistances();
+  line.renderOrder = EXTENSION_LINE_RENDER_ORDER;
+
+  return line;
+};
+
+const createPolygonGeometry = (
+  triangles: readonly [Vec3Like, Vec3Like, Vec3Like][],
+): THREE.BufferGeometry => {
+  const geometry = new THREE.BufferGeometry();
+  const positions = triangles.flatMap((triangle) =>
+    triangle.flatMap((position) => [position.x, position.y, position.z]),
+  );
+
+  geometry.setAttribute(
+    "position",
+    new THREE.Float32BufferAttribute(positions, 3),
+  );
+  geometry.computeVertexNormals();
+
+  return geometry;
+};
+
+interface Vec3Like {
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
+}
+
+export const createExtensionObject = (
+  extension: ExtensionEntity,
+  document: BoardDocument,
+  preselected = false,
+): THREE.Group | null => {
+  const target = document.entities[extension.targetId];
+  const selected = document.selectedEntityIds.includes(extension.id);
+  const style = extension.style ?? {};
+  const group = new THREE.Group();
+
+  if (extension.targetType === "segment") {
+    if (target?.kind !== "segment") {
+      return null;
+    }
+
+    const result = calculateSegmentBoundaryExtension(target, document);
+
+    if (result.status !== "valid") {
+      return null;
+    }
+
+    const color = style.lineExtensionColor ?? "#6b7280";
+
+    if (result.startExtension) {
+      const line = createDashedLineObject(
+        result.startExtension[0],
+        result.startExtension[1],
+        color,
+        selected,
+        preselected,
+      );
+      applyEntityUserData(line, extension);
+      group.add(line);
+    }
+
+    if (result.endExtension) {
+      const line = createDashedLineObject(
+        result.endExtension[0],
+        result.endExtension[1],
+        color,
+        selected,
+        preselected,
+      );
+      applyEntityUserData(line, extension);
+      group.add(line);
+    }
+
+    if (group.children.length === 0) {
+      return null;
+    }
+
+    applyEntityUserData(group, extension);
+    return group;
+  }
+
+  if (target?.kind !== "plane") {
+    return null;
+  }
+
+  const result = calculatePlaneBoundaryExtension(target, document);
+
+  if (result.status !== "valid" || result.triangles.length === 0) {
+    return null;
+  }
+
+  const material = new THREE.MeshBasicMaterial({
+    color: selected || preselected
+      ? SELECTED_ENTITY_COLOR
+      : style.planeExtensionColor ?? "#93c5fd",
+    opacity: selected || preselected
+      ? Math.max(style.planeExtensionOpacity ?? 0.16, 0.22)
+      : style.planeExtensionOpacity ?? 0.14,
+    transparent: true,
+    side: THREE.DoubleSide,
+    depthTest: true,
+    depthWrite: false,
+  });
+  const mesh = new THREE.Mesh(createPolygonGeometry(result.triangles), material);
+
+  mesh.renderOrder = EXTENSION_PLANE_RENDER_ORDER;
+  applyEntityUserData(mesh, extension);
+  group.add(mesh);
+
+  if (result.vertices.length > 2) {
+    const geometry = new LineGeometry();
+    const closedVertices = [...result.vertices, result.vertices[0]];
+    geometry.setPositions(
+      closedVertices.flatMap((position) => [
+        position.x,
+        position.y,
+        position.z,
+      ]),
+    );
+    const boundary = new Line2(
+      geometry,
+      createPlaneBoundaryMaterial(
+        style.boundaryLineColor ?? "#60a5fa",
+        selected,
+        preselected,
+      ),
+    );
+    boundary.computeLineDistances();
+    boundary.renderOrder = EXTENSION_LINE_RENDER_ORDER;
+    applyEntityUserData(boundary, extension);
+    group.add(boundary);
+  }
+
+  applyEntityUserData(group, extension);
+  return group;
+};
+
 export const createEntityObject = (
   entity: BoardEntity,
   document: BoardDocument,
   highlightedPointIds: readonly EntityId[] = [],
+  highlightedEntityIds: readonly EntityId[] = [],
   preselectedEntityId: EntityId | null = null,
 ): THREE.Object3D | null => {
   if (!entity.visible) {
@@ -628,6 +1144,7 @@ export const createEntityObject = (
     case "point":
       return createPointObject(
         entity,
+        document,
         highlightedPointIds.includes(entity.id),
         preselectedEntityId === entity.id &&
           !highlightedPointIds.includes(entity.id),
@@ -638,13 +1155,37 @@ export const createEntityObject = (
         document,
         preselectedEntityId === entity.id &&
           !document.selectedEntityIds.includes(entity.id),
+        highlightedEntityIds.includes(entity.id),
+      );
+    case "perpendicularLine":
+      return createPerpendicularLineObject(
+        entity,
+        document,
+        preselectedEntityId === entity.id &&
+          !document.selectedEntityIds.includes(entity.id),
+      );
+    case "linePlanePerpendicular":
+      return createLinePlanePerpendicularObject(
+        entity,
+        document,
+        preselectedEntityId === entity.id &&
+          !document.selectedEntityIds.includes(entity.id),
+      );
+    case "extension":
+      return createExtensionObject(
+        entity,
+        document,
+        preselectedEntityId === entity.id &&
+          !document.selectedEntityIds.includes(entity.id),
       );
     case "plane":
       return createPlaneObject(
         entity,
         document,
         preselectedEntityId === entity.id &&
-          !document.selectedEntityIds.includes(entity.id),
+          !document.selectedEntityIds.includes(entity.id) &&
+          !highlightedEntityIds.includes(entity.id),
+        highlightedEntityIds.includes(entity.id),
       );
     case "measurement":
       return null;

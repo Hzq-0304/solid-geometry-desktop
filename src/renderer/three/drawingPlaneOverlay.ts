@@ -5,7 +5,7 @@ import type {
 } from "../../core/document/BoardDocument";
 
 const DRAWING_PLANE_OVERLAY_NAME = "drawing-plane-overlay";
-const DRAWING_PLANE_SIZE = 20;
+const DEFAULT_DRAWING_PLANE_HALF_SIZE = 10;
 
 const disposeMaterial = (material: THREE.Material | THREE.Material[]): void => {
   if (Array.isArray(material)) {
@@ -29,8 +29,8 @@ const disposeObject = (object: THREE.Object3D): void => {
 
 const createPlaneGeometry = (
   activeDrawingPlane: ActiveDrawingPlane,
+  halfSize: number,
 ): THREE.BufferGeometry => {
-  const halfSize = DRAWING_PLANE_SIZE / 2;
   const vertices: number[] = [];
 
   switch (activeDrawingPlane) {
@@ -93,7 +93,10 @@ const createPlaneGeometry = (
 };
 
 const createGridGeometry = (settings: BoardSettings): THREE.BufferGeometry => {
-  const halfSize = DRAWING_PLANE_SIZE / 2;
+  const halfSize =
+    Number.isFinite(settings.coordinateHalfSize) && settings.coordinateHalfSize > 0
+      ? settings.coordinateHalfSize
+      : DEFAULT_DRAWING_PLANE_HALF_SIZE;
   const gridSize = Math.max(settings.gridSize, 0.01);
   const vertices: number[] = [];
 
@@ -122,8 +125,8 @@ const createGridGeometry = (settings: BoardSettings): THREE.BufferGeometry => {
 
 const createBorderGeometry = (
   activeDrawingPlane: ActiveDrawingPlane,
+  halfSize: number,
 ): THREE.BufferGeometry => {
-  const halfSize = DRAWING_PLANE_SIZE / 2;
   const vertices: number[] = [];
 
   switch (activeDrawingPlane) {
@@ -220,6 +223,10 @@ const createBorderGeometry = (
 };
 
 const createOverlayGroup = (settings: BoardSettings): THREE.Group => {
+  const halfSize =
+    Number.isFinite(settings.coordinateHalfSize) && settings.coordinateHalfSize > 0
+      ? settings.coordinateHalfSize
+      : DEFAULT_DRAWING_PLANE_HALF_SIZE;
   const group = new THREE.Group();
   group.name = DRAWING_PLANE_OVERLAY_NAME;
   group.userData.ignorePicking = true;
@@ -229,7 +236,7 @@ const createOverlayGroup = (settings: BoardSettings): THREE.Group => {
     : settings.drawingPlaneOpacity * 0.55;
 
   const mesh = new THREE.Mesh(
-    createPlaneGeometry(settings.activeDrawingPlane),
+    createPlaneGeometry(settings.activeDrawingPlane, halfSize),
     new THREE.MeshBasicMaterial({
       color: 0x60a5fa,
       transparent: true,
@@ -244,7 +251,7 @@ const createOverlayGroup = (settings: BoardSettings): THREE.Group => {
   group.add(mesh);
 
   const border = new THREE.LineSegments(
-    createBorderGeometry(settings.activeDrawingPlane),
+    createBorderGeometry(settings.activeDrawingPlane, halfSize),
     new THREE.LineBasicMaterial({
       color: 0x1d4ed8,
       transparent: true,

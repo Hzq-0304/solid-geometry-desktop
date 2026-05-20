@@ -1,7 +1,8 @@
 import * as THREE from "three";
+import type { BoardSettings } from "../../core/document/BoardDocument";
 
 const AXES_WITH_LABELS_NAME = "axes-with-labels";
-const AXIS_LENGTH = 10;
+const DEFAULT_AXIS_LENGTH = 10;
 
 const createAxisLine = (
   start: THREE.Vector3,
@@ -63,44 +64,66 @@ const createAxisLabel = (
   return sprite;
 };
 
-export const createAxesWithLabels = (): THREE.Group => {
+export const createAxesWithLabels = (axisLength = DEFAULT_AXIS_LENGTH): THREE.Group => {
+  const safeAxisLength =
+    Number.isFinite(axisLength) && axisLength > 0
+      ? axisLength
+      : DEFAULT_AXIS_LENGTH;
   const group = new THREE.Group();
   group.name = AXES_WITH_LABELS_NAME;
   group.userData.ignorePicking = true;
 
   group.add(
     createAxisLine(
-      new THREE.Vector3(-AXIS_LENGTH, 0, 0),
-      new THREE.Vector3(AXIS_LENGTH, 0, 0),
+      new THREE.Vector3(-safeAxisLength, 0, 0),
+      new THREE.Vector3(safeAxisLength, 0, 0),
       0xdc2626,
     ),
   );
   group.add(
     createAxisLine(
-      new THREE.Vector3(0, -AXIS_LENGTH, 0),
-      new THREE.Vector3(0, AXIS_LENGTH, 0),
+      new THREE.Vector3(0, -safeAxisLength, 0),
+      new THREE.Vector3(0, safeAxisLength, 0),
       0x16a34a,
     ),
   );
   group.add(
     createAxisLine(
-      new THREE.Vector3(0, 0, -AXIS_LENGTH),
-      new THREE.Vector3(0, 0, AXIS_LENGTH),
+      new THREE.Vector3(0, 0, -safeAxisLength),
+      new THREE.Vector3(0, 0, safeAxisLength),
       0x2563eb,
     ),
   );
 
   group.add(
-    createAxisLabel("X", "#dc2626", new THREE.Vector3(AXIS_LENGTH + 0.35, 0, 0)),
+    createAxisLabel("X", "#dc2626", new THREE.Vector3(safeAxisLength + 0.35, 0, 0)),
   );
   group.add(
-    createAxisLabel("Y", "#16a34a", new THREE.Vector3(0, AXIS_LENGTH + 0.35, 0)),
+    createAxisLabel("Y", "#16a34a", new THREE.Vector3(0, safeAxisLength + 0.35, 0)),
   );
   group.add(
-    createAxisLabel("Z", "#2563eb", new THREE.Vector3(0, 0, AXIS_LENGTH + 0.35)),
+    createAxisLabel("Z", "#2563eb", new THREE.Vector3(0, 0, safeAxisLength + 0.35)),
   );
 
   return group;
+};
+
+export const syncAxesWithLabels = (
+  scene: THREE.Scene,
+  settings: BoardSettings,
+): void => {
+  const existing = scene.getObjectByName(AXES_WITH_LABELS_NAME);
+
+  if (existing) {
+    disposeAxesWithLabels(existing);
+    scene.remove(existing);
+  }
+
+  if (!settings.showAxes) {
+    return;
+  }
+
+  scene.add(createAxesWithLabels(settings.coordinateHalfSize));
 };
 
 const disposeMaterial = (material: THREE.Material | THREE.Material[]): void => {

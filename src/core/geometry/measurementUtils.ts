@@ -8,14 +8,22 @@ import type {
 } from "../document/EntityTypes";
 import { dotVec3, normalizeVec3, subtractVec3 } from "./geometryUtils";
 import { getPlaneFromThreePoints, getPlanePoints } from "./planeUtils";
+import { getPlaneWorldPositions, getPointWorldPosition } from "./pointPositionUtils";
 
 export const getDistanceBetweenPoints = (
   firstPoint: PointEntity,
   secondPoint: PointEntity,
+  document?: BoardDocument,
 ): number => {
-  const dx = secondPoint.position.x - firstPoint.position.x;
-  const dy = secondPoint.position.y - firstPoint.position.y;
-  const dz = secondPoint.position.z - firstPoint.position.z;
+  const firstPosition = document
+    ? getPointWorldPosition(document, firstPoint.id) ?? firstPoint.position
+    : firstPoint.position;
+  const secondPosition = document
+    ? getPointWorldPosition(document, secondPoint.id) ?? secondPoint.position
+    : secondPoint.position;
+  const dx = secondPosition.x - firstPosition.x;
+  const dy = secondPosition.y - firstPosition.y;
+  const dz = secondPosition.z - firstPosition.z;
 
   return Math.sqrt(dx * dx + dy * dy + dz * dz);
 };
@@ -41,7 +49,7 @@ export const getSegmentLength = (
     return null;
   }
 
-  return getDistanceBetweenPoints(startPoint, endPoint);
+  return getDistanceBetweenPoints(startPoint, endPoint, document);
 };
 
 export const getSegmentLengthById = (
@@ -83,7 +91,7 @@ export const getPointDistanceByIds = (
     return null;
   }
 
-  return getDistanceBetweenPoints(firstPoint, secondPoint);
+  return getDistanceBetweenPoints(firstPoint, secondPoint, document);
 };
 
 const clamp = (value: number, min: number, max: number): number =>
@@ -93,13 +101,23 @@ export const calculateAngleByThreePoints = (
   pointA: PointEntity,
   vertexB: PointEntity,
   pointC: PointEntity,
+  document?: BoardDocument,
 ): number | null => {
-  const bax = pointA.position.x - vertexB.position.x;
-  const bay = pointA.position.y - vertexB.position.y;
-  const baz = pointA.position.z - vertexB.position.z;
-  const bcx = pointC.position.x - vertexB.position.x;
-  const bcy = pointC.position.y - vertexB.position.y;
-  const bcz = pointC.position.z - vertexB.position.z;
+  const positionA = document
+    ? getPointWorldPosition(document, pointA.id) ?? pointA.position
+    : pointA.position;
+  const vertexPosition = document
+    ? getPointWorldPosition(document, vertexB.id) ?? vertexB.position
+    : vertexB.position;
+  const positionC = document
+    ? getPointWorldPosition(document, pointC.id) ?? pointC.position
+    : pointC.position;
+  const bax = positionA.x - vertexPosition.x;
+  const bay = positionA.y - vertexPosition.y;
+  const baz = positionA.z - vertexPosition.z;
+  const bcx = positionC.x - vertexPosition.x;
+  const bcy = positionC.y - vertexPosition.y;
+  const bcz = positionC.z - vertexPosition.z;
   const baLength = Math.sqrt(bax * bax + bay * bay + baz * baz);
   const bcLength = Math.sqrt(bcx * bcx + bcy * bcy + bcz * bcz);
 
@@ -127,16 +145,23 @@ export const getAngleByPointIds = (
     return null;
   }
 
-  return calculateAngleByThreePoints(pointA, vertexB, pointC);
+  return calculateAngleByThreePoints(pointA, vertexB, pointC, document);
 };
 
 export const calculateLinePlaneAngleByPoints = (
   firstPoint: PointEntity,
   secondPoint: PointEntity,
+  document?: BoardDocument,
 ): number | null => {
-  const dx = secondPoint.position.x - firstPoint.position.x;
-  const dy = secondPoint.position.y - firstPoint.position.y;
-  const dz = secondPoint.position.z - firstPoint.position.z;
+  const firstPosition = document
+    ? getPointWorldPosition(document, firstPoint.id) ?? firstPoint.position
+    : firstPoint.position;
+  const secondPosition = document
+    ? getPointWorldPosition(document, secondPoint.id) ?? secondPoint.position
+    : secondPoint.position;
+  const dx = secondPosition.x - firstPosition.x;
+  const dy = secondPosition.y - firstPosition.y;
+  const dz = secondPosition.z - firstPosition.z;
   const horizontalLength = Math.sqrt(dx * dx + dy * dy);
 
   if (
@@ -167,7 +192,7 @@ export const getLinePlaneAngleBySegmentId = (
     return null;
   }
 
-  return calculateLinePlaneAngleByPoints(startPoint, endPoint);
+  return calculateLinePlaneAngleByPoints(startPoint, endPoint, document);
 };
 
 export const getLinePlaneAngleByPointIds = (
@@ -179,7 +204,7 @@ export const getLinePlaneAngleByPointIds = (
   const secondPoint = getPointFromDocument(document, secondPointId);
 
   return firstPoint && secondPoint
-    ? calculateLinePlaneAngleByPoints(firstPoint, secondPoint)
+    ? calculateLinePlaneAngleByPoints(firstPoint, secondPoint, document)
     : null;
 };
 
@@ -198,19 +223,21 @@ export const getLinePlaneAngleBySegmentAndPlaneId = (
   const [startPointId, endPointId] = segment.pointIds;
   const startPoint = getPointFromDocument(document, startPointId);
   const endPoint = getPointFromDocument(document, endPointId);
-  const planePoints = getPlanePoints(document, plane.pointIds);
+  const startPosition = getPointWorldPosition(document, startPointId);
+  const endPosition = getPointWorldPosition(document, endPointId);
+  const planePoints = getPlaneWorldPositions(document, plane.pointIds);
 
-  if (!startPoint || !endPoint || !planePoints) {
+  if (!startPoint || !endPoint || !startPosition || !endPosition || !planePoints) {
     return null;
   }
 
   const direction = normalizeVec3(
-    subtractVec3(endPoint.position, startPoint.position),
+    subtractVec3(endPosition, startPosition),
   );
   const planeEquation = getPlaneFromThreePoints(
-    planePoints[0].position,
-    planePoints[1].position,
-    planePoints[2].position,
+    planePoints[0],
+    planePoints[1],
+    planePoints[2],
   );
 
   if (!direction || !planeEquation) {
@@ -232,16 +259,16 @@ const getPlaneNormalById = (
     return null;
   }
 
-  const planePoints = getPlanePoints(document, plane.pointIds);
+  const planePoints = getPlaneWorldPositions(document, plane.pointIds);
 
   if (!planePoints) {
     return null;
   }
 
   const planeEquation = getPlaneFromThreePoints(
-    planePoints[0].position,
-    planePoints[1].position,
-    planePoints[2].position,
+    planePoints[0],
+    planePoints[1],
+    planePoints[2],
   );
 
   return planeEquation?.normal ?? null;

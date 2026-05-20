@@ -1,5 +1,6 @@
 import type { EntityId } from "../document/EntityTypes";
 import { getPlaneFromThreePoints } from "../geometry/planeUtils";
+import { getPointWorldPosition } from "../geometry/pointPositionUtils";
 import type { ToolContext } from "./ToolContext";
 import type { PointerInfo, Tool } from "./ToolTypes";
 
@@ -68,16 +69,18 @@ export class PlaneTool implements Tool {
       return;
     }
 
-    const points = nextPointIds.map((pointId) => context.getPoint(pointId));
+    const positions = nextPointIds.map((pointId) =>
+      getPointWorldPosition(context.getDocument(), pointId),
+    );
 
     if (
-      !points[0] ||
-      !points[1] ||
-      !points[2] ||
+      !positions[0] ||
+      !positions[1] ||
+      !positions[2] ||
       !getPlaneFromThreePoints(
-        points[0].position,
-        points[1].position,
-        points[2].position,
+        positions[0],
+        positions[1],
+        positions[2],
       )
     ) {
       this.lastMessage = "collinear";

@@ -5,6 +5,9 @@ export type EntityId = string;
 export type EntityKind =
   | "point"
   | "segment"
+  | "perpendicularLine"
+  | "linePlanePerpendicular"
+  | "extension"
   | "plane"
   | "polygon"
   | "solid"
@@ -26,16 +29,124 @@ export interface BaseEntity {
   readonly updatedAt: string;
 }
 
+export type PointConstruction =
+  | {
+      readonly kind: "footToLine";
+      readonly sourcePointId: EntityId;
+      readonly targetSegmentId: EntityId;
+    }
+  | {
+      readonly kind: "footToPlane";
+      readonly sourcePointId: EntityId;
+      readonly targetPlaneId: EntityId;
+    }
+  | {
+      readonly kind: "midpoint";
+      readonly pointAId: EntityId;
+      readonly pointBId: EntityId;
+    }
+  | {
+      readonly kind: "perpendicularDirectionToLine";
+      readonly sourcePointId: EntityId;
+      readonly targetSegmentId: EntityId;
+      readonly guidePosition: Vec3;
+    }
+  | {
+      readonly kind: "perpendicularDirectionToPlane";
+      readonly sourcePointId: EntityId;
+      readonly targetPlaneId: EntityId;
+      readonly sign: 1 | -1;
+      readonly length: number;
+    }
+  | {
+      readonly kind: "parallelSegmentEndpoint";
+      readonly anchorPointId: EntityId;
+      readonly sourceSegmentId: EntityId;
+      readonly sourceAnchorEndpoint: "start" | "end";
+      readonly targetEndpoint: "other";
+    }
+  | {
+      readonly kind: "parallelPlaneVertex";
+      readonly anchorPointId: EntityId;
+      readonly sourcePlaneId: EntityId;
+      readonly sourceAnchorVertexIndex: 0 | 1 | 2;
+      readonly sourceVertexIndex: 0 | 1 | 2;
+    };
+
 export interface PointEntity extends BaseEntity {
   readonly kind: "point";
   readonly position: Vec3;
   readonly nameSource?: "auto" | "manual";
+  readonly pointKind?: "free" | "constructed";
+  readonly construction?: PointConstruction;
 }
 
 export interface SegmentEntity extends BaseEntity {
   readonly kind: "segment";
   readonly pointIds: readonly [EntityId, EntityId];
   readonly nameSource?: "auto" | "manual";
+}
+
+export interface PerpendicularLineStyle extends EntityStyle {
+  readonly lineColor?: string;
+  readonly lineWidth?: number;
+  readonly extensionColor?: string;
+  readonly extensionLineWidth?: number;
+  readonly extensionDash?: boolean;
+}
+
+export interface PerpendicularLineEntity extends BaseEntity {
+  readonly kind: "perpendicularLine";
+  readonly type: "perpendicularLine";
+  readonly pointId: EntityId;
+  readonly segmentId: EntityId;
+  readonly footPointId?: EntityId;
+  readonly directionPointId?: EntityId;
+  readonly constructionMode?: "foot" | "userDirection";
+  readonly directionMode?: "auto" | "userPick";
+  readonly nameSource?: "auto" | "manual";
+  readonly style?: PerpendicularLineStyle;
+}
+
+export interface LinePlanePerpendicularStyle extends EntityStyle {
+  readonly lineColor?: string;
+  readonly lineWidth?: number;
+  readonly extensionFillColor?: string;
+  readonly extensionFillOpacity?: number;
+  readonly helperLineColor?: string;
+  readonly helperLineDash?: boolean;
+}
+
+export interface LinePlanePerpendicularEntity extends BaseEntity {
+  readonly kind: "linePlanePerpendicular";
+  readonly type: "linePlanePerpendicular";
+  readonly pointId: EntityId;
+  readonly planeId: EntityId;
+  readonly footPointId?: EntityId;
+  readonly directionPointId?: EntityId;
+  readonly constructionMode?: "foot" | "userDirection";
+  readonly directionMode?: "auto" | "userPick";
+  readonly nameSource?: "auto" | "manual";
+  readonly style?: LinePlanePerpendicularStyle;
+}
+
+export interface ExtensionEntityStyle extends EntityStyle {
+  readonly lineExtensionColor?: string;
+  readonly lineExtensionWidth?: number;
+  readonly lineExtensionDash?: boolean;
+  readonly planeExtensionColor?: string;
+  readonly planeExtensionOpacity?: number;
+  readonly boundaryLineColor?: string;
+}
+
+export interface ExtensionEntity extends BaseEntity {
+  readonly kind: "extension";
+  readonly type: "extension";
+  readonly targetId: EntityId;
+  readonly targetType: "segment" | "plane";
+  readonly mode: "toBoundaryCube";
+  readonly nameSource?: "auto" | "manual";
+  readonly style?: ExtensionEntityStyle;
 }
 
 export interface PlaneEntityStyle extends EntityStyle {
@@ -102,6 +213,9 @@ export interface MeasurementEntity extends BaseEntity {
 export type BoardEntity =
   | PointEntity
   | SegmentEntity
+  | PerpendicularLineEntity
+  | LinePlanePerpendicularEntity
+  | ExtensionEntity
   | PlaneEntity
   | PolygonEntity
   | SolidEntity

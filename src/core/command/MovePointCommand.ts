@@ -36,7 +36,7 @@ export class MovePointCommand implements Command {
   execute(document: BoardDocument): BoardDocument {
     const entity = document.entities[this.pointId];
 
-    if (!entity || entity.kind !== "point") {
+    if (!entity || entity.kind !== "point" || entity.pointKind === "constructed") {
       return document;
     }
 

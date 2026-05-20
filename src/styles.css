@@ -250,6 +250,16 @@ input {
   width: 144px;
 }
 
+.perpendicular-tool-flyout {
+  top: 176px;
+  width: 144px;
+}
+
+.extend-tool-flyout {
+  top: 260px;
+  width: 156px;
+}
+
 .viewport-panel {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
@@ -837,4 +847,56 @@ input {
 
 .status-bar span:last-child {
   margin-left: auto;
+}
+
+.toast-message {
+  position: fixed;
+  right: 18px;
+  bottom: 54px;
+  z-index: 30;
+  max-width: min(360px, calc(100vw - 36px));
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: rgba(17, 24, 39, 0.94);
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.35;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.22);
+  pointer-events: none;
+}
+
+.object-info-rows,
+.object-info-list {
+  display: grid;
+  gap: 6px;
+}
+
+.object-info-row {
+  display: grid;
+  grid-template-columns: 78px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+}
+
+.object-info-label {
+  color: #475569;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.object-info-value,
+.object-info-empty,
+.object-info-list li {
+  color: #111111;
+  font-size: 13px;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.object-info-list ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
 }

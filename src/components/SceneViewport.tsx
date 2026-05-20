@@ -13,10 +13,14 @@ import type { Vec3 } from "../core/geometry/Vec3";
 import GeometryOverlay, {
   type ProjectedObjectLabel,
 } from "./GeometryOverlay";
-import { getPlanePoints } from "../core/geometry/planeUtils";
+import {
+  getPlaneWorldPositions,
+  getPointWorldPosition,
+} from "../core/geometry/pointPositionUtils";
 import {
   createAxesWithLabels,
   disposeAxesWithLabels,
+  syncAxesWithLabels,
 } from "../renderer/three/axesWithLabels";
 import { focusCameraOnDrawingPlane } from "../renderer/three/cameraViews";
 import {
@@ -36,6 +40,10 @@ import {
   disposeSegmentPreview,
   syncSegmentPreview,
 } from "../renderer/three/segmentPreview";
+import {
+  disposePlanePreview,
+  syncPlanePreview,
+} from "../renderer/three/planePreview";
 import { getScreenSpaceSnapResult } from "../renderer/three/screenSpaceSnapAdapter";
 import {
   distancePointToScreenPoint,
@@ -51,9 +59,11 @@ interface SceneViewportProps {
   document: BoardDocument;
   currentTool: ToolName;
   highlightedPointIds: readonly EntityId[];
+  highlightedEntityIds: readonly EntityId[];
   preselectedEntityId: EntityId | null;
   previewPosition: Vec3 | null;
   segmentPreviewStartPosition: Vec3 | null;
+  planePreviewPoints: readonly [Vec3, Vec3, Vec3] | null;
   focusRequestId: number;
   onCanvasPointerDown(pointerInfo: PointerInfo): void;
   onCanvasPointerMove(pointerInfo: PointerInfo): void;
@@ -77,15 +87,6 @@ const getPointLabelName = (point: PointEntity | null): string | null => {
 
 const shouldShowPointLabel = (point: PointEntity): boolean =>
   point.visible && Boolean(getPointLabelName(point));
-
-const getPointEntity = (
-  document: BoardDocument,
-  pointId: EntityId,
-): PointEntity | null => {
-  const entity = document.entities[pointId];
-
-  return entity?.kind === "point" ? entity : null;
-};
 
 const getSegmentLabelName = (
   segment: SegmentEntity,
@@ -137,9 +138,11 @@ function SceneViewport({
   document,
   currentTool,
   highlightedPointIds,
+  highlightedEntityIds,
   preselectedEntityId,
   previewPosition,
   segmentPreviewStartPosition,
+  planePreviewPoints,
   focusRequestId,
   onCanvasPointerDown,
   onCanvasPointerMove,
@@ -249,7 +252,7 @@ function SceneViewport({
       documentRef.current.settings.activeDrawingPlane,
     );
 
-    const axes = createAxesWithLabels();
+    const axes = createAxesWithLabels(documentRef.current.settings.coordinateHalfSize);
     scene.add(axes);
 
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.75);
@@ -572,11 +575,14 @@ function SceneViewport({
             }
 
             const labelName = getPointLabelName(entity);
-            const screenPosition = worldPositionToScreenPosition(
-              entity.position,
-              camera,
-              renderer.domElement,
-            );
+            const position = getPointWorldPosition(currentDocument, entity.id);
+            const screenPosition = position
+              ? worldPositionToScreenPosition(
+                  position,
+                  camera,
+                  renderer.domElement,
+                )
+              : null;
 
             return screenPosition && labelName
               ? [
@@ -598,20 +604,23 @@ function SceneViewport({
 
           if (entity.kind === "segment" && entity.visible) {
             const labelName = getSegmentLabelName(entity);
-            const startPoint = getPointEntity(
+            const startPoint = getPointWorldPosition(
               currentDocument,
               entity.pointIds[0],
             );
-            const endPoint = getPointEntity(currentDocument, entity.pointIds[1]);
+            const endPoint = getPointWorldPosition(
+              currentDocument,
+              entity.pointIds[1],
+            );
 
             if (!labelName || !startPoint || !endPoint) {
               return [];
             }
 
             const midpoint: Vec3 = {
-              x: (startPoint.position.x + endPoint.position.x) / 2,
-              y: (startPoint.position.y + endPoint.position.y) / 2,
-              z: (startPoint.position.z + endPoint.position.z) / 2,
+              x: (startPoint.x + endPoint.x) / 2,
+              y: (startPoint.y + endPoint.y) / 2,
+              z: (startPoint.z + endPoint.z) / 2,
             };
             const screenPosition = worldPositionToScreenPosition(
               midpoint,
@@ -638,7 +647,10 @@ function SceneViewport({
 
           if (entity.kind === "plane" && (entity.visible ?? true)) {
             const labelName = getPlaneLabelName(entity);
-            const points = getPlanePoints(currentDocument, entity.pointIds);
+            const points = getPlaneWorldPositions(
+              currentDocument,
+              entity.pointIds,
+            );
 
             if (!labelName || !points) {
               return [];
@@ -646,19 +658,19 @@ function SceneViewport({
 
             const centroid: Vec3 = {
               x:
-                (points[0].position.x +
-                  points[1].position.x +
-                  points[2].position.x) /
+                (points[0].x +
+                  points[1].x +
+                  points[2].x) /
                 3,
               y:
-                (points[0].position.y +
-                  points[1].position.y +
-                  points[2].position.y) /
+                (points[0].y +
+                  points[1].y +
+                  points[2].y) /
                 3,
               z:
-                (points[0].position.z +
-                  points[1].position.z +
-                  points[2].position.z) /
+                (points[0].z +
+                  points[1].z +
+                  points[2].z) /
                 3,
             };
             const screenPosition = worldPositionToScreenPosition(
@@ -714,6 +726,7 @@ function SceneViewport({
       window.removeEventListener("keydown", handleKeyDown);
       disposePreviewCursor(scene);
       disposeSegmentPreview(scene);
+      disposePlanePreview(scene);
       disposeDrawingPlaneOverlay(scene);
       disposeAxesWithLabels(axes);
       clearEntityObjects(scene);
@@ -763,14 +776,26 @@ function SceneViewport({
       return;
     }
 
+    syncAxesWithLabels(sceneRef.current, document.settings);
+  }, [
+    document.settings.coordinateHalfSize,
+    document.settings.showAxes,
+  ]);
+
+  useEffect(() => {
+    if (!sceneRef.current) {
+      return;
+    }
+
     syncDocumentEntitiesToScene(
       sceneRef.current,
       document,
       highlightedPointIds,
+      highlightedEntityIds,
       preselectedEntityId,
     );
     syncLineResolution();
-  }, [document, highlightedPointIds, preselectedEntityId]);
+  }, [document, highlightedEntityIds, highlightedPointIds, preselectedEntityId]);
 
   useEffect(() => {
     if (!sceneRef.current) {
@@ -788,7 +813,10 @@ function SceneViewport({
     syncPreviewCursor(
       sceneRef.current,
       previewPosition,
-      currentTool === "point" || currentTool === "segment",
+      currentTool === "point" ||
+        currentTool === "segment" ||
+        currentTool === "parallel" ||
+        currentTool === "plane",
     );
   }, [currentTool, previewPosition]);
 
@@ -801,10 +829,25 @@ function SceneViewport({
       sceneRef.current,
       segmentPreviewStartPosition,
       previewPosition,
-      currentTool === "segment" && segmentPreviewStartPosition !== null,
+      (currentTool === "segment" ||
+        currentTool === "perpendicular" ||
+        currentTool === "parallel") &&
+        segmentPreviewStartPosition !== null,
     );
     syncLineResolution();
   }, [currentTool, previewPosition, segmentPreviewStartPosition]);
+
+  useEffect(() => {
+    if (!sceneRef.current) {
+      return;
+    }
+
+    syncPlanePreview(
+      sceneRef.current,
+      planePreviewPoints,
+      currentTool === "parallel" && planePreviewPoints !== null,
+    );
+  }, [currentTool, planePreviewPoints]);
 
   return (
     <div
@@ -813,6 +856,9 @@ function SceneViewport({
           "scene-viewport",
           currentTool === "point" ||
           currentTool === "segment" ||
+          currentTool === "perpendicular" ||
+          currentTool === "midpoint" ||
+          currentTool === "parallel" ||
           currentTool === "plane"
             ? "point-tool-active"
             : "",

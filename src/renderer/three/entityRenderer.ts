@@ -57,6 +57,7 @@ export const syncDocumentEntitiesToScene = (
   scene: THREE.Scene,
   document: BoardDocument,
   highlightedPointIds: readonly EntityId[] = [],
+  highlightedEntityIds: readonly EntityId[] = [],
   preselectedEntityId: EntityId | null = null,
 ): void => {
   const group = getEntityGroup(scene);
@@ -71,6 +72,7 @@ export const syncDocumentEntitiesToScene = (
       entity,
       document,
       highlightedPointIds,
+      highlightedEntityIds,
       preselectedEntityId,
     );
 

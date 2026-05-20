@@ -12,6 +12,7 @@ import {
   distanceBetweenVec3,
   snapNumberToGrid,
 } from "../geometry/geometryUtils";
+import { getPointWorldPosition } from "../geometry/pointPositionUtils";
 import type { Vec3 } from "../geometry/Vec3";
 import type { SnapResult } from "./SnapTypes";
 
@@ -206,15 +207,6 @@ const getNearestAxisGridPointSnap = (
   };
 };
 
-const getPointEntity = (
-  document: BoardDocument,
-  entityId: EntityId,
-): PointEntity | null => {
-  const entity = document.entities[entityId];
-
-  return entity?.kind === "point" ? entity : null;
-};
-
 const getNearestPointSnap = (
   rawPosition: Vec3,
   document: BoardDocument,
@@ -227,7 +219,13 @@ const getNearestPointSnap = (
       continue;
     }
 
-    const distance = distanceBetweenVec3(rawPosition, entity.position);
+    const position = getPointWorldPosition(document, entity.id);
+
+    if (!position) {
+      continue;
+    }
+
+    const distance = distanceBetweenVec3(rawPosition, position);
 
     if (distance < nearestDistance) {
       nearestPoint = entity;
@@ -240,7 +238,7 @@ const getNearestPointSnap = (
   }
 
   return {
-    position: nearestPoint.position,
+    position: getPointWorldPosition(document, nearestPoint.id) ?? nearestPoint.position,
     type: "point",
     targetEntityId: nearestPoint.id,
     description: `point ${getPointName(nearestPoint)}`,
@@ -250,10 +248,10 @@ const getNearestPointSnap = (
 
 const getSegmentProjection = (
   rawPosition: Vec3,
-  startPoint: PointEntity,
-  endPoint: PointEntity,
+  startPoint: Vec3,
+  endPoint: Vec3,
 ): Vec3 | null => {
-  const segmentVector = subtract(endPoint.position, startPoint.position);
+  const segmentVector = subtract(endPoint, startPoint);
   const segmentLengthSquared = lengthSquared(segmentVector);
 
   if (segmentLengthSquared <= Number.EPSILON) {
@@ -261,14 +259,14 @@ const getSegmentProjection = (
   }
 
   const t =
-    dot(subtract(rawPosition, startPoint.position), segmentVector) /
+    dot(subtract(rawPosition, startPoint), segmentVector) /
     segmentLengthSquared;
 
   if (t < 0 || t > 1) {
     return null;
   }
 
-  return add(startPoint.position, scale(segmentVector, t));
+  return add(startPoint, scale(segmentVector, t));
 };
 
 const getNearestSegmentSnap = (
@@ -284,8 +282,8 @@ const getNearestSegmentSnap = (
     }
 
     const [startPointId, endPointId] = entity.pointIds;
-    const startPoint = getPointEntity(document, startPointId);
-    const endPoint = getPointEntity(document, endPointId);
+    const startPoint = getPointWorldPosition(document, startPointId);
+    const endPoint = getPointWorldPosition(document, endPointId);
 
     if (!startPoint || !endPoint) {
       continue;
@@ -297,10 +295,7 @@ const getNearestSegmentSnap = (
       endPoint,
     );
 
-    if (
-      !projectedPosition ||
-      !isOnDrawingPlane(projectedPosition, activeDrawingPlane)
-    ) {
+    if (!projectedPosition) {
       continue;
     }
 

@@ -27,6 +27,8 @@ export interface BoardSettings {
   readonly showDrawingPlane: boolean;
   readonly drawingPlaneOpacity: number;
   readonly drawingPlaneSolid: boolean;
+  readonly coordinateHalfSize: number;
+  readonly showBoundaryCube: boolean;
 }
 
 export interface CameraState {

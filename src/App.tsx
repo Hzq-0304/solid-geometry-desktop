@@ -11,13 +11,20 @@ import {
   Ruler,
 } from "lucide-react";
 import GreekLetterKeyboard from "./components/GreekLetterKeyboard";
+import { AddExtensionCommand } from "./core/command/AddExtensionCommand";
 import SceneViewport from "./components/SceneViewport";
+import { AddLinePlanePerpendicularCommand } from "./core/command/AddLinePlanePerpendicularCommand";
 import { AddMeasurementCommand } from "./core/command/AddMeasurementCommand";
+import { AddMidpointCommand } from "./core/command/AddMidpointCommand";
+import { AddParallelPlaneCommand } from "./core/command/AddParallelPlaneCommand";
+import { AddParallelSegmentCommand } from "./core/command/AddParallelSegmentCommand";
+import { AddPerpendicularLineCommand } from "./core/command/AddPerpendicularLineCommand";
 import { AddPlaneCommand } from "./core/command/AddPlaneCommand";
 import { AddPointCommand } from "./core/command/AddPointCommand";
 import { AddSegmentCommand } from "./core/command/AddSegmentCommand";
 import type { Command } from "./core/command/Command";
 import { CommandManager } from "./core/command/CommandManager";
+import { CompositeCommand } from "./core/command/CompositeCommand";
 import { DeleteEntityCommand } from "./core/command/DeleteEntityCommand";
 import { MovePointCommand } from "./core/command/MovePointCommand";
 import {
@@ -34,7 +41,10 @@ import type {
   BoardEntity,
   EntityId,
   EntityStyle,
+  ExtensionEntity,
+  LinePlanePerpendicularEntity,
   MeasurementEntity,
+  PerpendicularLineEntity,
   PlaneEntity,
   PointEntity,
   SegmentEntity,
@@ -43,10 +53,31 @@ import { createEntityId } from "./core/document/idGenerator";
 import { generatePointNames } from "./core/document/pointNameUtils";
 import {
   areVec3Equal,
+  calculatePerpendicularFromPointToSegment,
+  addVec3,
   cloneVec3,
   createVec3,
+  distanceBetweenVec3,
+  dotVec3,
+  normalizeVec3,
+  projectPointToLine,
+  scaleVec3,
+  subtractVec3,
 } from "./core/geometry/geometryUtils";
-import { getPlaneValidationStatus } from "./core/geometry/planeUtils";
+import {
+  calculatePlaneBoundaryExtension,
+  calculateSegmentBoundaryExtension,
+  getExtensionStatus,
+} from "./core/geometry/extensionUtils";
+import {
+  getPlaneFromThreePoints,
+  getPlaneValidationStatus,
+} from "./core/geometry/planeUtils";
+import {
+  calculateLinePlanePerpendicular,
+} from "./core/geometry/linePlanePerpendicularUtils";
+import { getObjectInspectorInfo } from "./core/geometry/objectInspector";
+import { getPointWorldPosition } from "./core/geometry/pointPositionUtils";
 import {
   calculateMeasurementValue,
   getLinePlaneAngleBySegmentAndPlaneId,
@@ -81,12 +112,34 @@ type AngleMeasureMode =
   | "planeXYPlane"
   | "planePlane";
 type PlaneCreationMode = "threePoint";
-type PreselectedEntityType = "point" | "segment" | "plane" | "measurement";
+type PerpendicularMode = "pointLine" | "linePlane";
+type ExtendMode = "auto" | "segmentToBoundary" | "planeToBoundary";
+type ParallelMode = "auto" | "segment" | "plane";
+type PreselectedEntityType =
+  | "point"
+  | "segment"
+  | "perpendicularLine"
+  | "linePlanePerpendicular"
+  | "extension"
+  | "plane"
+  | "measurement";
 
 interface Preselection {
   readonly entityId: EntityId;
   readonly entityType: PreselectedEntityType;
 }
+
+type ParallelDraft =
+  | {
+      readonly kind: "segment";
+      readonly sourceSegmentId: EntityId;
+      readonly sourceAnchorEndpoint: "start" | "end";
+    }
+  | {
+      readonly kind: "plane";
+      readonly sourcePlaneId: EntityId;
+      readonly sourceAnchorVertexIndex: 0 | 1 | 2;
+    };
 
 interface ToolIconProps {
   readonly size?: string | number;
@@ -122,6 +175,10 @@ const constructTools: Array<{
   { name: "select", label: "\u9009\u62e9", icon: MousePointer2 },
   { name: "point", label: "\u70b9", icon: SolidPointIcon },
   { name: "segment", label: "\u7ebf\u6bb5", icon: Ruler },
+  { name: "perpendicular", label: "\u5782\u7ebf", icon: Ruler },
+  { name: "midpoint", label: "\u4e2d\u70b9", icon: SolidPointIcon },
+  { name: "extend", label: "\u5ef6\u957f", icon: Ruler },
+  { name: "parallel", label: "\u5e73\u884c", icon: Ruler },
   { name: "plane", label: "\u5e73\u9762", icon: SolidPlaneIcon },
 ];
 
@@ -138,6 +195,10 @@ const toolLabels: Record<ToolName, string> = {
   select: "\u9009\u62e9",
   point: "\u70b9",
   segment: "\u7ebf\u6bb5",
+  perpendicular: "\u5782\u7ebf",
+  midpoint: "\u4e2d\u70b9",
+  extend: "\u5ef6\u957f",
+  parallel: "\u5e73\u884c",
   plane: "\u5e73\u9762",
   move: "\u79fb\u52a8",
   measureLength: "\u957f\u5ea6",
@@ -163,6 +224,7 @@ const SNAP_PIXEL_RADIUS_STEP = 1;
 const MAX_POINT_DRAG_COORDINATE = 10000;
 const MAX_POINT_DRAG_STEP = 1000;
 const COORDINATE_POINT_LIMIT = 10000;
+const CONSTRUCTION_EPSILON = 1e-6;
 
 const createPointEntity = (
   id: EntityId,
@@ -181,6 +243,223 @@ const createPointEntity = (
     locked: false,
     position,
     nameSource: "auto",
+    pointKind: "free",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+};
+
+const createFootToPlanePointEntity = (
+  id: EntityId,
+  name: string,
+  position: Vec3,
+  sourcePointId: EntityId,
+  targetPlaneId: EntityId,
+): PointEntity => {
+  const timestamp = new Date().toISOString();
+
+  return {
+    id,
+    kind: "point",
+    name,
+    style: { color: DEFAULT_POINT_COLOR },
+    visible: true,
+    locked: false,
+    position,
+    nameSource: "auto",
+    pointKind: "constructed",
+    construction: {
+      kind: "footToPlane",
+      sourcePointId,
+      targetPlaneId,
+    },
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+};
+
+const createFootToLinePointEntity = (
+  id: EntityId,
+  name: string,
+  position: Vec3,
+  sourcePointId: EntityId,
+  targetSegmentId: EntityId,
+): PointEntity => {
+  const timestamp = new Date().toISOString();
+
+  return {
+    id,
+    kind: "point",
+    name,
+    style: { color: DEFAULT_POINT_COLOR },
+    visible: true,
+    locked: false,
+    position,
+    nameSource: "auto",
+    pointKind: "constructed",
+    construction: {
+      kind: "footToLine",
+      sourcePointId,
+      targetSegmentId,
+    },
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+};
+
+const createMidpointEntity = (
+  id: EntityId,
+  name: string,
+  position: Vec3,
+  pointAId: EntityId,
+  pointBId: EntityId,
+): PointEntity => {
+  const timestamp = new Date().toISOString();
+
+  return {
+    id,
+    kind: "point",
+    name,
+    style: { color: DEFAULT_POINT_COLOR },
+    visible: true,
+    locked: false,
+    position,
+    nameSource: "auto",
+    pointKind: "constructed",
+    construction: {
+      kind: "midpoint",
+      pointAId,
+      pointBId,
+    },
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+};
+
+const createLineDirectionPointEntity = (
+  id: EntityId,
+  name: string,
+  position: Vec3,
+  sourcePointId: EntityId,
+  targetSegmentId: EntityId,
+  guidePosition: Vec3,
+): PointEntity => {
+  const timestamp = new Date().toISOString();
+
+  return {
+    id,
+    kind: "point",
+    name,
+    style: { color: DEFAULT_POINT_COLOR },
+    visible: true,
+    locked: false,
+    position,
+    nameSource: "auto",
+    pointKind: "constructed",
+    construction: {
+      kind: "perpendicularDirectionToLine",
+      sourcePointId,
+      targetSegmentId,
+      guidePosition,
+    },
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+};
+
+const createPlaneDirectionPointEntity = (
+  id: EntityId,
+  name: string,
+  position: Vec3,
+  sourcePointId: EntityId,
+  targetPlaneId: EntityId,
+  sign: 1 | -1,
+  length: number,
+): PointEntity => {
+  const timestamp = new Date().toISOString();
+
+  return {
+    id,
+    kind: "point",
+    name,
+    style: { color: DEFAULT_POINT_COLOR },
+    visible: true,
+    locked: false,
+    position,
+    nameSource: "auto",
+    pointKind: "constructed",
+    construction: {
+      kind: "perpendicularDirectionToPlane",
+      sourcePointId,
+      targetPlaneId,
+      sign,
+      length,
+    },
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+};
+
+const createParallelSegmentEndpointEntity = (
+  id: EntityId,
+  name: string,
+  position: Vec3,
+  anchorPointId: EntityId,
+  sourceSegmentId: EntityId,
+  sourceAnchorEndpoint: "start" | "end",
+): PointEntity => {
+  const timestamp = new Date().toISOString();
+
+  return {
+    id,
+    kind: "point",
+    name,
+    style: { color: DEFAULT_POINT_COLOR },
+    visible: true,
+    locked: false,
+    position,
+    nameSource: "auto",
+    pointKind: "constructed",
+    construction: {
+      kind: "parallelSegmentEndpoint",
+      anchorPointId,
+      sourceSegmentId,
+      sourceAnchorEndpoint,
+      targetEndpoint: "other",
+    },
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+};
+
+const createParallelPlaneVertexEntity = (
+  id: EntityId,
+  name: string,
+  position: Vec3,
+  anchorPointId: EntityId,
+  sourcePlaneId: EntityId,
+  sourceAnchorVertexIndex: 0 | 1 | 2,
+  sourceVertexIndex: 0 | 1 | 2,
+): PointEntity => {
+  const timestamp = new Date().toISOString();
+
+  return {
+    id,
+    kind: "point",
+    name,
+    style: { color: DEFAULT_POINT_COLOR },
+    visible: true,
+    locked: false,
+    position,
+    nameSource: "auto",
+    pointKind: "constructed",
+    construction: {
+      kind: "parallelPlaneVertex",
+      anchorPointId,
+      sourcePlaneId,
+      sourceAnchorVertexIndex,
+      sourceVertexIndex,
+    },
     createdAt: timestamp,
     updatedAt: timestamp,
   };
@@ -234,6 +513,176 @@ const createPlaneEntity = (
       extensionOpacity: 0.12,
       showExtensionWhenSelected: true,
     },
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+};
+
+const createPerpendicularLineEntity = (
+  id: EntityId,
+  pointId: EntityId,
+  segmentId: EntityId,
+  footPointId: EntityId,
+  name: string,
+): PerpendicularLineEntity => {
+  const timestamp = new Date().toISOString();
+
+  return {
+    id,
+    kind: "perpendicularLine",
+    type: "perpendicularLine",
+    pointId,
+    segmentId,
+    footPointId,
+    constructionMode: "foot",
+    directionMode: "auto",
+    name,
+    nameSource: "auto",
+    style: {
+      lineColor: "#111827",
+      lineWidth: 3,
+      extensionColor: "#64748b",
+      extensionLineWidth: 1,
+      extensionDash: true,
+    },
+    visible: true,
+    locked: false,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+};
+
+const createLinePlanePerpendicularEntity = (
+  id: EntityId,
+  pointId: EntityId,
+  planeId: EntityId,
+  footPointId: EntityId,
+  name: string,
+): LinePlanePerpendicularEntity => {
+  const timestamp = new Date().toISOString();
+
+  return {
+    id,
+    kind: "linePlanePerpendicular",
+    type: "linePlanePerpendicular",
+    pointId,
+    planeId,
+    footPointId,
+    constructionMode: "foot",
+    directionMode: "auto",
+    name,
+    nameSource: "auto",
+    style: {
+      lineColor: "#111827",
+      lineWidth: 3,
+      extensionFillColor: "#93c5fd",
+      extensionFillOpacity: 0.14,
+      helperLineColor: "#64748b",
+      helperLineDash: true,
+    },
+    visible: true,
+    locked: false,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+};
+
+const createLineDirectionPerpendicularEntity = (
+  id: EntityId,
+  pointId: EntityId,
+  segmentId: EntityId,
+  directionPointId: EntityId,
+  name: string,
+): PerpendicularLineEntity => {
+  const timestamp = new Date().toISOString();
+
+  return {
+    id,
+    kind: "perpendicularLine",
+    type: "perpendicularLine",
+    pointId,
+    segmentId,
+    directionPointId,
+    constructionMode: "userDirection",
+    directionMode: "userPick",
+    name,
+    nameSource: "auto",
+    style: {
+      lineColor: "#111827",
+      lineWidth: 3,
+      extensionColor: "#64748b",
+      extensionLineWidth: 1,
+      extensionDash: true,
+    },
+    visible: true,
+    locked: false,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+};
+
+const createPlaneDirectionPerpendicularEntity = (
+  id: EntityId,
+  pointId: EntityId,
+  planeId: EntityId,
+  directionPointId: EntityId,
+  name: string,
+): LinePlanePerpendicularEntity => {
+  const timestamp = new Date().toISOString();
+
+  return {
+    id,
+    kind: "linePlanePerpendicular",
+    type: "linePlanePerpendicular",
+    pointId,
+    planeId,
+    directionPointId,
+    constructionMode: "userDirection",
+    directionMode: "userPick",
+    name,
+    nameSource: "auto",
+    style: {
+      lineColor: "#111827",
+      lineWidth: 3,
+      extensionFillColor: "#93c5fd",
+      extensionFillOpacity: 0.14,
+      helperLineColor: "#64748b",
+      helperLineDash: true,
+    },
+    visible: true,
+    locked: false,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+};
+
+const createExtensionEntity = (
+  id: EntityId,
+  targetId: EntityId,
+  targetType: ExtensionEntity["targetType"],
+  name: string,
+): ExtensionEntity => {
+  const timestamp = new Date().toISOString();
+
+  return {
+    id,
+    kind: "extension",
+    type: "extension",
+    targetId,
+    targetType,
+    mode: "toBoundaryCube",
+    name,
+    nameSource: "auto",
+    style: {
+      lineExtensionColor: "#6b7280",
+      lineExtensionWidth: 1,
+      lineExtensionDash: true,
+      planeExtensionColor: "#93c5fd",
+      planeExtensionOpacity: 0.14,
+      boundaryLineColor: "#60a5fa",
+    },
+    visible: true,
+    locked: false,
     createdAt: timestamp,
     updatedAt: timestamp,
   };
@@ -358,6 +807,32 @@ interface ResolvedPointerResult {
   readonly finalPosition: Vec3 | null;
 }
 
+interface ToastMessage {
+  readonly id: number;
+  readonly text: string;
+}
+
+interface PointInputResult {
+  readonly pointId: EntityId;
+  readonly point: PointEntity;
+  readonly position: Vec3;
+  readonly created: boolean;
+}
+
+type PerpendicularDirectionPickState =
+  | {
+      readonly kind: "line";
+      readonly pointId: EntityId;
+      readonly segmentId: EntityId;
+      readonly basePoint: Vec3;
+    }
+  | {
+      readonly kind: "plane";
+      readonly pointId: EntityId;
+      readonly planeId: EntityId;
+      readonly basePoint: Vec3;
+    };
+
 const formatCoordinate = (value: number): string => value.toFixed(2);
 const formatMeasurementValue = (value: number): string => value.toFixed(3);
 const formatAngleValue = (value: number): string => `${value.toFixed(2)}\u00b0`;
@@ -374,6 +849,68 @@ const formatVec3 = (position: Vec3 | null | undefined): string => {
 
 const clamp = (value: number, min: number, max: number): number =>
   Math.min(max, Math.max(min, value));
+
+interface LineDirectionPreview {
+  readonly guidePosition: Vec3;
+  readonly directionPoint: Vec3;
+}
+
+interface PlaneDirectionPreview {
+  readonly sign: 1 | -1;
+  readonly length: number;
+  readonly directionPoint: Vec3;
+}
+
+const getLinePerpendicularDirectionPreview = (
+  basePoint: Vec3,
+  segmentStart: Vec3,
+  segmentEnd: Vec3,
+  guidePosition: Vec3,
+): LineDirectionPreview | null => {
+  const segmentDirection = normalizeVec3(
+    subtractVec3(segmentEnd, segmentStart),
+  );
+
+  if (!segmentDirection) {
+    return null;
+  }
+
+  const guideVector = subtractVec3(guidePosition, basePoint);
+  const perpendicularVector = subtractVec3(
+    guideVector,
+    scaleVec3(segmentDirection, dotVec3(guideVector, segmentDirection)),
+  );
+
+  if (distanceBetweenVec3(perpendicularVector, { x: 0, y: 0, z: 0 }) < CONSTRUCTION_EPSILON) {
+    return null;
+  }
+
+  return {
+    guidePosition,
+    directionPoint: addVec3(basePoint, perpendicularVector),
+  };
+};
+
+const getPlaneNormalDirectionPreview = (
+  basePoint: Vec3,
+  planeNormal: Vec3,
+  guidePosition: Vec3,
+  minLength: number,
+): PlaneDirectionPreview => {
+  const guideVector = subtractVec3(guidePosition, basePoint);
+  const signedLength = dotVec3(guideVector, planeNormal);
+  const sign: 1 | -1 = signedLength < 0 ? -1 : 1;
+  const length = Math.max(Math.abs(signedLength), minLength);
+
+  return {
+    sign,
+    length,
+    directionPoint: addVec3(
+      basePoint,
+      scaleVec3(planeNormal, sign * length),
+    ),
+  };
+};
 
 const getSnapDescription = (snapResult: SnapResult | null): string => {
   if (!snapResult) {
@@ -437,10 +974,67 @@ const getPlaneStatusText = (
   return "\u6709\u6548";
 };
 
+const getPerpendicularFootStatusText = (
+  perpendicularLine: PerpendicularLineEntity,
+  document: BoardDocument,
+): string => {
+  const point = document.entities[perpendicularLine.pointId];
+  const segment = document.entities[perpendicularLine.segmentId];
+  const pointPosition = getPointWorldPosition(document, perpendicularLine.pointId);
+  const startPosition =
+    segment?.kind === "segment"
+      ? getPointWorldPosition(document, segment.pointIds[0])
+      : null;
+  const endPosition =
+    segment?.kind === "segment"
+      ? getPointWorldPosition(document, segment.pointIds[1])
+      : null;
+  const projection =
+    point?.kind === "point" &&
+    segment?.kind === "segment" &&
+    pointPosition &&
+    startPosition &&
+    endPosition
+      ? projectPointToLine(pointPosition, startPosition, endPosition)
+      : null;
+
+  if (!projection) {
+    return "invalid";
+  }
+
+  if (projection.t >= 0 && projection.t <= 1) {
+    return "\u5728\u7ebf\u6bb5\u4e0a";
+  }
+
+  return projection.t < 0
+    ? "\u5728 A \u7aef\u5ef6\u957f\u7ebf\u4e0a"
+    : "\u5728 B \u7aef\u5ef6\u957f\u7ebf\u4e0a";
+};
+
+const getLinePlanePerpendicularFootStatusText = (
+  linePlanePerpendicular: LinePlanePerpendicularEntity,
+  document: BoardDocument,
+): string => {
+  const point = document.entities[linePlanePerpendicular.pointId];
+  const plane = document.entities[linePlanePerpendicular.planeId];
+  const projection =
+    point?.kind === "point" && plane?.kind === "plane"
+      ? calculateLinePlanePerpendicular(point, plane, document)
+      : null;
+
+  if (!projection) {
+    return "invalid";
+  }
+
+  return projection.isFootInTriangle
+    ? "\u5728\u4e09\u89d2\u5f62\u5185"
+    : "\u5728\u4e09\u89d2\u5f62\u5916";
+};
+
 const getEntityDetail = (entity: BoardEntity, document: BoardDocument): string => {
   switch (entity.kind) {
     case "point":
-      return formatVec3(entity.position);
+      return formatVec3(getPointWorldPosition(document, entity.id) ?? entity.position);
     case "segment": {
       const [startPointId, endPointId] = entity.pointIds;
       const length = getSegmentLengthById(document, entity.id);
@@ -452,10 +1046,54 @@ const getEntityDetail = (entity: BoardEntity, document: BoardDocument): string =
         length === null ? "" : ` / length: ${formatMeasurementValue(length)}`
       }`;
     }
+    case "perpendicularLine": {
+      const point = document.entities[entity.pointId];
+      const segment = document.entities[entity.segmentId];
+      const projection =
+        point?.kind === "point" && segment?.kind === "segment"
+          ? calculatePerpendicularFromPointToSegment(point, segment, document)
+          : null;
+      const footText = !projection
+        ? "invalid"
+        : projection.isFootOnSegment
+          ? "\u5782\u8db3\u5728\u7ebf\u6bb5\u4e0a"
+          : projection.t < 0
+            ? "垂足在 A 端延长线上"
+            : "垂足在 B 端延长线上";
+
+      return `point: ${
+        point?.kind === "point" ? getPointNameById(document, point.id) : "invalid"
+      } / segment: ${
+        segment?.kind === "segment"
+          ? getSegmentDisplayName(document, segment)
+          : "invalid"
+      } / ${footText}`;
+    }
+    case "linePlanePerpendicular": {
+      const point = document.entities[entity.pointId];
+      const plane = document.entities[entity.planeId];
+
+      return `point: ${
+        point?.kind === "point" ? getPointNameById(document, point.id) : "invalid"
+      } / plane: ${
+        plane?.kind === "plane" ? getPlaneDisplayName(document, plane) : "invalid"
+      } / foot: ${getLinePlanePerpendicularFootStatusText(entity, document)}`;
+    }
     case "plane":
       return `points: ${entity.pointIds
         .map((pointId) => getPointNameById(document, pointId))
         .join(", ")} / status: ${getPlaneStatusText(entity, document)}`;
+    case "extension": {
+      const target = document.entities[entity.targetId];
+      const targetName =
+        target?.kind === "segment"
+          ? getSegmentDisplayName(document, target)
+          : target?.kind === "plane"
+            ? `plane ${getPlaneDisplayName(document, target)}`
+            : "invalid";
+
+      return `target: ${targetName} / boundary [-${document.settings.coordinateHalfSize}, ${document.settings.coordinateHalfSize}] / status: ${getExtensionStatus(entity, document)}`;
+    }
     case "measurement": {
       const calculation = calculateMeasurementValue(entity, document);
       const targetIds =
@@ -497,13 +1135,28 @@ const getSegmentDisplayName = (
 
 const isNameableEntity = (
   entity: BoardEntity | null,
-): entity is PointEntity | SegmentEntity | PlaneEntity =>
+): entity is
+  | PointEntity
+  | SegmentEntity
+  | PerpendicularLineEntity
+  | LinePlanePerpendicularEntity
+  | ExtensionEntity
+  | PlaneEntity =>
   entity?.kind === "point" ||
   entity?.kind === "segment" ||
+  entity?.kind === "perpendicularLine" ||
+  entity?.kind === "linePlanePerpendicular" ||
+  entity?.kind === "extension" ||
   entity?.kind === "plane";
 
 const getManualNameDraft = (
-  entity: PointEntity | SegmentEntity | PlaneEntity,
+  entity:
+    | PointEntity
+    | SegmentEntity
+    | PerpendicularLineEntity
+    | LinePlanePerpendicularEntity
+    | ExtensionEntity
+    | PlaneEntity,
 ): string => (entity.nameSource === "manual" ? entity.name?.trim() ?? "" : "");
 
 const getPreselectionDescription = (
@@ -525,6 +1178,12 @@ const getPreselectionDescription = (
       return `point ${entity.name ?? entity.id}`;
     case "segment":
       return `segment ${getSegmentDisplayName(document, entity)}`;
+    case "perpendicularLine":
+      return `perpendicular ${entity.name ?? entity.id}`;
+    case "linePlanePerpendicular":
+      return `line-plane perpendicular ${entity.name ?? entity.id}`;
+    case "extension":
+      return `extension ${entity.name ?? entity.id}`;
     case "plane":
       return `plane ${getPlaneDisplayName(document, entity)}`;
     case "measurement":
@@ -581,6 +1240,247 @@ const getPlaneToolStatus = (
     .join(", ");
 
   return `${pointNames} / \u8bf7\u9009\u62e9\u786e\u5b9a\u5e73\u9762\u7684\u7b2c\u4e09\u4e2a\u70b9`;
+};
+
+const getPerpendicularToolStatus = (
+  currentTool: ToolName,
+  perpendicularMode: PerpendicularMode,
+  directionPick: PerpendicularDirectionPickState | null,
+  pointId: EntityId | null,
+  segmentId: EntityId | null,
+  planeId: EntityId | null,
+  statusMessage: string | null,
+  document: BoardDocument,
+): string | null => {
+  if (currentTool !== "perpendicular") {
+    return null;
+  }
+
+  if (statusMessage) {
+    return statusMessage;
+  }
+
+  if (directionPick?.kind === "line") {
+    return "\u70b9\u5df2\u5728\u7ebf\u4e0a\uff0c\u8bf7\u79fb\u52a8\u9f20\u6807\u9009\u62e9\u5782\u7ebf\u65b9\u5411";
+  }
+
+  if (directionPick?.kind === "plane") {
+    return "\u70b9\u5df2\u5728\u5e73\u9762\u4e0a\uff0c\u8bf7\u9009\u62e9\u6cd5\u7ebf\u65b9\u5411";
+  }
+
+  if (perpendicularMode === "linePlane") {
+    if (pointId) {
+      return `\u8bf7\u9009\u62e9\u76ee\u6807\u5e73\u9762\uff0c\u4f5c\u8fc7 ${getPointNameById(
+        document,
+        pointId,
+      )} \u7684\u9762\u5782\u7ebf`;
+    }
+
+    if (planeId) {
+      const plane = document.entities[planeId];
+
+      return `\u8bf7\u9009\u62e9\u8fc7\u5782\u7ebf\u7684\u70b9${
+        plane?.kind === "plane"
+          ? `\uff0c\u76ee\u6807\u5e73\u9762 ${getPlaneDisplayName(
+              document,
+              plane,
+            )}`
+          : ""
+      }`;
+    }
+
+    return "\u8bf7\u9009\u62e9\u4e00\u4e2a\u70b9\u6216\u4e00\u4e2a\u5e73\u9762";
+  }
+
+  if (pointId) {
+    return `\u8bf7\u9009\u62e9\u76ee\u6807\u7ebf\u6bb5\uff0c\u4f5c\u8fc7 ${getPointNameById(
+      document,
+      pointId,
+    )} \u7684\u5782\u7ebf`;
+  }
+
+  if (segmentId) {
+    const segment = document.entities[segmentId];
+
+    return `\u8bf7\u9009\u62e9\u8fc7\u5782\u7ebf\u7684\u70b9${
+      segment?.kind === "segment"
+        ? `\uff0c\u76ee\u6807\u7ebf\u6bb5 ${getSegmentDisplayName(
+            document,
+            segment,
+          )}`
+        : ""
+    }`;
+  }
+
+  return "\u8bf7\u9009\u62e9\u4e00\u4e2a\u70b9\u6216\u4e00\u6761\u7ebf\u6bb5";
+};
+
+const getMidpointToolStatus = (
+  currentTool: ToolName,
+  firstPointId: EntityId | null,
+  statusMessage: string | null,
+  document: BoardDocument,
+): string | null => {
+  if (currentTool !== "midpoint") {
+    return null;
+  }
+
+  if (statusMessage) {
+    return statusMessage;
+  }
+
+  if (!firstPointId) {
+    return "\u8bf7\u9009\u62e9\u7b2c\u4e00\u4e2a\u70b9\uff0c\u6216\u76f4\u63a5\u70b9\u51fb\u4e00\u6761\u7ebf\u6bb5";
+  }
+
+  return `\u5df2\u9009\u62e9 ${getPointNameById(
+    document,
+    firstPointId,
+  )}\uff0c\u8bf7\u9009\u62e9\u7b2c\u4e8c\u4e2a\u70b9`;
+};
+
+const getExtendToolStatus = (
+  currentTool: ToolName,
+  extendMode: ExtendMode,
+  statusMessage: string | null,
+): string | null => {
+  if (currentTool !== "extend") {
+    return null;
+  }
+
+  if (statusMessage) {
+    return statusMessage;
+  }
+
+  if (extendMode === "segmentToBoundary") {
+    return "\u8bf7\u9009\u62e9\u8981\u5ef6\u957f\u5230\u8fb9\u754c\u7684\u7ebf\u6bb5";
+  }
+
+  if (extendMode === "planeToBoundary") {
+    return "\u8bf7\u9009\u62e9\u8981\u5ef6\u5c55\u5230\u8fb9\u754c\u7684\u5e73\u9762";
+  }
+
+  return "\u8bf7\u9009\u62e9\u8981\u5ef6\u957f\u7684\u7ebf\u6bb5\u6216\u5e73\u9762";
+};
+
+const getParallelToolStatus = (
+  currentTool: ToolName,
+  parallelMode: ParallelMode,
+  parallelDraft: ParallelDraft | null,
+  statusMessage: string | null,
+  document: BoardDocument,
+): string | null => {
+  if (currentTool !== "parallel") {
+    return null;
+  }
+
+  if (statusMessage) {
+    return statusMessage;
+  }
+
+  if (parallelDraft?.kind === "segment") {
+    const segment = document.entities[parallelDraft.sourceSegmentId];
+
+    return segment?.kind === "segment"
+      ? `\u6b63\u5728\u521b\u5efa\u4e0e ${getSegmentDisplayName(
+          document,
+          segment,
+        )} \u5e73\u884c\u7684\u7ebf\u6bb5`
+      : "\u6b63\u5728\u521b\u5efa\u5e73\u884c\u7ebf\u6bb5";
+  }
+
+  if (parallelDraft?.kind === "plane") {
+    const plane = document.entities[parallelDraft.sourcePlaneId];
+
+    return plane?.kind === "plane"
+      ? `\u6b63\u5728\u521b\u5efa\u4e0e\u5e73\u9762 ${getPlaneDisplayName(
+          document,
+          plane,
+        )} \u5e73\u884c\u7684\u5e73\u9762`
+      : "\u6b63\u5728\u521b\u5efa\u5e73\u884c\u5e73\u9762";
+  }
+
+  if (parallelMode === "segment") {
+    return "\u8bf7\u9009\u62e9\u76ee\u6807\u7ebf\u6bb5";
+  }
+
+  if (parallelMode === "plane") {
+    return "\u8bf7\u9009\u62e9\u76ee\u6807\u5e73\u9762";
+  }
+
+  return "\u8bf7\u9009\u62e9\u76ee\u6807\u7ebf\u6bb5\u6216\u5e73\u9762";
+};
+
+const getParallelSegmentPreview = (
+  document: BoardDocument,
+  draft: Extract<ParallelDraft, { kind: "segment" }>,
+  anchorPosition: Vec3 | null,
+): { readonly start: Vec3; readonly end: Vec3 } | null => {
+  if (!anchorPosition) {
+    return null;
+  }
+
+  const sourceSegment = document.entities[draft.sourceSegmentId];
+
+  if (sourceSegment?.kind !== "segment") {
+    return null;
+  }
+
+  const startPosition = getPointWorldPosition(
+    document,
+    sourceSegment.pointIds[0],
+  );
+  const endPosition = getPointWorldPosition(
+    document,
+    sourceSegment.pointIds[1],
+  );
+
+  if (!startPosition || !endPosition) {
+    return null;
+  }
+
+  if (draft.sourceAnchorEndpoint === "start") {
+    return {
+      start: anchorPosition,
+      end: addVec3(anchorPosition, subtractVec3(endPosition, startPosition)),
+    };
+  }
+
+  return {
+    start: addVec3(anchorPosition, subtractVec3(startPosition, endPosition)),
+    end: anchorPosition,
+  };
+};
+
+const getParallelPlanePreview = (
+  document: BoardDocument,
+  draft: Extract<ParallelDraft, { kind: "plane" }>,
+  anchorPosition: Vec3 | null,
+): readonly [Vec3, Vec3, Vec3] | null => {
+  if (!anchorPosition) {
+    return null;
+  }
+
+  const sourcePlane = document.entities[draft.sourcePlaneId];
+
+  if (sourcePlane?.kind !== "plane") {
+    return null;
+  }
+
+  const sourcePositions = sourcePlane.pointIds.map((pointId) =>
+    getPointWorldPosition(document, pointId),
+  );
+  const sourceAnchorPosition = sourcePositions[draft.sourceAnchorVertexIndex];
+
+  if (!sourceAnchorPosition || sourcePositions.some((position) => !position)) {
+    return null;
+  }
+
+  return sourcePositions.map((position, index) =>
+    index === draft.sourceAnchorVertexIndex
+      ? anchorPosition
+      : addVec3(anchorPosition, subtractVec3(position!, sourceAnchorPosition)),
+  ) as [Vec3, Vec3, Vec3];
 };
 
 const getMeasureLengthToolStatus = (
@@ -675,6 +1575,26 @@ function App() {
   const [planeStatusMessage, setPlaneStatusMessage] = useState<string | null>(
     null,
   );
+  const [perpendicularMode, setPerpendicularMode] =
+    useState<PerpendicularMode>("pointLine");
+  const [perpendicularPointId, setPerpendicularPointId] =
+    useState<EntityId | null>(null);
+  const [perpendicularSegmentId, setPerpendicularSegmentId] =
+    useState<EntityId | null>(null);
+  const [perpendicularPlaneId, setPerpendicularPlaneId] =
+    useState<EntityId | null>(null);
+  const [perpendicularStatusMessage, setPerpendicularStatusMessage] =
+    useState<string | null>(null);
+  const [perpendicularDirectionPick, setPerpendicularDirectionPick] =
+    useState<PerpendicularDirectionPickState | null>(null);
+  const [
+    perpendicularDirectionPreviewEnd,
+    setPerpendicularDirectionPreviewEnd,
+  ] = useState<Vec3 | null>(null);
+  const [midpointFirstPointId, setMidpointFirstPointId] =
+    useState<EntityId | null>(null);
+  const [midpointStatusMessage, setMidpointStatusMessage] =
+    useState<string | null>(null);
   const [measureFirstPointId, setMeasureFirstPointId] =
     useState<EntityId | null>(null);
   const [measureStatusMessage, setMeasureStatusMessage] = useState<string | null>(
@@ -709,6 +1629,20 @@ function App() {
     useState<PlaneCreationMode>("threePoint");
   const [showPointToolPanel, setShowPointToolPanel] = useState(false);
   const [showPlaneToolPanel, setShowPlaneToolPanel] = useState(false);
+  const [showPerpendicularToolPanel, setShowPerpendicularToolPanel] =
+    useState(false);
+  const [extendMode, setExtendMode] = useState<ExtendMode>("auto");
+  const [showExtendToolPanel, setShowExtendToolPanel] = useState(false);
+  const [extendStatusMessage, setExtendStatusMessage] = useState<string | null>(
+    null,
+  );
+  const [parallelMode, setParallelMode] = useState<ParallelMode>("auto");
+  const [showParallelToolPanel, setShowParallelToolPanel] = useState(false);
+  const [parallelDraft, setParallelDraft] = useState<ParallelDraft | null>(
+    null,
+  );
+  const [parallelStatusMessage, setParallelStatusMessage] =
+    useState<string | null>(null);
   const [showCoordinatePointModal, setShowCoordinatePointModal] =
     useState(false);
   const [angleMeasureMode, setAngleMeasureMode] =
@@ -728,11 +1662,13 @@ function App() {
   const [coordinatePointStatus, setCoordinatePointStatus] = useState<
     string | null
   >(null);
+  const [toastMessage, setToastMessage] = useState<ToastMessage | null>(null);
   const commandManagerRef = useRef<CommandManager | null>(null);
   const pointDragStateRef = useRef<PointDragState | null>(null);
   const preselectionRef = useRef<Preselection | null>(null);
   const latestPointToolResolvedResultRef =
     useRef<ResolvedPointerResult | null>(null);
+  const nextToastIdRef = useRef(1);
   const pointToolRef = useRef(new PointTool());
   const planeToolRef = useRef(new PlaneTool());
   const segmentToolRef = useRef(new SegmentTool());
@@ -745,6 +1681,11 @@ function App() {
   }
 
   const commandManager = commandManagerRef.current;
+  const showToast = (text: string) => {
+    const id = nextToastIdRef.current;
+    nextToastIdRef.current += 1;
+    setToastMessage({ id, text });
+  };
   const setCurrentPreselection = (nextPreselection: Preselection | null) => {
     preselectionRef.current = nextPreselection;
     setPreselection(nextPreselection);
@@ -764,12 +1705,35 @@ function App() {
   const selectedNameableEntity = isNameableEntity(singleSelectedEntity)
     ? singleSelectedEntity
     : null;
+  const objectInspectorInfo = singleSelectedEntity
+    ? getObjectInspectorInfo(singleSelectedEntity.id, displayDocument)
+    : null;
   const hasPointA = Boolean(displayDocument.entities[TEST_POINT_A_ID]);
   const hasPointB = Boolean(displayDocument.entities[TEST_POINT_B_ID]);
   const hasSegmentAB = Boolean(displayDocument.entities[TEST_SEGMENT_AB_ID]);
   const currentFileName = currentFilePath
     ? currentFilePath.split(/[\\/]/).pop() ?? currentFilePath
     : "Untitled.sgb";
+  const parallelAnchorPreviewPosition =
+    currentTool === "parallel" && parallelDraft
+      ? lastSnapResult?.position ?? lastPointerInfo?.worldPosition ?? null
+      : null;
+  const parallelPreviewSegment =
+    parallelDraft?.kind === "segment"
+      ? getParallelSegmentPreview(
+          displayDocument,
+          parallelDraft,
+          parallelAnchorPreviewPosition,
+        )
+      : null;
+  const parallelPreviewPlane =
+    parallelDraft?.kind === "plane"
+      ? getParallelPlanePreview(
+          displayDocument,
+          parallelDraft,
+          parallelAnchorPreviewPosition,
+        )
+      : null;
   const previewPosition =
     currentTool === "point" && pointCreationMode === "free"
       ? latestPointToolResolvedResultRef.current?.finalPosition ??
@@ -777,12 +1741,25 @@ function App() {
         null
       : currentTool === "segment"
         ? lastSnapResult?.position ?? null
+        : currentTool === "parallel" && parallelPreviewSegment
+          ? parallelPreviewSegment.end
+          : currentTool === "parallel" && parallelDraft
+            ? parallelAnchorPreviewPosition
+        : currentTool === "perpendicular" && perpendicularDirectionPick
+          ? perpendicularDirectionPreviewEnd
+        : currentTool === "plane"
+        ? lastSnapResult?.position ?? null
         : null;
   const segmentPreviewStartPosition =
     currentTool === "segment" &&
     segmentFirstPointId &&
     displayDocument.entities[segmentFirstPointId]?.kind === "point"
-      ? displayDocument.entities[segmentFirstPointId].position
+      ? getPointWorldPosition(displayDocument, segmentFirstPointId)
+      : currentTool === "perpendicular" && perpendicularDirectionPick
+        ? getPointWorldPosition(displayDocument, perpendicularDirectionPick.pointId) ??
+          perpendicularDirectionPick.basePoint
+      : currentTool === "parallel" && parallelPreviewSegment
+        ? parallelPreviewSegment.start
       : null;
 
   useEffect(() => {
@@ -798,6 +1775,20 @@ function App() {
     selectedNameableEntity?.name,
     selectedNameableEntity?.nameSource,
   ]);
+
+  useEffect(() => {
+    if (!toastMessage) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setToastMessage((currentToastMessage) =>
+        currentToastMessage?.id === toastMessage.id ? null : currentToastMessage,
+      );
+    }, 2600);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [toastMessage]);
   const segmentToolStatus = getSegmentToolStatus(
     currentTool,
     segmentFirstPointId,
@@ -807,6 +1798,34 @@ function App() {
     currentTool,
     planeSelectedPointIds,
     planeStatusMessage,
+    displayDocument,
+  );
+  const perpendicularToolStatus = getPerpendicularToolStatus(
+    currentTool,
+    perpendicularMode,
+    perpendicularDirectionPick,
+    perpendicularPointId,
+    perpendicularSegmentId,
+    perpendicularPlaneId,
+    perpendicularStatusMessage,
+    displayDocument,
+  );
+  const midpointToolStatus = getMidpointToolStatus(
+    currentTool,
+    midpointFirstPointId,
+    midpointStatusMessage,
+    displayDocument,
+  );
+  const extendToolStatus = getExtendToolStatus(
+    currentTool,
+    extendMode,
+    extendStatusMessage,
+  );
+  const parallelToolStatus = getParallelToolStatus(
+    currentTool,
+    parallelMode,
+    parallelDraft,
+    parallelStatusMessage,
     displayDocument,
   );
   const measureLengthToolStatus = getMeasureLengthToolStatus(
@@ -848,6 +1867,8 @@ function App() {
     addPointId(segmentFirstPointId);
     addPointId(measureFirstPointId);
     addPointId(draggedPointId);
+    addPointId(perpendicularPointId);
+    addPointId(midpointFirstPointId);
     planeSelectedPointIds.forEach(addPointId);
     angleSelectedPointIds.forEach(addPointId);
 
@@ -858,9 +1879,39 @@ function App() {
     displayDocument.selectedEntityIds,
     draggedPointId,
     measureFirstPointId,
+    midpointFirstPointId,
+    perpendicularPointId,
     planeSelectedPointIds,
     segmentFirstPointId,
   ]);
+  const highlightedEntityIds = useMemo(
+    () =>
+      [
+        perpendicularSegmentId &&
+        displayDocument.entities[perpendicularSegmentId]?.kind === "segment"
+          ? perpendicularSegmentId
+          : null,
+        perpendicularPlaneId &&
+        displayDocument.entities[perpendicularPlaneId]?.kind === "plane"
+          ? perpendicularPlaneId
+          : null,
+        parallelDraft?.kind === "segment" &&
+        displayDocument.entities[parallelDraft.sourceSegmentId]?.kind ===
+          "segment"
+          ? parallelDraft.sourceSegmentId
+          : null,
+        parallelDraft?.kind === "plane" &&
+        displayDocument.entities[parallelDraft.sourcePlaneId]?.kind === "plane"
+          ? parallelDraft.sourcePlaneId
+          : null,
+      ].filter((entityId): entityId is EntityId => Boolean(entityId)),
+    [
+      displayDocument.entities,
+      parallelDraft,
+      perpendicularPlaneId,
+      perpendicularSegmentId,
+    ],
+  );
 
   const sanitizeSelection = (nextDocument: BoardDocument): BoardDocument => {
     const selectedEntityIds = nextDocument.selectedEntityIds.filter((entityId) =>
@@ -1000,6 +2051,12 @@ function App() {
     setSegmentFirstPointId(null);
     setPlaneSelectedPointIds([]);
     setPlaneStatusMessage(null);
+    setPerpendicularPointId(null);
+    setPerpendicularSegmentId(null);
+    setPerpendicularPlaneId(null);
+    clearPerpendicularDirectionPick();
+    setPerpendicularStatusMessage(null);
+    setShowPerpendicularToolPanel(false);
     setMeasureFirstPointId(null);
     setMeasureStatusMessage(null);
     setAngleSelectedPointIds([]);
@@ -1336,6 +2393,30 @@ function App() {
     return `Plane ${planeCount + 1}`;
   };
 
+  const getNextPerpendicularLineName = () => {
+    const perpendicularCount = Object.values(
+      commandManager.getDocument().entities,
+    ).filter((entity) => entity.kind === "perpendicularLine").length;
+
+    return `Perpendicular ${perpendicularCount + 1}`;
+  };
+
+  const getNextLinePlanePerpendicularName = () => {
+    const perpendicularCount = Object.values(
+      commandManager.getDocument().entities,
+    ).filter((entity) => entity.kind === "linePlanePerpendicular").length;
+
+    return `Line Plane Perpendicular ${perpendicularCount + 1}`;
+  };
+
+  const getNextExtensionName = () => {
+    const extensionCount = Object.values(
+      commandManager.getDocument().entities,
+    ).filter((entity) => entity.kind === "extension").length;
+
+    return `Extension ${extensionCount + 1}`;
+  };
+
   const getNextMeasurementName = () => {
     const measurementCount = Object.values(
       commandManager.getDocument().entities,
@@ -1383,6 +2464,705 @@ function App() {
     );
 
     return pointNames.every(Boolean) ? pointNames.join("") : getNextPlaneName();
+  };
+
+  const getLineDirectionPreviewForState = (
+    state: Extract<PerpendicularDirectionPickState, { kind: "line" }>,
+    guidePosition: Vec3 | null,
+  ): LineDirectionPreview | null => {
+    if (!guidePosition) {
+      return null;
+    }
+
+    const currentDocument = commandManager.getDocument();
+    const segment = currentDocument.entities[state.segmentId];
+
+    if (segment?.kind !== "segment") {
+      return null;
+    }
+
+    const startPosition = getPointWorldPosition(
+      currentDocument,
+      segment.pointIds[0],
+    );
+    const endPosition = getPointWorldPosition(
+      currentDocument,
+      segment.pointIds[1],
+    );
+    const basePoint =
+      getPointWorldPosition(currentDocument, state.pointId) ?? state.basePoint;
+
+    return startPosition && endPosition
+      ? getLinePerpendicularDirectionPreview(
+          basePoint,
+          startPosition,
+          endPosition,
+          guidePosition,
+        )
+      : null;
+  };
+
+  const getPlaneDirectionPreviewForState = (
+    state: Extract<PerpendicularDirectionPickState, { kind: "plane" }>,
+    guidePosition: Vec3 | null,
+  ): PlaneDirectionPreview | null => {
+    if (!guidePosition) {
+      return null;
+    }
+
+    const currentDocument = commandManager.getDocument();
+    const plane = currentDocument.entities[state.planeId];
+
+    if (plane?.kind !== "plane") {
+      return null;
+    }
+
+    const points = [
+      getPointWorldPosition(currentDocument, plane.pointIds[0]),
+      getPointWorldPosition(currentDocument, plane.pointIds[1]),
+      getPointWorldPosition(currentDocument, plane.pointIds[2]),
+    ] as const;
+
+    if (!points[0] || !points[1] || !points[2]) {
+      return null;
+    }
+
+    const planeEquation = getPlaneFromThreePoints(points[0], points[1], points[2]);
+    const basePoint =
+      getPointWorldPosition(currentDocument, state.pointId) ?? state.basePoint;
+
+    return planeEquation
+      ? getPlaneNormalDirectionPreview(
+          basePoint,
+          planeEquation.normal,
+          guidePosition,
+          Math.max(currentDocument.settings.coordinateHalfSize * 0.2, 1),
+        )
+      : null;
+  };
+
+  const clearPerpendicularDirectionPick = () => {
+    setPerpendicularDirectionPick(null);
+    setPerpendicularDirectionPreviewEnd(null);
+  };
+
+  const addPerpendicularLine = (pointId: EntityId, segmentId: EntityId) => {
+    const currentDocument = commandManager.getDocument();
+    const point = currentDocument.entities[pointId];
+    const segment = currentDocument.entities[segmentId];
+
+    if (point?.kind !== "point" || segment?.kind !== "segment") {
+      setPerpendicularStatusMessage(
+        "\u8bf7\u9009\u62e9\u4e00\u4e2a\u70b9\u548c\u4e00\u6761\u7ebf\u6bb5",
+      );
+      return;
+    }
+
+    const pointPosition = getPointWorldPosition(currentDocument, pointId);
+    const startPosition = getPointWorldPosition(
+      currentDocument,
+      segment.pointIds[0],
+    );
+    const endPosition = getPointWorldPosition(
+      currentDocument,
+      segment.pointIds[1],
+    );
+    const projection =
+      pointPosition && startPosition && endPosition
+        ? projectPointToLine(pointPosition, startPosition, endPosition)
+        : null;
+
+    if (!projection) {
+      showToast("\u76ee\u6807\u7ebf\u6bb5\u957f\u5ea6\u4e3a 0\uff0c\u65e0\u6cd5\u4f5c\u5782\u7ebf");
+      setPerpendicularStatusMessage(
+        "\u76ee\u6807\u7ebf\u6bb5\u957f\u5ea6\u4e3a 0\uff0c\u65e0\u6cd5\u4f5c\u5782\u7ebf",
+      );
+      return;
+    }
+
+    if (
+      pointPosition &&
+      distanceBetweenVec3(pointPosition, projection.foot) < CONSTRUCTION_EPSILON
+    ) {
+      showToast("\u70b9\u5df2\u5728\u7ebf\u4e0a\uff0c\u8bf7\u79fb\u52a8\u9f20\u6807\u9009\u62e9\u5782\u7ebf\u65b9\u5411");
+      setPerpendicularDirectionPick({
+        kind: "line",
+        pointId,
+        segmentId,
+        basePoint: cloneVec3(pointPosition),
+      });
+      setPerpendicularPointId(null);
+      setPerpendicularSegmentId(null);
+      setPerpendicularStatusMessage(
+        "\u70b9\u5df2\u5728\u7ebf\u4e0a\uff0c\u8bf7\u79fb\u52a8\u9f20\u6807\u9009\u62e9\u5782\u7ebf\u65b9\u5411",
+      );
+      return;
+    }
+
+    const footPointId = createEntityId("point");
+    const perpendicularLine = createPerpendicularLineEntity(
+      createEntityId("perpendicularLine"),
+      pointId,
+      segmentId,
+      footPointId,
+      getNextPerpendicularLineName(),
+    );
+    const footPoint = createFootToLinePointEntity(
+      footPointId,
+      getNextPointName(),
+      cloneVec3(projection.foot),
+      pointId,
+      segmentId,
+    );
+
+    executeCommand(new AddPerpendicularLineCommand(perpendicularLine, footPoint));
+    clearPerpendicularDirectionPick();
+    setPerpendicularPointId(null);
+    setPerpendicularSegmentId(null);
+    setPerpendicularStatusMessage(
+      `\u5df2\u521b\u5efa\u8fc7 ${getPointNameById(
+        currentDocument,
+        pointId,
+      )} \u5782\u76f4\u4e8e ${getSegmentDisplayName(
+        currentDocument,
+        segment,
+      )} \u7684\u5782\u7ebf`,
+    );
+  };
+
+  const addLinePlanePerpendicular = (pointId: EntityId, planeId: EntityId) => {
+    const currentDocument = commandManager.getDocument();
+    const point = currentDocument.entities[pointId];
+    const plane = currentDocument.entities[planeId];
+
+    if (point?.kind !== "point" || plane?.kind !== "plane") {
+      setPerpendicularStatusMessage(
+        "\u8bf7\u9009\u62e9\u4e00\u4e2a\u70b9\u548c\u4e00\u4e2a\u5e73\u9762",
+      );
+      return;
+    }
+
+    const projection = calculateLinePlanePerpendicular(
+      point,
+      plane,
+      currentDocument,
+    );
+
+    if (!projection) {
+      showToast("\u5e73\u9762\u65e0\u6548\uff0c\u65e0\u6cd5\u4f5c\u5782\u7ebf");
+      setPerpendicularStatusMessage(
+        "\u5e73\u9762\u65e0\u6548\uff0c\u65e0\u6cd5\u4f5c\u5782\u7ebf",
+      );
+      return;
+    }
+
+    if (distanceBetweenVec3(projection.point, projection.foot) < CONSTRUCTION_EPSILON) {
+      showToast("\u70b9\u5df2\u5728\u5e73\u9762\u4e0a\uff0c\u8bf7\u9009\u62e9\u6cd5\u7ebf\u65b9\u5411");
+      setPerpendicularDirectionPick({
+        kind: "plane",
+        pointId,
+        planeId,
+        basePoint: cloneVec3(projection.point),
+      });
+      setPerpendicularPointId(null);
+      setPerpendicularPlaneId(null);
+      setPerpendicularStatusMessage(
+        "\u70b9\u5df2\u5728\u5e73\u9762\u4e0a\uff0c\u8bf7\u9009\u62e9\u6cd5\u7ebf\u65b9\u5411",
+      );
+      return;
+    }
+
+    const footPointId = createEntityId("point");
+    const linePlanePerpendicular = createLinePlanePerpendicularEntity(
+      createEntityId("linePlanePerpendicular"),
+      pointId,
+      planeId,
+      footPointId,
+      getNextLinePlanePerpendicularName(),
+    );
+    const footPoint = createFootToPlanePointEntity(
+      footPointId,
+      getNextPointName(),
+      cloneVec3(projection.foot),
+      pointId,
+      planeId,
+    );
+
+    executeCommand(
+      new AddLinePlanePerpendicularCommand(footPoint, linePlanePerpendicular),
+    );
+    clearPerpendicularDirectionPick();
+    setPerpendicularPointId(null);
+    setPerpendicularSegmentId(null);
+    setPerpendicularPlaneId(null);
+    setPerpendicularStatusMessage(
+      `\u5df2\u521b\u5efa\u8fc7 ${getPointNameById(
+        currentDocument,
+        pointId,
+      )} \u5782\u76f4\u4e8e\u5e73\u9762 ${getPlaneDisplayName(
+        currentDocument,
+        plane,
+      )} \u7684\u5782\u7ebf`,
+    );
+  };
+
+  const confirmPerpendicularDirection = (
+    guidePosition: Vec3 | null,
+  ): boolean => {
+    const directionPick = perpendicularDirectionPick;
+
+    if (!directionPick) {
+      return false;
+    }
+
+    if (directionPick.kind === "line") {
+      const preview = getLineDirectionPreviewForState(
+        directionPick,
+        guidePosition,
+      );
+
+      if (!preview) {
+        showToast("\u8bf7\u79fb\u52a8\u9f20\u6807\u9009\u62e9\u5782\u7ebf\u65b9\u5411");
+        setPerpendicularStatusMessage(
+          "\u8bf7\u79fb\u52a8\u9f20\u6807\u9009\u62e9\u5782\u7ebf\u65b9\u5411",
+        );
+        return true;
+      }
+
+      const directionPointId = createEntityId("point");
+      const directionPoint = createLineDirectionPointEntity(
+        directionPointId,
+        getNextPointName(),
+        cloneVec3(preview.directionPoint),
+        directionPick.pointId,
+        directionPick.segmentId,
+        cloneVec3(preview.guidePosition),
+      );
+      const perpendicularLine = createLineDirectionPerpendicularEntity(
+        createEntityId("perpendicularLine"),
+        directionPick.pointId,
+        directionPick.segmentId,
+        directionPointId,
+        getNextPerpendicularLineName(),
+      );
+
+      executeCommand(
+        new AddPerpendicularLineCommand(perpendicularLine, directionPoint),
+      );
+      clearPerpendicularDirectionPick();
+      setPerpendicularStatusMessage(
+        "\u5df2\u521b\u5efa\u7528\u6237\u65b9\u5411\u5782\u7ebf",
+      );
+      return true;
+    }
+
+    const preview = getPlaneDirectionPreviewForState(
+      directionPick,
+      guidePosition,
+    );
+
+    if (!preview) {
+      showToast("\u8bf7\u9009\u62e9\u6cd5\u7ebf\u65b9\u5411");
+      setPerpendicularStatusMessage("\u8bf7\u9009\u62e9\u6cd5\u7ebf\u65b9\u5411");
+      return true;
+    }
+
+    const directionPointId = createEntityId("point");
+    const directionPoint = createPlaneDirectionPointEntity(
+      directionPointId,
+      getNextPointName(),
+      cloneVec3(preview.directionPoint),
+      directionPick.pointId,
+      directionPick.planeId,
+      preview.sign,
+      preview.length,
+    );
+    const linePlanePerpendicular = createPlaneDirectionPerpendicularEntity(
+      createEntityId("linePlanePerpendicular"),
+      directionPick.pointId,
+      directionPick.planeId,
+      directionPointId,
+      getNextLinePlanePerpendicularName(),
+    );
+
+    executeCommand(
+      new AddLinePlanePerpendicularCommand(
+        directionPoint,
+        linePlanePerpendicular,
+      ),
+    );
+    clearPerpendicularDirectionPick();
+    setPerpendicularStatusMessage(
+      "\u5df2\u521b\u5efa\u7528\u6237\u65b9\u5411\u7ebf\u9762\u5782\u76f4",
+    );
+    return true;
+  };
+
+  const addExtension = (
+    targetId: EntityId,
+    targetType: ExtensionEntity["targetType"],
+  ) => {
+    const currentDocument = commandManager.getDocument();
+    const target = currentDocument.entities[targetId];
+
+    if (!target || target.kind !== targetType) {
+      showToast("\u76ee\u6807\u7f3a\u5931\uff0c\u65e0\u6cd5\u5ef6\u957f");
+      setExtendStatusMessage("\u76ee\u6807\u7f3a\u5931\uff0c\u65e0\u6cd5\u5ef6\u957f");
+      return;
+    }
+
+    const existingExtension = Object.values(currentDocument.entities).find(
+      (entity): entity is ExtensionEntity =>
+        entity.kind === "extension" &&
+        entity.targetId === targetId &&
+        entity.targetType === targetType &&
+        entity.mode === "toBoundaryCube",
+    );
+
+    if (existingExtension) {
+      showToast("\u8be5\u5bf9\u8c61\u5df2\u7ecf\u5ef6\u957f\u5230\u8fb9\u754c");
+      selectEntity(existingExtension.id);
+      setExtendStatusMessage("\u8be5\u5bf9\u8c61\u5df2\u7ecf\u5ef6\u957f\u5230\u8fb9\u754c");
+      return;
+    }
+
+    if (targetType === "segment" && target.kind === "segment") {
+      const result = calculateSegmentBoundaryExtension(target, currentDocument);
+
+      if (result.status === "degenerate") {
+        showToast("\u7ebf\u6bb5\u957f\u5ea6\u4e3a 0\uff0c\u65e0\u6cd5\u5ef6\u957f");
+        setExtendStatusMessage("\u7ebf\u6bb5\u957f\u5ea6\u4e3a 0\uff0c\u65e0\u6cd5\u5ef6\u957f");
+        return;
+      }
+
+      if (result.status !== "valid") {
+        showToast("\u8be5\u7ebf\u65e0\u6cd5\u5ef6\u957f\u5230\u5f53\u524d\u8fb9\u754c");
+        setExtendStatusMessage("\u8be5\u7ebf\u65e0\u6cd5\u5ef6\u957f\u5230\u5f53\u524d\u8fb9\u754c");
+        return;
+      }
+    }
+
+    if (targetType === "plane" && target.kind === "plane") {
+      const result = calculatePlaneBoundaryExtension(target, currentDocument);
+
+      if (result.status === "invalid-plane") {
+        showToast("\u5e73\u9762\u65e0\u6548\uff0c\u65e0\u6cd5\u5ef6\u5c55");
+        setExtendStatusMessage("\u5e73\u9762\u65e0\u6548\uff0c\u65e0\u6cd5\u5ef6\u5c55");
+        return;
+      }
+
+      if (result.status !== "valid") {
+        showToast("\u5e73\u9762\u65e0\u6cd5\u4e0e\u5f53\u524d\u8fb9\u754c\u76f8\u4ea4");
+        setExtendStatusMessage("\u5e73\u9762\u65e0\u6cd5\u4e0e\u5f53\u524d\u8fb9\u754c\u76f8\u4ea4");
+        return;
+      }
+    }
+
+    const extension = createExtensionEntity(
+      createEntityId("extension"),
+      targetId,
+      targetType,
+      getNextExtensionName(),
+    );
+
+    executeCommand(new AddExtensionCommand(extension));
+    setExtendStatusMessage(
+      targetType === "segment"
+        ? "\u5df2\u5ef6\u957f\u7ebf\u6bb5\u5230\u8fb9\u754c"
+        : "\u5df2\u5ef6\u5c55\u5e73\u9762\u5230\u8fb9\u754c",
+    );
+  };
+
+  const getNextPointNameAtOffset = (offset: number) => {
+    const pointCount = Object.values(commandManager.getDocument().entities).filter(
+      (entity) => entity.kind === "point",
+    ).length;
+
+    return `P${pointCount + offset}`;
+  };
+
+  const chooseParallelSegmentAnchor = (
+    sourceSegmentId: EntityId,
+    pointerPosition: Vec3 | null,
+  ): "start" | "end" | null => {
+    const currentDocument = commandManager.getDocument();
+    const segment = currentDocument.entities[sourceSegmentId];
+
+    if (segment?.kind !== "segment") {
+      return null;
+    }
+
+    const startPosition = getPointWorldPosition(
+      currentDocument,
+      segment.pointIds[0],
+    );
+    const endPosition = getPointWorldPosition(
+      currentDocument,
+      segment.pointIds[1],
+    );
+
+    if (!startPosition || !endPosition) {
+      return null;
+    }
+
+    if (!pointerPosition) {
+      return "start";
+    }
+
+    return distanceBetweenVec3(pointerPosition, startPosition) <=
+      distanceBetweenVec3(pointerPosition, endPosition)
+      ? "start"
+      : "end";
+  };
+
+  const chooseParallelPlaneAnchor = (
+    sourcePlaneId: EntityId,
+    pointerPosition: Vec3 | null,
+  ): 0 | 1 | 2 | null => {
+    const currentDocument = commandManager.getDocument();
+    const plane = currentDocument.entities[sourcePlaneId];
+
+    if (plane?.kind !== "plane") {
+      return null;
+    }
+
+    const positions = plane.pointIds.map((pointId) =>
+      getPointWorldPosition(currentDocument, pointId),
+    );
+
+    if (positions.some((position) => !position)) {
+      return null;
+    }
+
+    if (!pointerPosition) {
+      return 0;
+    }
+
+    const distances = positions.map((position) =>
+      distanceBetweenVec3(pointerPosition, position!),
+    );
+    const minIndex = distances.indexOf(Math.min(...distances));
+
+    return (minIndex === 1 ? 1 : minIndex === 2 ? 2 : 0) as 0 | 1 | 2;
+  };
+
+  const startParallelSegmentPreview = (
+    sourceSegmentId: EntityId,
+    pointerPosition: Vec3 | null,
+  ) => {
+    const sourceAnchorEndpoint = chooseParallelSegmentAnchor(
+      sourceSegmentId,
+      pointerPosition,
+    );
+
+    if (!sourceAnchorEndpoint) {
+      showToast("\u76ee\u6807\u7ebf\u6bb5\u65e0\u6548\uff0c\u65e0\u6cd5\u521b\u5efa\u5e73\u884c\u7ebf\u6bb5");
+      setParallelStatusMessage(
+        "\u76ee\u6807\u7ebf\u6bb5\u65e0\u6548\uff0c\u65e0\u6cd5\u521b\u5efa\u5e73\u884c\u7ebf\u6bb5",
+      );
+      return;
+    }
+
+    setParallelDraft({
+      kind: "segment",
+      sourceSegmentId,
+      sourceAnchorEndpoint,
+    });
+    setParallelStatusMessage(null);
+  };
+
+  const startParallelPlanePreview = (
+    sourcePlaneId: EntityId,
+    pointerPosition: Vec3 | null,
+  ) => {
+    const sourceAnchorVertexIndex = chooseParallelPlaneAnchor(
+      sourcePlaneId,
+      pointerPosition,
+    );
+
+    if (sourceAnchorVertexIndex === null) {
+      showToast("\u76ee\u6807\u5e73\u9762\u65e0\u6548\uff0c\u65e0\u6cd5\u521b\u5efa\u5e73\u884c\u5e73\u9762");
+      setParallelStatusMessage(
+        "\u76ee\u6807\u5e73\u9762\u65e0\u6548\uff0c\u65e0\u6cd5\u521b\u5efa\u5e73\u884c\u5e73\u9762",
+      );
+      return;
+    }
+
+    setParallelDraft({
+      kind: "plane",
+      sourcePlaneId,
+      sourceAnchorVertexIndex,
+    });
+    setParallelStatusMessage(null);
+  };
+
+  const confirmParallelDraft = (anchorPosition: Vec3 | null): boolean => {
+    if (!parallelDraft) {
+      return false;
+    }
+
+    if (!anchorPosition) {
+      showToast("\u65e0\u6cd5\u786e\u5b9a\u5e73\u884c\u5bf9\u8c61\u4f4d\u7f6e");
+      setParallelStatusMessage("\u65e0\u6cd5\u786e\u5b9a\u5e73\u884c\u5bf9\u8c61\u4f4d\u7f6e");
+      return true;
+    }
+
+    if (parallelDraft.kind === "segment") {
+      const preview = getParallelSegmentPreview(
+        commandManager.getDocument(),
+        parallelDraft,
+        anchorPosition,
+      );
+
+      if (!preview) {
+        showToast("\u76ee\u6807\u7ebf\u6bb5\u65e0\u6548\uff0c\u65e0\u6cd5\u521b\u5efa\u5e73\u884c\u7ebf\u6bb5");
+        setParallelStatusMessage(
+          "\u76ee\u6807\u7ebf\u6bb5\u65e0\u6548\uff0c\u65e0\u6cd5\u521b\u5efa\u5e73\u884c\u7ebf\u6bb5",
+        );
+        return true;
+      }
+
+      const anchorPointId = createEntityId("point");
+      const constructedPointId = createEntityId("point");
+      const anchorPoint = createPointEntity(
+        anchorPointId,
+        getNextPointNameAtOffset(1),
+        cloneVec3(anchorPosition),
+      );
+      const constructedPoint = createParallelSegmentEndpointEntity(
+        constructedPointId,
+        getNextPointNameAtOffset(2),
+        cloneVec3(
+          parallelDraft.sourceAnchorEndpoint === "start"
+            ? preview.end
+            : preview.start,
+        ),
+        anchorPointId,
+        parallelDraft.sourceSegmentId,
+        parallelDraft.sourceAnchorEndpoint,
+      );
+      const segment = createSegmentEntity(
+        createEntityId("segment"),
+        getNextSegmentName(),
+        anchorPointId,
+        constructedPointId,
+        "#111827",
+      );
+
+      executeCommand(
+        new AddParallelSegmentCommand(anchorPoint, constructedPoint, segment),
+      );
+      setParallelDraft(null);
+      setParallelStatusMessage("\u5df2\u521b\u5efa\u5e73\u884c\u7ebf\u6bb5");
+      return true;
+    }
+
+    const preview = getParallelPlanePreview(
+      commandManager.getDocument(),
+      parallelDraft,
+      anchorPosition,
+    );
+
+    if (!preview) {
+      showToast("\u76ee\u6807\u5e73\u9762\u65e0\u6548\uff0c\u65e0\u6cd5\u521b\u5efa\u5e73\u884c\u5e73\u9762");
+      setParallelStatusMessage(
+        "\u76ee\u6807\u5e73\u9762\u65e0\u6548\uff0c\u65e0\u6cd5\u521b\u5efa\u5e73\u884c\u5e73\u9762",
+      );
+      return true;
+    }
+
+    const anchorPointId = createEntityId("point");
+    const anchorPoint = createPointEntity(
+      anchorPointId,
+      getNextPointNameAtOffset(1),
+      cloneVec3(anchorPosition),
+    );
+    const constructedVertices = ([0, 1, 2] as const)
+      .filter((index) => index !== parallelDraft.sourceAnchorVertexIndex)
+      .map((sourceVertexIndex, index) =>
+        createParallelPlaneVertexEntity(
+          createEntityId("point"),
+          getNextPointNameAtOffset(index + 2),
+          cloneVec3(preview[sourceVertexIndex]),
+          anchorPointId,
+          parallelDraft.sourcePlaneId,
+          parallelDraft.sourceAnchorVertexIndex,
+          sourceVertexIndex,
+        ),
+      ) as [PointEntity, PointEntity];
+    const pointIds = ([0, 1, 2] as const).map((index) => {
+      if (index === parallelDraft.sourceAnchorVertexIndex) {
+        return anchorPointId;
+      }
+
+      const vertex = constructedVertices.find(
+        (constructedPoint) =>
+          constructedPoint.construction?.kind === "parallelPlaneVertex" &&
+          constructedPoint.construction.sourceVertexIndex === index,
+      );
+
+      return vertex?.id ?? anchorPointId;
+    }) as [EntityId, EntityId, EntityId];
+    const plane = createPlaneEntity(
+      createEntityId("plane"),
+      getNextPlaneName(),
+      pointIds[0],
+      pointIds[1],
+      pointIds[2],
+    );
+
+    executeCommand(
+      new AddParallelPlaneCommand(anchorPoint, constructedVertices, plane),
+    );
+    setParallelDraft(null);
+    setParallelStatusMessage("\u5df2\u521b\u5efa\u5e73\u884c\u5e73\u9762");
+    return true;
+  };
+
+  const addMidpoint = (pointAId: EntityId, pointBId: EntityId) => {
+    const currentDocument = commandManager.getDocument();
+    const pointA = currentDocument.entities[pointAId];
+    const pointB = currentDocument.entities[pointBId];
+    const pointAPosition = getPointWorldPosition(currentDocument, pointAId);
+    const pointBPosition = getPointWorldPosition(currentDocument, pointBId);
+
+    if (pointAId === pointBId) {
+      showToast("\u8bf7\u9009\u62e9\u4e0d\u540c\u7684\u70b9");
+      setMidpointStatusMessage("\u8bf7\u9009\u62e9\u4e0d\u540c\u7684\u70b9");
+      return;
+    }
+
+    if (
+      pointA?.kind !== "point" ||
+      pointB?.kind !== "point" ||
+      !pointAPosition ||
+      !pointBPosition
+    ) {
+      setMidpointStatusMessage("\u8bf7\u9009\u62e9\u4e24\u4e2a\u6709\u6548\u70b9");
+      return;
+    }
+
+    const midpointPosition = {
+      x: (pointAPosition.x + pointBPosition.x) / 2,
+      y: (pointAPosition.y + pointBPosition.y) / 2,
+      z: (pointAPosition.z + pointBPosition.z) / 2,
+    };
+    const midpoint = createMidpointEntity(
+      createEntityId("point"),
+      getNextPointName(),
+      midpointPosition,
+      pointAId,
+      pointBId,
+    );
+
+    executeCommand(new AddMidpointCommand(midpoint));
+    setMidpointFirstPointId(null);
+    setMidpointStatusMessage(
+      `\u5df2\u521b\u5efa ${getPointNameById(
+        currentDocument,
+        pointAId,
+      )}${getPointNameById(currentDocument, pointBId)} \u7684\u4e2d\u70b9`,
+    );
   };
 
   const getLengthMeasurementName = (
@@ -1863,6 +3643,7 @@ function App() {
   const activatePointFreeMode = () => {
     setPointCreationMode("free");
     setShowPointToolPanel(false);
+    setShowPerpendicularToolPanel(false);
     setShowAngleToolPanel(false);
     setShowLinePlaneAnglePanel(false);
     setShowPlanePlaneAnglePanel(false);
@@ -1873,6 +3654,7 @@ function App() {
 
   const openPointToolPanel = () => {
     setShowPointToolPanel((isOpen) => !isOpen);
+    setShowPerpendicularToolPanel(false);
     setShowAngleToolPanel(false);
     setShowLinePlaneAnglePanel(false);
     setShowPlanePlaneAnglePanel(false);
@@ -1882,6 +3664,7 @@ function App() {
   const activateCoordinatePointMode = () => {
     setPointCreationMode("coordinate");
     setShowPointToolPanel(false);
+    setShowPerpendicularToolPanel(false);
     setShowAngleToolPanel(false);
     setShowLinePlaneAnglePanel(false);
     setShowPlanePlaneAnglePanel(false);
@@ -1894,6 +3677,7 @@ function App() {
     setPlaneCreationMode("threePoint");
     setShowPlaneToolPanel(false);
     setShowPointToolPanel(false);
+    setShowPerpendicularToolPanel(false);
     setShowAngleToolPanel(false);
     setShowLinePlaneAnglePanel(false);
     setShowPlanePlaneAnglePanel(false);
@@ -1906,12 +3690,167 @@ function App() {
     activateThreePointPlaneMode();
   };
 
+  const activatePointLinePerpendicularMode = () => {
+    setPerpendicularMode("pointLine");
+    setShowPerpendicularToolPanel(false);
+    setShowPointToolPanel(false);
+    setShowAngleToolPanel(false);
+    setShowLinePlaneAnglePanel(false);
+    setShowPlanePlaneAnglePanel(false);
+    setShowCoordinatePointModal(false);
+    setPerpendicularPointId(null);
+    setPerpendicularSegmentId(null);
+    setPerpendicularPlaneId(null);
+    clearPerpendicularDirectionPick();
+    setPerpendicularStatusMessage(null);
+    changeTool("perpendicular");
+  };
+
+  const activateLinePlanePerpendicularMode = () => {
+    setPerpendicularMode("linePlane");
+    setShowPerpendicularToolPanel(false);
+    setShowPointToolPanel(false);
+    setShowAngleToolPanel(false);
+    setShowLinePlaneAnglePanel(false);
+    setShowPlanePlaneAnglePanel(false);
+    setShowCoordinatePointModal(false);
+    setPerpendicularPointId(null);
+    setPerpendicularSegmentId(null);
+    setPerpendicularPlaneId(null);
+    setPerpendicularStatusMessage(null);
+    changeTool("perpendicular");
+  };
+
+  const activateExtendAutoMode = () => {
+    setExtendMode("auto");
+    setShowExtendToolPanel(false);
+    setShowPointToolPanel(false);
+    setShowPerpendicularToolPanel(false);
+    setShowParallelToolPanel(false);
+    setShowAngleToolPanel(false);
+    setShowLinePlaneAnglePanel(false);
+    setShowPlanePlaneAnglePanel(false);
+    setShowCoordinatePointModal(false);
+    setExtendStatusMessage(null);
+    changeTool("extend");
+  };
+
+  const activateSegmentExtendMode = () => {
+    setExtendMode("segmentToBoundary");
+    setShowExtendToolPanel(false);
+    setShowPointToolPanel(false);
+    setShowPerpendicularToolPanel(false);
+    setShowParallelToolPanel(false);
+    setShowAngleToolPanel(false);
+    setShowLinePlaneAnglePanel(false);
+    setShowPlanePlaneAnglePanel(false);
+    setShowCoordinatePointModal(false);
+    setExtendStatusMessage(null);
+    changeTool("extend");
+  };
+
+  const activatePlaneExtendMode = () => {
+    setExtendMode("planeToBoundary");
+    setShowExtendToolPanel(false);
+    setShowPointToolPanel(false);
+    setShowPerpendicularToolPanel(false);
+    setShowParallelToolPanel(false);
+    setShowAngleToolPanel(false);
+    setShowLinePlaneAnglePanel(false);
+    setShowPlanePlaneAnglePanel(false);
+    setShowCoordinatePointModal(false);
+    setExtendStatusMessage(null);
+    changeTool("extend");
+  };
+
+  const openPerpendicularToolPanel = () => {
+    setShowPerpendicularToolPanel((isOpen) => !isOpen);
+    setShowPointToolPanel(false);
+    setShowExtendToolPanel(false);
+    setShowParallelToolPanel(false);
+    setShowAngleToolPanel(false);
+    setShowLinePlaneAnglePanel(false);
+    setShowPlanePlaneAnglePanel(false);
+    setShowCoordinatePointModal(false);
+    changeTool("perpendicular");
+  };
+
+  const openExtendToolPanel = () => {
+    setShowExtendToolPanel((isOpen) => !isOpen);
+    setShowPointToolPanel(false);
+    setShowPerpendicularToolPanel(false);
+    setShowParallelToolPanel(false);
+    setShowAngleToolPanel(false);
+    setShowLinePlaneAnglePanel(false);
+    setShowPlanePlaneAnglePanel(false);
+    setShowCoordinatePointModal(false);
+    changeTool("extend");
+  };
+
+  const activateParallelAutoMode = () => {
+    setParallelMode("auto");
+    setShowParallelToolPanel(false);
+    setShowPointToolPanel(false);
+    setShowPerpendicularToolPanel(false);
+    setShowExtendToolPanel(false);
+    setShowAngleToolPanel(false);
+    setShowLinePlaneAnglePanel(false);
+    setShowPlanePlaneAnglePanel(false);
+    setShowCoordinatePointModal(false);
+    setParallelDraft(null);
+    setParallelStatusMessage(null);
+    changeTool("parallel");
+  };
+
+  const activateParallelSegmentMode = () => {
+    setParallelMode("segment");
+    setShowParallelToolPanel(false);
+    setShowPointToolPanel(false);
+    setShowPerpendicularToolPanel(false);
+    setShowExtendToolPanel(false);
+    setShowAngleToolPanel(false);
+    setShowLinePlaneAnglePanel(false);
+    setShowPlanePlaneAnglePanel(false);
+    setShowCoordinatePointModal(false);
+    setParallelDraft(null);
+    setParallelStatusMessage(null);
+    changeTool("parallel");
+  };
+
+  const activateParallelPlaneMode = () => {
+    setParallelMode("plane");
+    setShowParallelToolPanel(false);
+    setShowPointToolPanel(false);
+    setShowPerpendicularToolPanel(false);
+    setShowExtendToolPanel(false);
+    setShowAngleToolPanel(false);
+    setShowLinePlaneAnglePanel(false);
+    setShowPlanePlaneAnglePanel(false);
+    setShowCoordinatePointModal(false);
+    setParallelDraft(null);
+    setParallelStatusMessage(null);
+    changeTool("parallel");
+  };
+
+  const openParallelToolPanel = () => {
+    setShowParallelToolPanel((isOpen) => !isOpen);
+    setShowPointToolPanel(false);
+    setShowPerpendicularToolPanel(false);
+    setShowExtendToolPanel(false);
+    setShowAngleToolPanel(false);
+    setShowLinePlaneAnglePanel(false);
+    setShowPlanePlaneAnglePanel(false);
+    setShowCoordinatePointModal(false);
+    changeTool("parallel");
+  };
+
   const activateThreePointAngleMode = () => {
     setAngleMeasureMode("threePoint");
     setShowAngleToolPanel(false);
     setShowLinePlaneAnglePanel(false);
     setShowPlanePlaneAnglePanel(false);
     setShowPointToolPanel(false);
+    setShowPerpendicularToolPanel(false);
     measureAngleToolRef.current.cancel();
     setAngleSelectedPointIds([]);
     setLinePlaneAngleSegmentId(null);
@@ -1932,6 +3871,7 @@ function App() {
       return nextIsOpen;
     });
     setShowPointToolPanel(false);
+    setShowPerpendicularToolPanel(false);
     setShowCoordinatePointModal(false);
     changeTool("measureAngle");
   };
@@ -1966,6 +3906,7 @@ function App() {
     setShowLinePlaneAnglePanel(false);
     setShowPlanePlaneAnglePanel(false);
     setShowPointToolPanel(false);
+    setShowPerpendicularToolPanel(false);
     measureAngleToolRef.current.cancel();
     setAngleSelectedPointIds([]);
     setLinePlaneAngleSegmentId(null);
@@ -1980,6 +3921,7 @@ function App() {
     setShowLinePlaneAnglePanel(false);
     setShowPlanePlaneAnglePanel(false);
     setShowPointToolPanel(false);
+    setShowPerpendicularToolPanel(false);
     measureAngleToolRef.current.cancel();
     setAngleSelectedPointIds([]);
     setLinePlaneAngleSegmentId(null);
@@ -1994,6 +3936,7 @@ function App() {
     setShowLinePlaneAnglePanel(false);
     setShowPlanePlaneAnglePanel(false);
     setShowPointToolPanel(false);
+    setShowPerpendicularToolPanel(false);
     measureAngleToolRef.current.cancel();
     setAngleSelectedPointIds([]);
     setLinePlaneAngleSegmentId(null);
@@ -2104,11 +4047,23 @@ function App() {
       | "snapToOrigin"
       | "snapToAxes"
       | "showDrawingPlane"
-      | "drawingPlaneSolid",
+      | "drawingPlaneSolid"
+      | "showBoundaryCube",
   ) => {
     updateDocumentSettings({
       [settingName]: !document.settings[settingName],
     });
+  };
+
+  const updateCoordinateHalfSize = (rawValue: string) => {
+    const nextHalfSize = Number(rawValue);
+
+    if (!Number.isFinite(nextHalfSize) || nextHalfSize <= 0) {
+      showToast("\u8bf7\u8f93\u5165\u5927\u4e8e 0 \u7684\u5750\u6807\u8f74\u534a\u957f");
+      return;
+    }
+
+    updateDocumentSettings({ coordinateHalfSize: nextHalfSize });
   };
 
   const adjustPointSnapPixelRadius = (direction: -1 | 1) => {
@@ -2182,6 +4137,70 @@ function App() {
     };
   };
 
+  const isPointCreatePositionValid = (position: Vec3 | null): position is Vec3 =>
+    Boolean(
+      position &&
+        Number.isFinite(position.x) &&
+        Number.isFinite(position.y) &&
+        Number.isFinite(position.z) &&
+        Math.abs(position.x) <= COORDINATE_POINT_LIMIT &&
+        Math.abs(position.y) <= COORDINATE_POINT_LIMIT &&
+        Math.abs(position.z) <= COORDINATE_POINT_LIMIT,
+    );
+
+  const resolvePointInputFromPointer = (
+    pointerInfo: PointerInfo,
+    clickPreselection: Preselection | null,
+    resolvedPointer: ResolvedPointerResult,
+  ): PointInputResult | null => {
+    const currentDocument = commandManager.getDocument();
+    const selectedPointId =
+      clickPreselection?.entityType === "point"
+        ? clickPreselection.entityId
+        : pointerInfo.hitEntityType === "point"
+          ? pointerInfo.hitEntityId
+          : pointerInfo.snapResult?.type === "point"
+            ? pointerInfo.snapResult.targetEntityId ?? null
+            : null;
+    const selectedPoint = selectedPointId
+      ? currentDocument.entities[selectedPointId]
+      : null;
+
+    if (selectedPoint?.kind === "point") {
+      const position =
+        getPointWorldPosition(currentDocument, selectedPoint.id) ??
+        selectedPoint.position;
+
+      return {
+        pointId: selectedPoint.id,
+        point: selectedPoint,
+        position,
+        created: false,
+      };
+    }
+
+    const position = resolvedPointer.finalPosition;
+
+    if (!isPointCreatePositionValid(position)) {
+      showToast("\u65e0\u6cd5\u786e\u5b9a\u521b\u5efa\u70b9\u4f4d\u7f6e");
+      return null;
+    }
+
+    const point = createPointEntity(
+      createEntityId("point"),
+      getNextPointName(),
+      cloneVec3(position),
+      { color: DEFAULT_POINT_COLOR },
+    );
+
+    return {
+      pointId: point.id,
+      point,
+      position,
+      created: true,
+    };
+  };
+
   const getPointPreselection = (
     pointerInfo: PointerInfo,
     sourceDocument: BoardDocument,
@@ -2227,6 +4246,50 @@ function App() {
 
     return entity?.kind === "plane" && entity.visible
       ? { entityId: entity.id, entityType: "plane" }
+      : null;
+  };
+
+  const getPerpendicularLinePreselection = (
+    pointerInfo: PointerInfo,
+    sourceDocument: BoardDocument,
+  ): Preselection | null => {
+    const entity =
+      pointerInfo.hitEntityType === "perpendicularLine" &&
+      pointerInfo.hitEntityId
+        ? sourceDocument.entities[pointerInfo.hitEntityId]
+        : null;
+
+    return entity?.kind === "perpendicularLine" && entity.visible
+      ? { entityId: entity.id, entityType: "perpendicularLine" }
+      : null;
+  };
+
+  const getLinePlanePerpendicularPreselection = (
+    pointerInfo: PointerInfo,
+    sourceDocument: BoardDocument,
+  ): Preselection | null => {
+    const entity =
+      pointerInfo.hitEntityType === "linePlanePerpendicular" &&
+      pointerInfo.hitEntityId
+        ? sourceDocument.entities[pointerInfo.hitEntityId]
+        : null;
+
+    return entity?.kind === "linePlanePerpendicular" && entity.visible
+      ? { entityId: entity.id, entityType: "linePlanePerpendicular" }
+      : null;
+  };
+
+  const getExtensionPreselection = (
+    pointerInfo: PointerInfo,
+    sourceDocument: BoardDocument,
+  ): Preselection | null => {
+    const entity =
+      pointerInfo.hitEntityType === "extension" && pointerInfo.hitEntityId
+        ? sourceDocument.entities[pointerInfo.hitEntityId]
+        : null;
+
+    return entity?.kind === "extension" && entity.visible
+      ? { entityId: entity.id, entityType: "extension" }
       : null;
   };
 
@@ -2293,15 +4356,91 @@ function App() {
         return (
           getPointPreselection(pointerInfo, sourceDocument) ??
           getSegmentPreselection(pointerInfo, sourceDocument) ??
+          getPerpendicularLinePreselection(pointerInfo, sourceDocument) ??
+          getLinePlanePerpendicularPreselection(pointerInfo, sourceDocument) ??
           getPlanePreselection(pointerInfo, sourceDocument) ??
+          getExtensionPreselection(pointerInfo, sourceDocument) ??
           getMeasurementPreselection(pointerInfo, sourceDocument)
         );
       case "point":
         return getSnapTargetPreselection(pointerInfo, sourceDocument);
       case "plane":
-        return getPointPreselection(pointerInfo, sourceDocument);
+        return (
+          getPointPreselection(pointerInfo, sourceDocument) ??
+          getSnapTargetPreselection(pointerInfo, sourceDocument)
+        );
       case "segment":
-        return getPointPreselection(pointerInfo, sourceDocument);
+        return (
+          getPointPreselection(pointerInfo, sourceDocument) ??
+          getSnapTargetPreselection(pointerInfo, sourceDocument)
+        );
+      case "midpoint":
+        return midpointFirstPointId
+          ? getPointPreselection(pointerInfo, sourceDocument)
+          : getPointPreselection(pointerInfo, sourceDocument) ??
+              getSegmentPreselection(pointerInfo, sourceDocument);
+      case "extend":
+        if (extendMode === "segmentToBoundary") {
+          return getSegmentPreselection(pointerInfo, sourceDocument);
+        }
+
+        if (extendMode === "planeToBoundary") {
+          return getPlanePreselection(pointerInfo, sourceDocument);
+        }
+
+        return (
+          getSegmentPreselection(pointerInfo, sourceDocument) ??
+          getPlanePreselection(pointerInfo, sourceDocument)
+        );
+      case "parallel":
+        if (parallelDraft) {
+          return getSnapTargetPreselection(pointerInfo, sourceDocument);
+        }
+
+        if (parallelMode === "segment") {
+          return getSegmentPreselection(pointerInfo, sourceDocument);
+        }
+
+        if (parallelMode === "plane") {
+          return getPlanePreselection(pointerInfo, sourceDocument);
+        }
+
+        return (
+          getSegmentPreselection(pointerInfo, sourceDocument) ??
+          getPlanePreselection(pointerInfo, sourceDocument)
+        );
+      case "perpendicular":
+        if (perpendicularDirectionPick) {
+          return getSnapTargetPreselection(pointerInfo, sourceDocument);
+        }
+
+        if (perpendicularMode === "linePlane") {
+          if (perpendicularPointId) {
+            return getPlanePreselection(pointerInfo, sourceDocument);
+          }
+
+          if (perpendicularPlaneId) {
+            return getPointPreselection(pointerInfo, sourceDocument);
+          }
+
+          return (
+            getPointPreselection(pointerInfo, sourceDocument) ??
+            getPlanePreselection(pointerInfo, sourceDocument)
+          );
+        }
+
+        if (perpendicularPointId) {
+          return getSegmentPreselection(pointerInfo, sourceDocument);
+        }
+
+        if (perpendicularSegmentId) {
+          return getPointPreselection(pointerInfo, sourceDocument);
+        }
+
+        return (
+          getPointPreselection(pointerInfo, sourceDocument) ??
+          getSegmentPreselection(pointerInfo, sourceDocument)
+        );
       case "measureLength":
         return (
           getSegmentPreselection(pointerInfo, sourceDocument) ??
@@ -2354,10 +4493,25 @@ function App() {
       return;
     }
 
+    if (entity.pointKind === "constructed") {
+      setCurrentPreselection(null);
+      setDraggedPointId(null);
+      selectEntity(entity.id);
+      showToast("\u6784\u9020\u70b9\u4e0d\u80fd\u76f4\u63a5\u62d6\u52a8");
+      setDeleteStatusMessage("\u6784\u9020\u70b9\u4e0d\u80fd\u76f4\u63a5\u62d6\u52a8");
+      return;
+    }
+
     pointDragStateRef.current = {
       pointId: entity.id,
-      oldPosition: cloneVec3(entity.position),
-      latestPosition: cloneVec3(entity.position),
+      oldPosition: cloneVec3(
+        getPointWorldPosition(commandManager.getDocument(), entity.id) ??
+          entity.position,
+      ),
+      latestPosition: cloneVec3(
+        getPointWorldPosition(commandManager.getDocument(), entity.id) ??
+          entity.position,
+      ),
     };
     setCurrentPreselection(null);
     setDraggedPointId(entity.id);
@@ -2431,6 +4585,25 @@ function App() {
       latestPointToolResolvedResultRef.current = null;
     }
 
+    if (currentTool === "perpendicular" && perpendicularDirectionPick) {
+      const directionPreview =
+        perpendicularDirectionPick.kind === "line"
+          ? getLineDirectionPreviewForState(
+              perpendicularDirectionPick,
+              resolvedPointer.finalPosition,
+            )
+          : getPlaneDirectionPreviewForState(
+              perpendicularDirectionPick,
+              resolvedPointer.finalPosition,
+            );
+
+      setPerpendicularDirectionPreviewEnd(
+        directionPreview?.directionPoint ?? null,
+      );
+    } else if (perpendicularDirectionPreviewEnd) {
+      setPerpendicularDirectionPreviewEnd(null);
+    }
+
     setLastPointerInfo(nextPointerInfo);
     setLastSnapResult(snapResult);
     setCurrentPreselection(getPointerPreselection(nextPointerInfo));
@@ -2485,36 +4658,414 @@ function App() {
     }
 
     if (currentTool === "segment") {
-      segmentToolRef.current.onPointerDown(nextPointerInfo, createToolContext());
-      setSegmentFirstPointId(segmentToolRef.current.getFirstPointId());
+      const pointInput = resolvePointInputFromPointer(
+        nextPointerInfo,
+        clickPreselection,
+        resolvedPointer,
+      );
+
+      if (!pointInput) {
+        return;
+      }
+
+      if (!segmentFirstPointId) {
+        if (pointInput.created) {
+          executeCommand(new AddPointCommand(pointInput.point));
+        }
+
+        segmentToolRef.current.cancel();
+        setSegmentFirstPointId(pointInput.pointId);
+        return;
+      }
+
+      const firstPosition = getPointWorldPosition(
+        commandManager.getDocument(),
+        segmentFirstPointId,
+      );
+
+      if (
+        segmentFirstPointId === pointInput.pointId ||
+        !firstPosition ||
+        distanceBetweenVec3(firstPosition, pointInput.position) <
+          CONSTRUCTION_EPSILON
+      ) {
+        showToast("\u7ebf\u6bb5\u7aef\u70b9\u4e0d\u80fd\u91cd\u5408");
+        return;
+      }
+
+      const segment = createSegmentEntity(
+        createEntityId("segment"),
+        getSegmentName(segmentFirstPointId, pointInput.pointId),
+        segmentFirstPointId,
+        pointInput.pointId,
+        "#111827",
+      );
+      const command = pointInput.created
+        ? new CompositeCommand("Add Point and Segment", [
+            new AddPointCommand(pointInput.point),
+            new AddSegmentCommand(segment),
+          ])
+        : new AddSegmentCommand(segment);
+
+      executeCommand(command);
+      segmentToolRef.current.cancel();
+      setSegmentFirstPointId(null);
+      return;
+    }
+
+    if (currentTool === "midpoint") {
+      const selectedPointId =
+        clickPreselection?.entityType === "point"
+          ? clickPreselection.entityId
+          : null;
+      const selectedSegmentId =
+        clickPreselection?.entityType === "segment"
+          ? clickPreselection.entityId
+          : null;
+
+      if (midpointFirstPointId) {
+        if (selectedPointId) {
+          addMidpoint(midpointFirstPointId, selectedPointId);
+        } else {
+          setMidpointStatusMessage("\u8bf7\u9009\u62e9\u7b2c\u4e8c\u4e2a\u70b9");
+        }
+
+        return;
+      }
+
+      if (selectedSegmentId) {
+        const segment = commandManager.getDocument().entities[selectedSegmentId];
+
+        if (segment?.kind === "segment") {
+          addMidpoint(segment.pointIds[0], segment.pointIds[1]);
+        }
+
+        return;
+      }
+
+      if (selectedPointId) {
+        setMidpointFirstPointId(selectedPointId);
+        setMidpointStatusMessage(null);
+        return;
+      }
+
+      setMidpointStatusMessage(
+        "\u8bf7\u9009\u62e9\u7b2c\u4e00\u4e2a\u70b9\uff0c\u6216\u76f4\u63a5\u70b9\u51fb\u4e00\u6761\u7ebf\u6bb5",
+      );
+      return;
+    }
+
+    if (currentTool === "perpendicular") {
+      if (perpendicularDirectionPick) {
+        confirmPerpendicularDirection(resolvedPointer.finalPosition);
+        return;
+      }
+
+      const selectedPointId =
+        clickPreselection?.entityType === "point"
+          ? clickPreselection.entityId
+          : null;
+      const selectedSegmentId =
+        clickPreselection?.entityType === "segment"
+          ? clickPreselection.entityId
+          : null;
+      const selectedPlaneId =
+        clickPreselection?.entityType === "plane"
+          ? clickPreselection.entityId
+          : null;
+
+      if (perpendicularMode === "linePlane") {
+        if (perpendicularPointId) {
+          if (selectedPlaneId) {
+            addLinePlanePerpendicular(perpendicularPointId, selectedPlaneId);
+          } else {
+            setPerpendicularStatusMessage(
+              "\u8bf7\u9009\u62e9\u76ee\u6807\u5e73\u9762",
+            );
+          }
+
+          return;
+        }
+
+        if (perpendicularPlaneId) {
+          if (selectedPointId) {
+            addLinePlanePerpendicular(selectedPointId, perpendicularPlaneId);
+          } else {
+            setPerpendicularStatusMessage(
+              "\u8bf7\u9009\u62e9\u8fc7\u5782\u7ebf\u7684\u70b9",
+            );
+          }
+
+          return;
+        }
+
+        if (selectedPointId) {
+          setPerpendicularPointId(selectedPointId);
+          setPerpendicularStatusMessage(null);
+          return;
+        }
+
+        if (selectedPlaneId) {
+          setPerpendicularPlaneId(selectedPlaneId);
+          setPerpendicularStatusMessage(null);
+          return;
+        }
+
+        setPerpendicularStatusMessage(
+          "\u8bf7\u9009\u62e9\u4e00\u4e2a\u70b9\u6216\u4e00\u4e2a\u5e73\u9762",
+        );
+        return;
+      }
+
+      if (perpendicularPointId) {
+        if (selectedSegmentId) {
+          addPerpendicularLine(perpendicularPointId, selectedSegmentId);
+        } else {
+          setPerpendicularStatusMessage("\u8bf7\u9009\u62e9\u76ee\u6807\u7ebf\u6bb5");
+        }
+
+        return;
+      }
+
+      if (perpendicularSegmentId) {
+        if (selectedPointId) {
+          addPerpendicularLine(selectedPointId, perpendicularSegmentId);
+        } else {
+          setPerpendicularStatusMessage(
+            "\u8bf7\u9009\u62e9\u8fc7\u5782\u7ebf\u7684\u70b9",
+          );
+        }
+
+        return;
+      }
+
+      if (selectedPointId) {
+        setPerpendicularPointId(selectedPointId);
+        setPerpendicularStatusMessage(null);
+        return;
+      }
+
+      if (selectedSegmentId) {
+        setPerpendicularSegmentId(selectedSegmentId);
+        setPerpendicularStatusMessage(null);
+        return;
+      }
+
+      setPerpendicularStatusMessage(
+        "\u8bf7\u9009\u62e9\u4e00\u4e2a\u70b9\u6216\u4e00\u6761\u7ebf\u6bb5",
+      );
+      return;
+    }
+
+    if (currentTool === "extend") {
+      const selectedSegmentId =
+        clickPreselection?.entityType === "segment"
+          ? clickPreselection.entityId
+          : null;
+      const selectedPlaneId =
+        clickPreselection?.entityType === "plane"
+          ? clickPreselection.entityId
+          : null;
+
+      if (extendMode === "segmentToBoundary") {
+        if (selectedSegmentId) {
+          addExtension(selectedSegmentId, "segment");
+        } else {
+          setExtendStatusMessage(
+            "\u8bf7\u9009\u62e9\u8981\u5ef6\u957f\u5230\u8fb9\u754c\u7684\u7ebf\u6bb5",
+          );
+        }
+
+        return;
+      }
+
+      if (extendMode === "planeToBoundary") {
+        if (selectedPlaneId) {
+          addExtension(selectedPlaneId, "plane");
+        } else {
+          setExtendStatusMessage(
+            "\u8bf7\u9009\u62e9\u8981\u5ef6\u5c55\u5230\u8fb9\u754c\u7684\u5e73\u9762",
+          );
+        }
+
+        return;
+      }
+
+      if (selectedSegmentId) {
+        addExtension(selectedSegmentId, "segment");
+        return;
+      }
+
+      if (selectedPlaneId) {
+        addExtension(selectedPlaneId, "plane");
+        return;
+      }
+
+      setExtendStatusMessage(
+        "\u8bf7\u9009\u62e9\u8981\u5ef6\u957f\u7684\u7ebf\u6bb5\u6216\u5e73\u9762",
+      );
+      return;
+    }
+
+    if (currentTool === "parallel") {
+      if (parallelDraft) {
+        confirmParallelDraft(resolvedPointer.finalPosition);
+        return;
+      }
+
+      const selectedSegmentId =
+        clickPreselection?.entityType === "segment"
+          ? clickPreselection.entityId
+          : null;
+      const selectedPlaneId =
+        clickPreselection?.entityType === "plane"
+          ? clickPreselection.entityId
+          : null;
+
+      if (parallelMode === "segment") {
+        if (selectedSegmentId) {
+          startParallelSegmentPreview(
+            selectedSegmentId,
+            resolvedPointer.finalPosition,
+          );
+        } else {
+          setParallelStatusMessage("\u8bf7\u9009\u62e9\u76ee\u6807\u7ebf\u6bb5");
+        }
+
+        return;
+      }
+
+      if (parallelMode === "plane") {
+        if (selectedPlaneId) {
+          startParallelPlanePreview(
+            selectedPlaneId,
+            resolvedPointer.finalPosition,
+          );
+        } else {
+          setParallelStatusMessage("\u8bf7\u9009\u62e9\u76ee\u6807\u5e73\u9762");
+        }
+
+        return;
+      }
+
+      if (selectedSegmentId) {
+        startParallelSegmentPreview(
+          selectedSegmentId,
+          resolvedPointer.finalPosition,
+        );
+        return;
+      }
+
+      if (selectedPlaneId) {
+        startParallelPlanePreview(
+          selectedPlaneId,
+          resolvedPointer.finalPosition,
+        );
+        return;
+      }
+
+      setParallelStatusMessage(
+        "\u8bf7\u9009\u62e9\u76ee\u6807\u7ebf\u6bb5\u6216\u5e73\u9762",
+      );
       return;
     }
 
     if (currentTool === "plane") {
-      planeToolRef.current.onPointerDown(nextPointerInfo, createToolContext());
-      setPlaneSelectedPointIds(planeToolRef.current.getSelectedPointIds());
+      const pointInput = resolvePointInputFromPointer(
+        nextPointerInfo,
+        clickPreselection,
+        resolvedPointer,
+      );
 
-      const planeMessage = planeToolRef.current.getLastMessage();
-
-      if (planeMessage === "empty") {
-        setPlaneStatusMessage("\u8bf7\u9009\u62e9\u5df2\u6709\u70b9");
-      } else if (planeMessage === "duplicate-point") {
-        setPlaneStatusMessage("\u8bf7\u9009\u62e9\u4e0d\u540c\u7684\u70b9");
-      } else if (planeMessage === "collinear") {
-        setPlaneStatusMessage("\u4e09\u70b9\u5171\u7ebf\uff0c\u65e0\u6cd5\u786e\u5b9a\u5e73\u9762");
-      } else if (planeMessage === "created") {
-        const createdPointIds = planeToolRef.current.getLastCreatedPointIds();
-        const createdName = createdPointIds
-          ? createdPointIds
-              .map((pointId) =>
-                getCompactPointNameById(commandManager.getDocument(), pointId),
-              )
-              .join("")
-          : getNextPlaneName();
-        setPlaneStatusMessage(`\u5df2\u521b\u5efa\u5e73\u9762 ${createdName}`);
-      } else {
-        setPlaneStatusMessage(null);
+      if (!pointInput) {
+        return;
       }
+
+      if (planeSelectedPointIds.includes(pointInput.pointId)) {
+        showToast("\u8bf7\u9009\u62e9\u4e0d\u540c\u7684\u70b9");
+        setPlaneStatusMessage("\u8bf7\u9009\u62e9\u4e0d\u540c\u7684\u70b9");
+        return;
+      }
+
+      if (planeSelectedPointIds.length === 1) {
+        const firstPosition = getPointWorldPosition(
+          commandManager.getDocument(),
+          planeSelectedPointIds[0],
+        );
+
+        if (
+          !firstPosition ||
+          distanceBetweenVec3(firstPosition, pointInput.position) <
+            CONSTRUCTION_EPSILON
+        ) {
+          showToast("\u8bf7\u9009\u62e9\u4e0d\u540c\u7684\u70b9");
+          setPlaneStatusMessage("\u8bf7\u9009\u62e9\u4e0d\u540c\u7684\u70b9");
+          return;
+        }
+      }
+
+      if (planeSelectedPointIds.length < 2) {
+        if (pointInput.created) {
+          executeCommand(new AddPointCommand(pointInput.point));
+        }
+
+        planeToolRef.current.cancel();
+        setPlaneSelectedPointIds([...planeSelectedPointIds, pointInput.pointId]);
+        setPlaneStatusMessage(null);
+        return;
+      }
+
+      const currentDocument = commandManager.getDocument();
+      const pointAPosition = getPointWorldPosition(
+        currentDocument,
+        planeSelectedPointIds[0],
+      );
+      const pointBPosition = getPointWorldPosition(
+        currentDocument,
+        planeSelectedPointIds[1],
+      );
+
+      if (
+        !pointAPosition ||
+        !pointBPosition ||
+        !getPlaneFromThreePoints(
+          pointAPosition,
+          pointBPosition,
+          pointInput.position,
+        )
+      ) {
+        showToast("\u4e09\u70b9\u5171\u7ebf\uff0c\u65e0\u6cd5\u786e\u5b9a\u5e73\u9762");
+        setPlaneStatusMessage(
+          "\u4e09\u70b9\u5171\u7ebf\uff0c\u65e0\u6cd5\u786e\u5b9a\u5e73\u9762",
+        );
+        return;
+      }
+
+      const [pointAId, pointBId] = planeSelectedPointIds;
+      const plane = createPlaneEntity(
+        createEntityId("plane"),
+        getPlaneName(pointAId, pointBId, pointInput.pointId),
+        pointAId,
+        pointBId,
+        pointInput.pointId,
+      );
+      const command = pointInput.created
+        ? new CompositeCommand("Add Point and Plane", [
+            new AddPointCommand(pointInput.point),
+            new AddPlaneCommand(plane),
+          ])
+        : new AddPlaneCommand(plane);
+
+      executeCommand(command);
+      planeToolRef.current.cancel();
+      setPlaneSelectedPointIds([]);
+      setPlaneStatusMessage(
+        `\u5df2\u521b\u5efa\u5e73\u9762 ${getPlaneName(
+          pointAId,
+          pointBId,
+          pointInput.pointId,
+        )}`,
+      );
       return;
     }
 
@@ -2719,6 +5270,21 @@ function App() {
       setShowCoordinatePointModal(false);
     }
 
+    if (nextTool !== "perpendicular") {
+      setShowPerpendicularToolPanel(false);
+    }
+
+    if (nextTool !== "extend") {
+      setShowExtendToolPanel(false);
+      setExtendStatusMessage(null);
+    }
+
+    if (nextTool !== "parallel") {
+      setShowParallelToolPanel(false);
+      setParallelDraft(null);
+      setParallelStatusMessage(null);
+    }
+
     if (nextTool !== "measureAngle") {
       setShowAngleToolPanel(false);
       setShowLinePlaneAnglePanel(false);
@@ -2734,6 +5300,28 @@ function App() {
       planeToolRef.current.cancel();
       setPlaneSelectedPointIds([]);
       setPlaneStatusMessage(null);
+    }
+
+    if (currentTool === "perpendicular" && nextTool !== "perpendicular") {
+      setPerpendicularPointId(null);
+      setPerpendicularSegmentId(null);
+      setPerpendicularPlaneId(null);
+      clearPerpendicularDirectionPick();
+      setPerpendicularStatusMessage(null);
+    }
+
+    if (currentTool === "midpoint" && nextTool !== "midpoint") {
+      setMidpointFirstPointId(null);
+      setMidpointStatusMessage(null);
+    }
+
+    if (currentTool === "extend" && nextTool !== "extend") {
+      setExtendStatusMessage(null);
+    }
+
+    if (currentTool === "parallel" && nextTool !== "parallel") {
+      setParallelDraft(null);
+      setParallelStatusMessage(null);
     }
 
     if (currentTool === "measureLength" && nextTool !== "measureLength") {
@@ -2795,8 +5383,45 @@ function App() {
         return;
       }
 
+      if (
+        currentTool === "perpendicular" &&
+        (perpendicularPointId ||
+          perpendicularSegmentId ||
+          perpendicularPlaneId ||
+          perpendicularDirectionPick)
+      ) {
+        setPerpendicularPointId(null);
+        setPerpendicularSegmentId(null);
+        setPerpendicularPlaneId(null);
+        clearPerpendicularDirectionPick();
+        setPerpendicularStatusMessage(null);
+        setShowPerpendicularToolPanel(false);
+        return;
+      }
+
+      if (currentTool === "midpoint" && midpointFirstPointId) {
+        setMidpointFirstPointId(null);
+        setMidpointStatusMessage(null);
+        return;
+      }
+
       if (showPointToolPanel) {
         setShowPointToolPanel(false);
+        return;
+      }
+
+      if (showPerpendicularToolPanel) {
+        setShowPerpendicularToolPanel(false);
+        return;
+      }
+
+      if (showExtendToolPanel) {
+        setShowExtendToolPanel(false);
+        return;
+      }
+
+      if (showParallelToolPanel) {
+        setShowParallelToolPanel(false);
         return;
       }
 
@@ -2849,6 +5474,34 @@ function App() {
         return;
       }
 
+      if (currentTool === "perpendicular") {
+        setPerpendicularPointId(null);
+        setPerpendicularSegmentId(null);
+        setPerpendicularPlaneId(null);
+        clearPerpendicularDirectionPick();
+        setPerpendicularStatusMessage(null);
+        return;
+      }
+
+      if (currentTool === "midpoint") {
+        setMidpointFirstPointId(null);
+        setMidpointStatusMessage(null);
+        return;
+      }
+
+      if (currentTool === "extend") {
+        setExtendStatusMessage(null);
+        setShowExtendToolPanel(false);
+        return;
+      }
+
+      if (currentTool === "parallel") {
+        setParallelDraft(null);
+        setParallelStatusMessage(null);
+        setShowParallelToolPanel(false);
+        return;
+      }
+
       if (commandManager.getDocument().selectedEntityIds.length > 0) {
         clearSelection();
       }
@@ -2858,7 +5511,10 @@ function App() {
       if (
         !showAngleToolPanel &&
         !showLinePlaneAnglePanel &&
-        !showPlanePlaneAnglePanel
+        !showPlanePlaneAnglePanel &&
+        !showPerpendicularToolPanel &&
+        !showExtendToolPanel &&
+        !showParallelToolPanel
       ) {
         return;
       }
@@ -2879,6 +5535,9 @@ function App() {
       setShowAngleToolPanel(false);
       setShowLinePlaneAnglePanel(false);
       setShowPlanePlaneAnglePanel(false);
+      setShowPerpendicularToolPanel(false);
+      setShowExtendToolPanel(false);
+      setShowParallelToolPanel(false);
     };
 
     window.addEventListener("keydown", handleKeyDown);
@@ -2971,6 +5630,120 @@ function App() {
                     type="button"
                   >
                     <span>{showPlaneToolPanel ? "<" : ">"}</span>
+                  </button>
+                </div>
+              ) : name === "perpendicular" ? (
+                <div className="split-tool-button" key={name}>
+                  <button
+                    className={
+                      currentTool === name && perpendicularMode === "pointLine"
+                        ? "tool-button active"
+                        : "tool-button"
+                    }
+                    disabled={disabled}
+                    onClick={activatePointLinePerpendicularMode}
+                    title={label}
+                    aria-label={label}
+                    type="button"
+                  >
+                    <Icon size={18} aria-hidden="true" />
+                    <span>{label}</span>
+                  </button>
+                  <button
+                    aria-label={
+                      showPerpendicularToolPanel
+                        ? "\u6536\u56de\u5782\u7ebf\u5de5\u5177\u65b9\u5f0f"
+                        : "\u5c55\u5f00\u5782\u7ebf\u5de5\u5177\u65b9\u5f0f"
+                    }
+                    className={
+                      showPerpendicularToolPanel
+                        ? "tool-button split-toggle active"
+                        : "tool-button split-toggle"
+                    }
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      openPerpendicularToolPanel();
+                    }}
+                    title="\u5782\u7ebf\u5de5\u5177\u65b9\u5f0f"
+                    type="button"
+                  >
+                    <span>{showPerpendicularToolPanel ? "<" : ">"}</span>
+                  </button>
+                </div>
+              ) : name === "extend" ? (
+                <div className="split-tool-button" key={name}>
+                  <button
+                    className={
+                      currentTool === name && extendMode === "auto"
+                        ? "tool-button active"
+                        : "tool-button"
+                    }
+                    disabled={disabled}
+                    onClick={activateExtendAutoMode}
+                    title={label}
+                    aria-label={label}
+                    type="button"
+                  >
+                    <Icon size={18} aria-hidden="true" />
+                    <span>{label}</span>
+                  </button>
+                  <button
+                    aria-label={
+                      showExtendToolPanel
+                        ? "\u6536\u56de\u5ef6\u957f\u5de5\u5177\u65b9\u5f0f"
+                        : "\u5c55\u5f00\u5ef6\u957f\u5de5\u5177\u65b9\u5f0f"
+                    }
+                    className={
+                      showExtendToolPanel
+                        ? "tool-button split-toggle active"
+                        : "tool-button split-toggle"
+                    }
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      openExtendToolPanel();
+                    }}
+                    title="\u5ef6\u957f\u5de5\u5177\u65b9\u5f0f"
+                    type="button"
+                  >
+                    <span>{showExtendToolPanel ? "<" : ">"}</span>
+                  </button>
+                </div>
+              ) : name === "parallel" ? (
+                <div className="split-tool-button" key={name}>
+                  <button
+                    className={
+                      currentTool === name && parallelMode === "auto"
+                        ? "tool-button active"
+                        : "tool-button"
+                    }
+                    disabled={disabled}
+                    onClick={activateParallelAutoMode}
+                    title={label}
+                    aria-label={label}
+                    type="button"
+                  >
+                    <Icon size={18} aria-hidden="true" />
+                    <span>{label}</span>
+                  </button>
+                  <button
+                    aria-label={
+                      showParallelToolPanel
+                        ? "\u6536\u56de\u5e73\u884c\u5de5\u5177\u65b9\u5f0f"
+                        : "\u5c55\u5f00\u5e73\u884c\u5de5\u5177\u65b9\u5f0f"
+                    }
+                    className={
+                      showParallelToolPanel
+                        ? "tool-button split-toggle active"
+                        : "tool-button split-toggle"
+                    }
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      openParallelToolPanel();
+                    }}
+                    title="\u5e73\u884c\u5de5\u5177\u65b9\u5f0f"
+                    type="button"
+                  >
+                    <span>{showParallelToolPanel ? "<" : ">"}</span>
                   </button>
                 </div>
               ) : (
@@ -3140,6 +5913,75 @@ function App() {
             type="button"
           >
             坐标画点
+          </button>
+        </div>
+      ) : null}
+
+      {showPerpendicularToolPanel ? (
+        <div
+          className="point-tool-flyout perpendicular-tool-flyout"
+          role="menu"
+          aria-label="\u5782\u7ebf\u5de5\u5177\u65b9\u5f0f"
+        >
+          <button
+            className={perpendicularMode === "pointLine" ? "active" : ""}
+            onClick={activatePointLinePerpendicularMode}
+            type="button"
+          >
+            {"\u70b9\u5230\u7ebf\u5782\u7ebf"}
+          </button>
+          <button
+            className={perpendicularMode === "linePlane" ? "active" : ""}
+            onClick={activateLinePlanePerpendicularMode}
+            type="button"
+          >
+            {"\u70b9\u5230\u9762\u5782\u7ebf"}
+          </button>
+        </div>
+      ) : null}
+
+      {showExtendToolPanel ? (
+        <div
+          className="point-tool-flyout extend-tool-flyout"
+          role="menu"
+          aria-label="\u5ef6\u957f\u5de5\u5177\u65b9\u5f0f"
+        >
+          <button
+            className={extendMode === "segmentToBoundary" ? "active" : ""}
+            onClick={activateSegmentExtendMode}
+            type="button"
+          >
+            {"\u5ef6\u957f\u7ebf\u6bb5\u5230\u8fb9\u754c"}
+          </button>
+          <button
+            className={extendMode === "planeToBoundary" ? "active" : ""}
+            onClick={activatePlaneExtendMode}
+            type="button"
+          >
+            {"\u5ef6\u5c55\u5e73\u9762\u5230\u8fb9\u754c"}
+          </button>
+        </div>
+      ) : null}
+
+      {showParallelToolPanel ? (
+        <div
+          className="point-tool-flyout parallel-tool-flyout"
+          role="menu"
+          aria-label="\u5e73\u884c\u5de5\u5177\u65b9\u5f0f"
+        >
+          <button
+            className={parallelMode === "segment" ? "active" : ""}
+            onClick={activateParallelSegmentMode}
+            type="button"
+          >
+            {"\u5e73\u884c\u7ebf\u6bb5"}
+          </button>
+          <button
+            className={parallelMode === "plane" ? "active" : ""}
+            onClick={activateParallelPlaneMode}
+            type="button"
+          >
+            {"\u5e73\u884c\u5e73\u9762"}
           </button>
         </div>
       ) : null}
@@ -3358,11 +6200,13 @@ function App() {
           currentTool={currentTool}
           document={displayDocument}
           focusRequestId={focusRequestId}
+          highlightedEntityIds={highlightedEntityIds}
           highlightedPointIds={highlightedPointIds}
           isDraggingPoint={draggedPointId !== null}
           preselectedEntityId={preselection?.entityId ?? null}
           previewPosition={previewPosition}
           segmentPreviewStartPosition={segmentPreviewStartPosition}
+          planePreviewPoints={parallelPreviewPlane}
           onCanvasPointerDown={handleCanvasPointerDown}
           onCanvasPointerMove={handleCanvasPointerMove}
           onSelectPointDragStart={handleSelectPointDragStart}
@@ -3441,6 +6285,88 @@ function App() {
                 </button>
               </div>
             ) : null}
+            {singleSelectedEntity?.kind === "point" ? (
+              <div className="batch-naming">
+                <span>
+                  {singleSelectedEntity.pointKind === "constructed"
+                    ? "\u7c7b\u578b\uff1a\u6784\u9020\u70b9"
+                    : "\u7c7b\u578b\uff1a\u70b9"}
+                </span>
+                {singleSelectedEntity.construction?.kind === "footToPlane" ? (
+                  <>
+                    <span>{"\u6784\u9020\u65b9\u5f0f\uff1a\u70b9\u5230\u5e73\u9762\u7684\u5782\u8db3"}</span>
+                    <span>
+                      {"\u6e90\u70b9\uff1a"}
+                      {getPointNameById(
+                        displayDocument,
+                        singleSelectedEntity.construction.sourcePointId,
+                      )}
+                    </span>
+                    <span>
+                      {"\u76ee\u6807\u5e73\u9762\uff1a"}
+                      {displayDocument.entities[
+                        singleSelectedEntity.construction.targetPlaneId
+                      ]?.kind === "plane"
+                        ? getPlaneDisplayName(
+                            displayDocument,
+                            displayDocument.entities[
+                              singleSelectedEntity.construction.targetPlaneId
+                            ] as PlaneEntity,
+                          )
+                        : "invalid"}
+                    </span>
+                  </>
+                ) : singleSelectedEntity.construction?.kind === "footToLine" ? (
+                  <>
+                    <span>{"\u6784\u9020\u65b9\u5f0f\uff1a\u70b9\u5230\u7ebf\u7684\u5782\u8db3"}</span>
+                    <span>
+                      {"\u6e90\u70b9\uff1a"}
+                      {getPointNameById(
+                        displayDocument,
+                        singleSelectedEntity.construction.sourcePointId,
+                      )}
+                    </span>
+                    <span>
+                      {"\u76ee\u6807\u7ebf\u6bb5\uff1a"}
+                      {displayDocument.entities[
+                        singleSelectedEntity.construction.targetSegmentId
+                      ]?.kind === "segment"
+                        ? getSegmentDisplayName(
+                            displayDocument,
+                            displayDocument.entities[
+                              singleSelectedEntity.construction.targetSegmentId
+                            ] as SegmentEntity,
+                          )
+                        : "invalid"}
+                    </span>
+                  </>
+                ) : singleSelectedEntity.construction?.kind === "midpoint" ? (
+                  <>
+                    <span>{"\u6784\u9020\u65b9\u5f0f\uff1a\u4e2d\u70b9"}</span>
+                    <span>
+                      {"\u70b9 1\uff1a"}
+                      {getPointNameById(
+                        displayDocument,
+                        singleSelectedEntity.construction.pointAId,
+                      )}
+                    </span>
+                    <span>
+                      {"\u70b9 2\uff1a"}
+                      {getPointNameById(
+                        displayDocument,
+                        singleSelectedEntity.construction.pointBId,
+                      )}
+                    </span>
+                  </>
+                ) : null}
+                <span>
+                  {"\u5f53\u524d\u5750\u6807\uff1a"}
+                  {formatVec3(
+                    getPointWorldPosition(displayDocument, singleSelectedEntity.id),
+                  )}
+                </span>
+              </div>
+            ) : null}
             {singleSelectedEntity?.kind === "plane" ? (
               <div className="batch-naming">
                 <span>类型：平面</span>
@@ -3456,6 +6382,145 @@ function App() {
                 </span>
                 <span>状态：{getPlaneStatusText(singleSelectedEntity, displayDocument)}</span>
                 <span>可见：{singleSelectedEntity.visible ? "true" : "false"}</span>
+              </div>
+            ) : null}
+            {singleSelectedEntity?.kind === "perpendicularLine" ? (
+              <div className="batch-naming">
+                <span>{"\u7c7b\u578b\uff1a\u5782\u7ebf"}</span>
+                <span>
+                  {"\u8fc7\u70b9\uff1a"}
+                  {getPointNameById(
+                    displayDocument,
+                    singleSelectedEntity.pointId,
+                  )}
+                </span>
+                <span>
+                  {"\u5782\u76f4\u4e8e\uff1a"}
+                  {displayDocument.entities[singleSelectedEntity.segmentId]
+                    ?.kind === "segment"
+                    ? getSegmentDisplayName(
+                        displayDocument,
+                        displayDocument.entities[
+                          singleSelectedEntity.segmentId
+                        ] as SegmentEntity,
+                      )
+                    : "invalid"}
+                </span>
+                {singleSelectedEntity.constructionMode === "userDirection" ? (
+                  <span>
+                    {"\u65b9\u5411\u70b9\uff1a"}
+                    {singleSelectedEntity.directionPointId
+                      ? getPointNameById(
+                          displayDocument,
+                          singleSelectedEntity.directionPointId,
+                        )
+                      : "invalid"}
+                  </span>
+                ) : (
+                  <span>
+                    {"\u5782\u8db3\uff1a"}
+                    {singleSelectedEntity.footPointId
+                      ? getPointNameById(
+                          displayDocument,
+                          singleSelectedEntity.footPointId,
+                        )
+                      : "invalid"}
+                  </span>
+                )}
+                <span>
+                  {"\u5782\u8db3\u4f4d\u7f6e\uff1a"}
+                  {getPerpendicularFootStatusText(
+                    singleSelectedEntity,
+                    displayDocument,
+                  )}
+                </span>
+              </div>
+            ) : null}
+            {singleSelectedEntity?.kind === "linePlanePerpendicular" ? (
+              <div className="batch-naming">
+                <span>{"\u7c7b\u578b\uff1a\u7ebf\u9762\u5782\u76f4"}</span>
+                <span>
+                  {"\u8fc7\u70b9\uff1a"}
+                  {getPointNameById(
+                    displayDocument,
+                    singleSelectedEntity.pointId,
+                  )}
+                </span>
+                <span>
+                  {"\u5782\u76f4\u4e8e\uff1a\u5e73\u9762 "}
+                  {displayDocument.entities[singleSelectedEntity.planeId]
+                    ?.kind === "plane"
+                    ? getPlaneDisplayName(
+                        displayDocument,
+                        displayDocument.entities[
+                          singleSelectedEntity.planeId
+                        ] as PlaneEntity,
+                      )
+                    : "invalid"}
+                </span>
+                <span>
+                  {singleSelectedEntity.constructionMode === "userDirection"
+                    ? "\u65b9\u5411\u70b9\uff1a"
+                    : "\u5782\u8db3\uff1a"}
+                  {singleSelectedEntity.constructionMode === "userDirection"
+                    ? singleSelectedEntity.directionPointId
+                      ? getPointNameById(
+                          displayDocument,
+                          singleSelectedEntity.directionPointId,
+                        )
+                      : "invalid"
+                    : singleSelectedEntity.footPointId
+                      ? getPointNameById(
+                          displayDocument,
+                          singleSelectedEntity.footPointId,
+                        )
+                      : "invalid"}
+                </span>
+                <span>
+                  {"\u5782\u8db3\u4f4d\u7f6e\uff1a"}
+                  {getLinePlanePerpendicularFootStatusText(
+                    singleSelectedEntity,
+                    displayDocument,
+                  )}
+                </span>
+              </div>
+            ) : null}
+            {singleSelectedEntity?.kind === "extension" ? (
+              <div className="batch-naming">
+                <span>
+                  {"\u7c7b\u578b\uff1a"}
+                  {singleSelectedEntity.targetType === "segment"
+                    ? "\u7ebf\u6bb5\u5ef6\u957f"
+                    : "\u5e73\u9762\u5ef6\u5c55"}
+                </span>
+                <span>
+                  {"\u76ee\u6807\u5bf9\u8c61\uff1a"}
+                  {displayDocument.entities[singleSelectedEntity.targetId]?.kind ===
+                  "segment"
+                    ? getSegmentDisplayName(
+                        displayDocument,
+                        displayDocument.entities[
+                          singleSelectedEntity.targetId
+                        ] as SegmentEntity,
+                      )
+                    : displayDocument.entities[singleSelectedEntity.targetId]
+                          ?.kind === "plane"
+                      ? `\u5e73\u9762 ${getPlaneDisplayName(
+                          displayDocument,
+                          displayDocument.entities[
+                            singleSelectedEntity.targetId
+                          ] as PlaneEntity,
+                        )}`
+                      : "invalid"}
+                </span>
+                <span>
+                  {"\u8fb9\u754c\uff1a"}
+                  {`[-${displayDocument.settings.coordinateHalfSize}, ${displayDocument.settings.coordinateHalfSize}]`}
+                </span>
+                <span>
+                  {"\u72b6\u6001\uff1a"}
+                  {getExtensionStatus(singleSelectedEntity, displayDocument)}
+                </span>
               </div>
             ) : null}
             {singleSelectedEntity?.kind === "measurement" &&
@@ -3546,6 +6611,41 @@ function App() {
           </section>
         ) : null}
 
+        {selectedEntityCount > 1 ? (
+          <section className="property-group object-info">
+            <h3>Object Info</h3>
+            <div className="batch-naming">
+              <span>{`\u5df2\u9009\u62e9 ${selectedEntityCount} \u4e2a\u5bf9\u8c61`}</span>
+            </div>
+          </section>
+        ) : objectInspectorInfo ? (
+          <section className="property-group object-info">
+            <h3>Object Info</h3>
+            <div className="object-info-rows">
+              {objectInspectorInfo.rows.map((row) => (
+                <div className="object-info-row" key={row.label}>
+                  <span className="object-info-label">{row.label}</span>
+                  <span className="object-info-value">{row.value}</span>
+                </div>
+              ))}
+            </div>
+            {objectInspectorInfo.lists?.map((list) => (
+              <div className="object-info-list" key={list.label}>
+                <span className="object-info-label">{list.label}</span>
+                {list.items.length > 0 ? (
+                  <ul>
+                    {list.items.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <span className="object-info-empty">{list.emptyText}</span>
+                )}
+              </div>
+            ))}
+          </section>
+        ) : null}
+
         <section className="property-group">
           <h3>Scene</h3>
           <label>
@@ -3556,6 +6656,25 @@ function App() {
             Drawing plane
             <input value={displayDocument.settings.activeDrawingPlane} readOnly />
           </label>
+          <label>
+            Coordinate half size
+            <input
+              type="number"
+              min="0.1"
+              step="0.5"
+              value={displayDocument.settings.coordinateHalfSize}
+              onChange={(event) => updateCoordinateHalfSize(event.target.value)}
+            />
+          </label>
+          <div className="setting-button-grid">
+            <button
+              className={displayDocument.settings.showBoundaryCube ? "active" : ""}
+              onClick={() => toggleSetting("showBoundaryCube")}
+              type="button"
+            >
+              Boundary Cube
+            </button>
+          </div>
           <label>
             Snap to grid
             <input value={displayDocument.settings.snapToGrid ? "On" : "Off"} readOnly />
@@ -3808,6 +6927,12 @@ function App() {
         </div>
       ) : null}
 
+      {toastMessage ? (
+        <div className="toast-message" role="status">
+          {toastMessage.text}
+        </div>
+      ) : null}
+
       <footer className="status-bar">
         <span>
           File: {currentFileName}
@@ -3820,6 +6945,10 @@ function App() {
         <span>Entities: {entities.length}</span>
         {segmentToolStatus ? <span>{segmentToolStatus}</span> : null}
         {planeToolStatus ? <span>{planeToolStatus}</span> : null}
+        {perpendicularToolStatus ? <span>{perpendicularToolStatus}</span> : null}
+        {midpointToolStatus ? <span>{midpointToolStatus}</span> : null}
+        {extendToolStatus ? <span>{extendToolStatus}</span> : null}
+        {parallelToolStatus ? <span>{parallelToolStatus}</span> : null}
         {pointDragStatus ? <span>{pointDragStatus}</span> : null}
         {measureLengthToolStatus ? <span>{measureLengthToolStatus}</span> : null}
         {measureAngleToolStatus ? <span>{measureAngleToolStatus}</span> : null}

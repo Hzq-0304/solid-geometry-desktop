@@ -17,6 +17,10 @@ import {
   getPlaneFromThreePoints,
   getPlanePoints,
 } from "../../core/geometry/planeUtils";
+import {
+  getPlaneWorldPositions,
+  getPointWorldPosition,
+} from "../../core/geometry/pointPositionUtils";
 import type { Vec3 } from "../../core/geometry/Vec3";
 import type { SnapResult } from "../../core/snap/SnapTypes";
 import type { ScreenPosition } from "./screenSpaceUtils";
@@ -242,15 +246,6 @@ const getPointerRay = (context: ScreenSpaceSnapContext): THREE.Ray => {
   return raycaster.ray;
 };
 
-const getPointEntity = (
-  document: BoardDocument,
-  entityId: EntityId,
-): PointEntity | null => {
-  const entity = document.entities[entityId];
-
-  return entity?.kind === "point" ? entity : null;
-};
-
 const isOnDrawingPlane = (
   position: Vec3,
   activeDrawingPlane: ActiveDrawingPlane,
@@ -305,8 +300,14 @@ const getNearestPointSnap = (
       continue;
     }
 
+    const position = getPointWorldPosition(context.document, entity.id);
+
+    if (!position) {
+      continue;
+    }
+
     const screenPosition = worldPositionToScreenPosition(
-      entity.position,
+      position,
       context.camera,
       context.canvas,
     );
@@ -337,7 +338,9 @@ const getNearestPointSnap = (
   }
 
   return createCandidate(context, {
-    position: nearestCandidate.point.position,
+    position:
+      getPointWorldPosition(context.document, nearestCandidate.point.id) ??
+      nearestCandidate.point.position,
     type: "point",
     targetEntityId: nearestCandidate.point.id,
     description: `point ${getPointName(nearestCandidate.point)}`,
@@ -357,20 +360,20 @@ const getNearestSegmentSnap = (
     }
 
     const [startPointId, endPointId] = entity.pointIds;
-    const startPoint = getPointEntity(context.document, startPointId);
-    const endPoint = getPointEntity(context.document, endPointId);
+    const startPoint = getPointWorldPosition(context.document, startPointId);
+    const endPoint = getPointWorldPosition(context.document, endPointId);
 
     if (!startPoint || !endPoint) {
       continue;
     }
 
     const startScreen = worldPositionToScreenPosition(
-      startPoint.position,
+      startPoint,
       context.camera,
       context.canvas,
     );
     const endScreen = worldPositionToScreenPosition(
-      endPoint.position,
+      endPoint,
       context.camera,
       context.canvas,
     );
@@ -383,8 +386,8 @@ const getNearestSegmentSnap = (
       context.pointerScreenPosition,
       startScreen,
       endScreen,
-      startPoint.position,
-      endPoint.position,
+      startPoint,
+      endPoint,
     );
 
     if (projection.distance > getSegmentSnapPixelRadius(context.document)) {
@@ -392,10 +395,6 @@ const getNearestSegmentSnap = (
     }
 
     const position = projection.worldPosition;
-
-    if (!isOnDrawingPlane(position, context.activeDrawingPlane)) {
-      continue;
-    }
 
     if (!nearestCandidate || projection.distance < nearestCandidate.distance) {
       nearestCandidate = {
@@ -693,16 +692,16 @@ const getEntityPlaneSnap = (
     return null;
   }
 
-  const points = getPlanePoints(context.document, entity.pointIds);
+  const points = getPlaneWorldPositions(context.document, entity.pointIds);
 
   if (!points) {
     return null;
   }
 
   const planeEquation = getPlaneFromThreePoints(
-    points[0].position,
-    points[1].position,
-    points[2].position,
+    points[0],
+    points[1],
+    points[2],
   );
 
   if (!planeEquation) {

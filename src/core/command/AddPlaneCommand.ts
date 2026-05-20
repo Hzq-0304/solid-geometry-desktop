@@ -2,8 +2,8 @@ import type { BoardDocument } from "../document/BoardDocument";
 import type { BoardEntity, EntityId, PlaneEntity } from "../document/EntityTypes";
 import {
   getPlaneFromThreePoints,
-  getPlanePoints,
 } from "../geometry/planeUtils";
+import { getPlaneWorldPositions } from "../geometry/pointPositionUtils";
 import type { Command } from "./Command";
 
 const touchDocument = (document: BoardDocument): BoardDocument => ({
@@ -31,14 +31,14 @@ export class AddPlaneCommand implements Command {
       return document;
     }
 
-    const points = getPlanePoints(document, this.plane.pointIds);
+    const points = getPlaneWorldPositions(document, this.plane.pointIds);
 
     if (
       !points ||
       !getPlaneFromThreePoints(
-        points[0].position,
-        points[1].position,
-        points[2].position,
+        points[0],
+        points[1],
+        points[2],
       )
     ) {
       return document;

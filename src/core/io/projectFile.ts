@@ -2,7 +2,7 @@ import type { BoardDocument } from "../document/BoardDocument";
 
 export const PROJECT_FILE_VERSION = 1;
 export const PROJECT_APP_NAME = "Solid Geometry Studio";
-export const PROJECT_APP_VERSION = "0.1.0";
+export const PROJECT_APP_VERSION = "1.2.0";
 
 export interface ProjectFile {
   readonly fileVersion: number;

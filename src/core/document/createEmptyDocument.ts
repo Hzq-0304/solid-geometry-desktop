@@ -10,7 +10,7 @@ export interface CreateEmptyDocumentOptions {
 }
 
 const DEFAULT_FILE_VERSION = 1;
-const DEFAULT_APP_VERSION = "0.1.0";
+const DEFAULT_APP_VERSION = "1.2.0";
 
 export const createDefaultBoardSettings = (): BoardSettings => ({
   showGrid: true,
@@ -36,6 +36,8 @@ export const createDefaultBoardSettings = (): BoardSettings => ({
   showDrawingPlane: true,
   drawingPlaneOpacity: 0.18,
   drawingPlaneSolid: false,
+  coordinateHalfSize: 10,
+  showBoundaryCube: false,
 });
 
 export const createDefaultCameraState = (): CameraState => ({

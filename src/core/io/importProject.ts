@@ -1,14 +1,21 @@
 import type { BoardDocument } from "../document/BoardDocument";
 import type {
   BoardEntity,
+  LinePlanePerpendicularEntity,
+  PerpendicularLineEntity,
   PlaneEntity,
+  PointEntity,
   SegmentEntity,
+  ExtensionEntity,
 } from "../document/EntityTypes";
 import {
   createDefaultBoardSettings,
   createDefaultCameraState,
 } from "../document/createEmptyDocument";
+import { projectPointToLine } from "../geometry/geometryUtils";
 import { DEFAULT_PLANE_STYLE } from "../geometry/planeUtils";
+import { calculateLinePlanePerpendicular } from "../geometry/linePlanePerpendicularUtils";
+import { getPointWorldPosition } from "../geometry/pointPositionUtils";
 import { PROJECT_FILE_VERSION, type ProjectFile } from "./projectFile";
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
@@ -101,6 +108,92 @@ const normalizeEntity = (
     };
   }
 
+  if (kind === "point") {
+    const point = rawEntity as unknown as PointEntity;
+
+    return {
+      ...point,
+      kind: "point",
+      visible: point.visible ?? true,
+      locked: point.locked ?? false,
+      nameSource: point.nameSource ?? "auto",
+      pointKind: point.pointKind ?? "free",
+    };
+  }
+
+  if (kind === "perpendicularLine") {
+    const perpendicularLine = rawEntity as unknown as PerpendicularLineEntity;
+
+    return {
+      ...perpendicularLine,
+      kind: "perpendicularLine",
+      type: "perpendicularLine",
+      visible: perpendicularLine.visible ?? true,
+      locked: perpendicularLine.locked ?? false,
+      nameSource: perpendicularLine.nameSource ?? "auto",
+      constructionMode:
+        perpendicularLine.constructionMode ??
+        (perpendicularLine.directionPointId ? "userDirection" : "foot"),
+      style: {
+        lineColor: "#111827",
+        lineWidth: 3,
+        extensionColor: "#64748b",
+        extensionLineWidth: 1,
+        extensionDash: true,
+        ...perpendicularLine.style,
+      },
+    };
+  }
+
+  if (kind === "linePlanePerpendicular") {
+    const linePlanePerpendicular =
+      rawEntity as unknown as LinePlanePerpendicularEntity;
+
+    return {
+      ...linePlanePerpendicular,
+      kind: "linePlanePerpendicular",
+      type: "linePlanePerpendicular",
+      visible: linePlanePerpendicular.visible ?? true,
+      locked: linePlanePerpendicular.locked ?? false,
+      nameSource: linePlanePerpendicular.nameSource ?? "auto",
+      constructionMode:
+        linePlanePerpendicular.constructionMode ??
+        (linePlanePerpendicular.directionPointId ? "userDirection" : "foot"),
+      style: {
+        lineColor: "#111827",
+        lineWidth: 3,
+        extensionFillColor: "#93c5fd",
+        extensionFillOpacity: 0.14,
+        helperLineColor: "#64748b",
+        helperLineDash: true,
+        ...linePlanePerpendicular.style,
+      },
+    };
+  }
+
+  if (kind === "extension") {
+    const extension = rawEntity as unknown as ExtensionEntity;
+
+    return {
+      ...extension,
+      kind: "extension",
+      type: "extension",
+      mode: extension.mode ?? "toBoundaryCube",
+      visible: extension.visible ?? true,
+      locked: extension.locked ?? false,
+      nameSource: extension.nameSource ?? "auto",
+      style: {
+        lineExtensionColor: "#6b7280",
+        lineExtensionWidth: 1,
+        lineExtensionDash: true,
+        planeExtensionColor: "#93c5fd",
+        planeExtensionOpacity: 0.14,
+        boundaryLineColor: "#60a5fa",
+        ...extension.style,
+      },
+    };
+  }
+
   if (kind !== "plane") {
     return entity;
   }
@@ -123,13 +216,122 @@ const normalizeEntity = (
 
 const normalizeEntities = (
   entities: BoardDocument["entities"],
-): BoardDocument["entities"] =>
-  Object.fromEntries(
+): BoardDocument["entities"] => {
+  const normalizedEntities: Record<string, BoardEntity> = Object.fromEntries(
     Object.entries(entities).map(([entityId, entity]) => [
       entityId,
       normalizeEntity(entity, entities),
     ]),
   );
+
+  for (const entity of Object.values(normalizedEntities)) {
+    if (
+      entity.kind === "perpendicularLine" &&
+      entity.constructionMode !== "userDirection" &&
+      !entity.footPointId &&
+      !normalizedEntities[`${entity.id}-foot`]
+    ) {
+      const sourcePoint = normalizedEntities[entity.pointId];
+      const targetSegment = normalizedEntities[entity.segmentId];
+
+      if (sourcePoint?.kind === "point" && targetSegment?.kind === "segment") {
+        const documentLike = { entities: normalizedEntities } as BoardDocument;
+        const sourcePosition = getPointWorldPosition(
+          documentLike,
+          entity.pointId,
+        );
+        const startPosition = getPointWorldPosition(
+          documentLike,
+          targetSegment.pointIds[0],
+        );
+        const endPosition = getPointWorldPosition(
+          documentLike,
+          targetSegment.pointIds[1],
+        );
+        const projection =
+          sourcePosition && startPosition && endPosition
+            ? projectPointToLine(sourcePosition, startPosition, endPosition)
+            : null;
+
+        if (projection) {
+          const footPointId = `${entity.id}-foot`;
+          const timestamp = new Date().toISOString();
+
+          normalizedEntities[footPointId] = {
+            id: footPointId,
+            kind: "point",
+            name: "H",
+            style: { color: "#111111" },
+            visible: true,
+            locked: false,
+            position: projection.foot,
+            nameSource: "auto",
+            pointKind: "constructed",
+            construction: {
+              kind: "footToLine",
+              sourcePointId: entity.pointId,
+              targetSegmentId: entity.segmentId,
+            },
+            createdAt: timestamp,
+            updatedAt: timestamp,
+          };
+          normalizedEntities[entity.id] = {
+            ...entity,
+            footPointId,
+          };
+        }
+      }
+    }
+
+    if (
+      entity.kind === "linePlanePerpendicular" &&
+      entity.constructionMode !== "userDirection" &&
+      !entity.footPointId &&
+      !normalizedEntities[`${entity.id}-foot`]
+    ) {
+      const point = normalizedEntities[entity.pointId];
+      const plane = normalizedEntities[entity.planeId];
+
+      if (point?.kind === "point" && plane?.kind === "plane") {
+        const projection = calculateLinePlanePerpendicular(
+          point,
+          plane,
+          { entities: normalizedEntities } as BoardDocument,
+        );
+
+        if (projection) {
+          const footPointId = `${entity.id}-foot`;
+          const timestamp = new Date().toISOString();
+
+          normalizedEntities[footPointId] = {
+            id: footPointId,
+            kind: "point",
+            name: "H",
+            style: { color: "#111111" },
+            visible: true,
+            locked: false,
+            position: projection.foot,
+            nameSource: "auto",
+            pointKind: "constructed",
+            construction: {
+              kind: "footToPlane",
+              sourcePointId: entity.pointId,
+              targetPlaneId: entity.planeId,
+            },
+            createdAt: timestamp,
+            updatedAt: timestamp,
+          };
+          normalizedEntities[entity.id] = {
+            ...entity,
+            footPointId,
+          };
+        }
+      }
+    }
+  }
+
+  return normalizedEntities as BoardDocument["entities"];
+};
 
 export const importProject = (jsonText: string): BoardDocument => {
   let parsed: unknown;
@@ -154,12 +356,26 @@ export const importProject = (jsonText: string): BoardDocument => {
 
   const document = assertBoardDocument(projectFile.document);
   const timestamp = new Date().toISOString();
+  const importedSettings: Record<string, unknown> = isObject(document.settings)
+    ? document.settings
+    : {};
+  const importedCoordinateHalfSize =
+    typeof importedSettings.coordinateHalfSize === "number" &&
+    Number.isFinite(importedSettings.coordinateHalfSize) &&
+    importedSettings.coordinateHalfSize > 0
+      ? importedSettings.coordinateHalfSize
+      : createDefaultBoardSettings().coordinateHalfSize;
 
   return {
     ...document,
     settings: {
       ...createDefaultBoardSettings(),
-      ...(isObject(document.settings) ? document.settings : {}),
+      ...importedSettings,
+      coordinateHalfSize: importedCoordinateHalfSize,
+      showBoundaryCube:
+        typeof importedSettings.showBoundaryCube === "boolean"
+          ? importedSettings.showBoundaryCube
+          : createDefaultBoardSettings().showBoundaryCube,
     },
     cameraState: {
       ...createDefaultCameraState(),

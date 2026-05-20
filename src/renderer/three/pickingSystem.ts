@@ -9,6 +9,7 @@ import type {
   PointEntity,
 } from "../../core/document/EntityTypes";
 import type { Vec3 } from "../../core/geometry/Vec3";
+import { getPointWorldPosition } from "../../core/geometry/pointPositionUtils";
 import type { PointerInfo } from "../../core/tool/ToolTypes";
 import {
   distancePointToScreenPoint,
@@ -22,7 +23,10 @@ const DEFAULT_POINT_PICK_PIXEL_RADIUS = 12;
 const PICKABLE_ENTITY_TYPES = new Set<EntityKind>([
   "point",
   "segment",
+  "perpendicularLine",
+  "linePlanePerpendicular",
   "plane",
+  "extension",
   "polygon",
   "solid",
   "measurement",
@@ -31,10 +35,13 @@ const PICKABLE_ENTITY_TYPES = new Set<EntityKind>([
 const ENTITY_PICK_PRIORITY: Partial<Record<EntityKind, number>> = {
   point: 0,
   segment: 1,
-  plane: 2,
-  measurement: 3,
-  polygon: 4,
-  solid: 5,
+  perpendicularLine: 2,
+  linePlanePerpendicular: 2,
+  plane: 3,
+  extension: 4,
+  measurement: 5,
+  polygon: 6,
+  solid: 7,
 };
 
 export const getPointerNdc = (
@@ -177,8 +184,14 @@ export const findNearestPointByScreenDistance = (
       continue;
     }
 
+    const position = getPointWorldPosition(document, entity.id);
+
+    if (!position) {
+      continue;
+    }
+
     const screenPosition = worldPositionToScreenPosition(
-      entity.position,
+      position,
       camera,
       canvas,
     );
@@ -205,7 +218,9 @@ export const findNearestPointByScreenDistance = (
         entityId: nearestPoint.id,
         entityType: "point",
         screenDistance: nearestDistance,
-        worldPosition: nearestPoint.position,
+        worldPosition:
+          getPointWorldPosition(document, nearestPoint.id) ??
+          nearestPoint.position,
       }
     : null;
 };
