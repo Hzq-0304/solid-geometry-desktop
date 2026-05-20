@@ -101,6 +101,37 @@ const findEntityObject = (object: THREE.Object3D): THREE.Object3D | null => {
   return null;
 };
 
+const isPickableObject = (object: THREE.Object3D): boolean => {
+  let current: THREE.Object3D | null = object;
+  let hasEntityOwner = false;
+
+  while (current) {
+    if (current.userData.ignorePicking === true) {
+      return false;
+    }
+
+    if (typeof current.userData.entityId === "string") {
+      hasEntityOwner = true;
+    }
+
+    current = current.parent;
+  }
+
+  return hasEntityOwner;
+};
+
+const collectPickableObjects = (scene: THREE.Scene): THREE.Object3D[] => {
+  const objects: THREE.Object3D[] = [];
+
+  scene.traverse((object) => {
+    if (isPickableObject(object)) {
+      objects.push(object);
+    }
+  });
+
+  return objects;
+};
+
 const getEntityHit = (
   intersections: THREE.Intersection[],
 ): Pick<PointerInfo, "hitEntityId" | "hitEntityType"> => {
@@ -249,7 +280,10 @@ export const getPointerInfoFromEvent = (
     element,
     { ignoredEntityIds },
   );
-  const intersections = raycaster.intersectObjects(scene.children, true);
+  const intersections = raycaster.intersectObjects(
+    collectPickableObjects(scene),
+    false,
+  );
   const entityHit = getEntityHit(intersections);
 
   return {
