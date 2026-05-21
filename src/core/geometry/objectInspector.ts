@@ -278,6 +278,43 @@ const getPointInfo = (
     };
   }
 
+
+  if (point.construction.kind === "lineLineIntersection") {
+    return {
+      title: "Constructed point",
+      rows: [
+        ...rows,
+        { label: "Construction", value: "line-line intersection" },
+        { label: "Line 1", value: getSegmentDisplayName(document, point.construction.segmentAId) },
+        { label: "Line 2", value: getSegmentDisplayName(document, point.construction.segmentBId) },
+      ],
+    };
+  }
+
+  if (point.construction.kind === "linePlaneIntersection") {
+    return {
+      title: "Constructed point",
+      rows: [
+        ...rows,
+        { label: "Construction", value: "line-plane intersection" },
+        { label: "Line", value: getSegmentDisplayName(document, point.construction.segmentId) },
+        { label: "Plane", value: getPlaneDisplayName(document, point.construction.planeId) },
+      ],
+    };
+  }
+
+  if (point.construction.kind === "planePlaneIntersectionEndpoint") {
+    return {
+      title: "Constructed point",
+      rows: [
+        ...rows,
+        { label: "Construction", value: "plane-plane intersection endpoint" },
+        { label: "Plane 1", value: getPlaneDisplayName(document, point.construction.planeAId) },
+        { label: "Plane 2", value: getPlaneDisplayName(document, point.construction.planeBId) },
+        { label: "Endpoint", value: point.construction.endpoint },
+      ],
+    };
+  }
   return {
     title: "构造点",
     rows: [

@@ -12,12 +12,14 @@ import {
 } from "lucide-react";
 import GreekLetterKeyboard from "./components/GreekLetterKeyboard";
 import { AddExtensionCommand } from "./core/command/AddExtensionCommand";
+import { AddIntersectionPointCommand } from "./core/command/AddIntersectionPointCommand";
 import SceneViewport from "./components/SceneViewport";
 import { AddLinePlanePerpendicularCommand } from "./core/command/AddLinePlanePerpendicularCommand";
 import { AddMeasurementCommand } from "./core/command/AddMeasurementCommand";
 import { AddMidpointCommand } from "./core/command/AddMidpointCommand";
 import { AddParallelPlaneCommand } from "./core/command/AddParallelPlaneCommand";
 import { AddParallelSegmentCommand } from "./core/command/AddParallelSegmentCommand";
+import { AddPlanePlaneIntersectionCommand } from "./core/command/AddPlanePlaneIntersectionCommand";
 import { AddPerpendicularLineCommand } from "./core/command/AddPerpendicularLineCommand";
 import { AddPlaneCommand } from "./core/command/AddPlaneCommand";
 import { AddPointCommand } from "./core/command/AddPointCommand";
@@ -70,9 +72,23 @@ import {
   getExtensionStatus,
 } from "./core/geometry/extensionUtils";
 import {
+  getExtensionPartsForEntity,
+  type ExtensionPartInfo,
+} from "./core/geometry/extensionPartUtils";
+import {
+  getPlanePlaneIntersection,
+  getSegmentPlaneIntersection,
+  getSegmentSegmentIntersection,
+  type IntersectionFailureReason,
+} from "./core/geometry/intersectionUtils";
+import {
   getPlaneFromThreePoints,
   getPlaneValidationStatus,
 } from "./core/geometry/planeUtils";
+import {
+  getParallelPlaneInfo,
+  getParallelSegmentInfo,
+} from "./core/geometry/parallelObjectUtils";
 import {
   calculateLinePlanePerpendicular,
 } from "./core/geometry/linePlanePerpendicularUtils";
@@ -115,6 +131,10 @@ type PlaneCreationMode = "threePoint";
 type PerpendicularMode = "pointLine" | "linePlane";
 type ExtendMode = "auto" | "segmentToBoundary" | "planeToBoundary";
 type ParallelMode = "auto" | "segment" | "plane";
+type IntersectionTarget = {
+  readonly entityId: EntityId;
+  readonly entityType: "segment" | "plane";
+};
 type PreselectedEntityType =
   | "point"
   | "segment"
@@ -179,6 +199,7 @@ const constructTools: Array<{
   { name: "midpoint", label: "\u4e2d\u70b9", icon: SolidPointIcon },
   { name: "extend", label: "\u5ef6\u957f", icon: Ruler },
   { name: "parallel", label: "\u5e73\u884c", icon: Ruler },
+  { name: "intersection", label: "\u4ea4\u70b9/\u4ea4\u7ebf", icon: Ruler },
   { name: "plane", label: "\u5e73\u9762", icon: SolidPlaneIcon },
 ];
 
@@ -199,6 +220,7 @@ const toolLabels: Record<ToolName, string> = {
   midpoint: "\u4e2d\u70b9",
   extend: "\u5ef6\u957f",
   parallel: "\u5e73\u884c",
+  intersection: "\u4ea4\u70b9/\u4ea4\u7ebf",
   plane: "\u5e73\u9762",
   move: "\u79fb\u52a8",
   measureLength: "\u957f\u5ea6",
@@ -465,6 +487,95 @@ const createParallelPlaneVertexEntity = (
   };
 };
 
+const createLineLineIntersectionPointEntity = (
+  id: EntityId,
+  name: string,
+  position: Vec3,
+  segmentAId: EntityId,
+  segmentBId: EntityId,
+): PointEntity => {
+  const timestamp = new Date().toISOString();
+
+  return {
+    id,
+    kind: "point",
+    name,
+    style: { color: DEFAULT_POINT_COLOR },
+    visible: true,
+    locked: false,
+    position,
+    nameSource: "auto",
+    pointKind: "constructed",
+    construction: {
+      kind: "lineLineIntersection",
+      segmentAId,
+      segmentBId,
+    },
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+};
+
+const createLinePlaneIntersectionPointEntity = (
+  id: EntityId,
+  name: string,
+  position: Vec3,
+  segmentId: EntityId,
+  planeId: EntityId,
+): PointEntity => {
+  const timestamp = new Date().toISOString();
+
+  return {
+    id,
+    kind: "point",
+    name,
+    style: { color: DEFAULT_POINT_COLOR },
+    visible: true,
+    locked: false,
+    position,
+    nameSource: "auto",
+    pointKind: "constructed",
+    construction: {
+      kind: "linePlaneIntersection",
+      segmentId,
+      planeId,
+    },
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+};
+
+const createPlanePlaneIntersectionEndpointEntity = (
+  id: EntityId,
+  name: string,
+  position: Vec3,
+  planeAId: EntityId,
+  planeBId: EntityId,
+  endpoint: "start" | "end",
+): PointEntity => {
+  const timestamp = new Date().toISOString();
+
+  return {
+    id,
+    kind: "point",
+    name,
+    style: { color: DEFAULT_POINT_COLOR },
+    visible: true,
+    locked: false,
+    position,
+    nameSource: "auto",
+    pointKind: "constructed",
+    construction: {
+      kind: "planePlaneIntersectionEndpoint",
+      planeAId,
+      planeBId,
+      endpoint,
+    },
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+};
+
 const createSegmentEntity = (
   id: EntityId,
   name: string,
@@ -544,6 +655,7 @@ const createPerpendicularLineEntity = (
       extensionColor: "#64748b",
       extensionLineWidth: 1,
       extensionDash: true,
+      showExtensionHelper: true,
     },
     visible: true,
     locked: false,
@@ -579,6 +691,7 @@ const createLinePlanePerpendicularEntity = (
       extensionFillOpacity: 0.14,
       helperLineColor: "#64748b",
       helperLineDash: true,
+      showExtensionHelper: true,
     },
     visible: true,
     locked: false,
@@ -613,6 +726,7 @@ const createLineDirectionPerpendicularEntity = (
       extensionColor: "#64748b",
       extensionLineWidth: 1,
       extensionDash: true,
+      showExtensionHelper: true,
     },
     visible: true,
     locked: false,
@@ -648,6 +762,7 @@ const createPlaneDirectionPerpendicularEntity = (
       extensionFillOpacity: 0.14,
       helperLineColor: "#64748b",
       helperLineDash: true,
+      showExtensionHelper: true,
     },
     visible: true,
     locked: false,
@@ -682,6 +797,7 @@ const createExtensionEntity = (
       boundaryLineColor: "#60a5fa",
     },
     visible: true,
+    snapEnabled: true,
     locked: false,
     createdAt: timestamp,
     updatedAt: timestamp,
@@ -797,6 +913,7 @@ const createPlanePlaneAngleMeasurementEntity = (
 
 interface PointDragState {
   readonly pointId: EntityId;
+  readonly movePointId: EntityId;
   readonly oldPosition: Vec3;
   latestPosition: Vec3;
 }
@@ -1159,6 +1276,45 @@ const getManualNameDraft = (
     | PlaneEntity,
 ): string => (entity.nameSource === "manual" ? entity.name?.trim() ?? "" : "");
 
+const isExtensionVisible = (extension: ExtensionEntity): boolean =>
+  extension.visible !== false;
+
+const getRelatedExtensionEntities = (
+  document: BoardDocument,
+  entity: BoardEntity | null,
+): readonly ExtensionEntity[] => {
+  if (!entity) {
+    return [];
+  }
+
+  if (entity.kind === "extension") {
+    return [entity];
+  }
+
+  if (entity.kind !== "segment" && entity.kind !== "plane") {
+    return [];
+  }
+
+  return Object.values(document.entities).filter(
+    (candidate): candidate is ExtensionEntity =>
+      candidate.kind === "extension" &&
+      candidate.targetId === entity.id &&
+      candidate.targetType === entity.kind,
+  );
+};
+
+const getExtensionVisibilityButtonText = (
+  extensions: readonly ExtensionEntity[],
+): string => {
+  const hasHiddenExtension = extensions.some(
+    (extension) => !isExtensionVisible(extension),
+  );
+
+  return hasHiddenExtension
+    ? "\u663e\u793a\u5ef6\u957f\u90e8\u5206"
+    : "\u9690\u85cf\u5ef6\u957f\u90e8\u5206";
+};
+
 const getPreselectionDescription = (
   preselection: Preselection | null,
   document: BoardDocument,
@@ -1411,6 +1567,35 @@ const getParallelToolStatus = (
   return "\u8bf7\u9009\u62e9\u76ee\u6807\u7ebf\u6bb5\u6216\u5e73\u9762";
 };
 
+const getIntersectionToolStatus = (
+  currentTool: ToolName,
+  firstTarget: IntersectionTarget | null,
+  statusMessage: string | null,
+  document: BoardDocument,
+): string | null => {
+  if (currentTool !== "intersection") {
+    return null;
+  }
+
+  if (statusMessage) {
+    return statusMessage;
+  }
+
+  if (!firstTarget) {
+    return "\u8bf7\u9009\u62e9\u7b2c\u4e00\u4e2a\u7ebf\u6bb5\u6216\u5e73\u9762";
+  }
+
+  const entity = document.entities[firstTarget.entityId];
+  const name =
+    entity?.kind === "segment"
+      ? getSegmentDisplayName(document, entity)
+      : entity?.kind === "plane"
+        ? getPlaneDisplayName(document, entity)
+        : firstTarget.entityId;
+
+  return `\u5df2\u9009\u62e9 ${name}\uff0c\u8bf7\u9009\u62e9\u7b2c\u4e8c\u4e2a\u7ebf\u6bb5\u6216\u5e73\u9762`;
+};
+
 const getParallelSegmentPreview = (
   document: BoardDocument,
   draft: Extract<ParallelDraft, { kind: "segment" }>,
@@ -1643,6 +1828,10 @@ function App() {
   );
   const [parallelStatusMessage, setParallelStatusMessage] =
     useState<string | null>(null);
+  const [intersectionFirstTarget, setIntersectionFirstTarget] =
+    useState<IntersectionTarget | null>(null);
+  const [intersectionStatusMessage, setIntersectionStatusMessage] =
+    useState<string | null>(null);
   const [showCoordinatePointModal, setShowCoordinatePointModal] =
     useState(false);
   const [angleMeasureMode, setAngleMeasureMode] =
@@ -1708,6 +1897,49 @@ function App() {
   const objectInspectorInfo = singleSelectedEntity
     ? getObjectInspectorInfo(singleSelectedEntity.id, displayDocument)
     : null;
+  const selectedExtensionParts =
+    singleSelectedEntity?.kind === "segment" || singleSelectedEntity?.kind === "plane"
+      ? getExtensionPartsForEntity(singleSelectedEntity.id, displayDocument)
+      : [];
+  const selectedConstructionExtensionParts =
+    singleSelectedEntity?.kind === "perpendicularLine"
+      ? getExtensionPartsForEntity(
+          singleSelectedEntity.segmentId,
+          displayDocument,
+        ).filter((part) => part.sourceEntityId === singleSelectedEntity.id)
+      : singleSelectedEntity?.kind === "linePlanePerpendicular"
+        ? getExtensionPartsForEntity(
+            singleSelectedEntity.planeId,
+            displayDocument,
+          ).filter((part) => part.sourceEntityId === singleSelectedEntity.id)
+        : [];
+  const selectedExtensionSourcePart =
+    singleSelectedEntity?.kind === "extension"
+      ? {
+          id: `extension:${singleSelectedEntity.id}`,
+          kind:
+            singleSelectedEntity.targetType === "segment"
+              ? "manualSegmentExtension"
+              : "manualPlaneExtension",
+          ownerEntityId: singleSelectedEntity.targetId,
+          ownerEntityType: singleSelectedEntity.targetType,
+          sourceEntityId: singleSelectedEntity.id,
+          sourceEntityType: "extension",
+          label:
+            singleSelectedEntity.targetType === "segment"
+              ? "手动延长到坐标边界"
+              : "手动延展到坐标边界",
+          visible: isExtensionVisible(singleSelectedEntity),
+          canSnap:
+            isExtensionVisible(singleSelectedEntity) &&
+            singleSelectedEntity.snapEnabled !== false,
+        } satisfies ExtensionPartInfo
+      : null;
+  const selectedExtensionControlParts = selectedExtensionSourcePart
+    ? [selectedExtensionSourcePart]
+    : selectedConstructionExtensionParts.length > 0
+      ? selectedConstructionExtensionParts
+      : selectedExtensionParts;
   const hasPointA = Boolean(displayDocument.entities[TEST_POINT_A_ID]);
   const hasPointB = Boolean(displayDocument.entities[TEST_POINT_B_ID]);
   const hasSegmentAB = Boolean(displayDocument.entities[TEST_SEGMENT_AB_ID]);
@@ -1734,6 +1966,30 @@ function App() {
           parallelAnchorPreviewPosition,
         )
       : null;
+  const parallelFollowPreviewPosition =
+    currentTool === "parallel" && parallelDraft?.kind === "segment"
+      ? parallelAnchorPreviewPosition
+      : null;
+  const parallelOtherPreviewPosition =
+    currentTool === "parallel" &&
+    parallelDraft?.kind === "segment" &&
+    parallelPreviewSegment
+      ? parallelDraft.sourceAnchorEndpoint === "start"
+        ? parallelPreviewSegment.end
+        : parallelPreviewSegment.start
+      : null;
+  const parallelPlaneOtherPreviewPositions =
+    currentTool === "parallel" &&
+    parallelDraft?.kind === "plane" &&
+    parallelPreviewPlane
+      ? parallelPreviewPlane.filter(
+          (_position, index) => index !== parallelDraft.sourceAnchorVertexIndex,
+        )
+      : [];
+  const secondaryPreviewPosition =
+    parallelOtherPreviewPosition ?? parallelPlaneOtherPreviewPositions[0] ?? null;
+  const tertiaryPreviewPosition =
+    parallelPlaneOtherPreviewPositions[1] ?? null;
   const previewPosition =
     currentTool === "point" && pointCreationMode === "free"
       ? latestPointToolResolvedResultRef.current?.finalPosition ??
@@ -1742,7 +1998,7 @@ function App() {
       : currentTool === "segment"
         ? lastSnapResult?.position ?? null
         : currentTool === "parallel" && parallelPreviewSegment
-          ? parallelPreviewSegment.end
+          ? parallelFollowPreviewPosition
           : currentTool === "parallel" && parallelDraft
             ? parallelAnchorPreviewPosition
         : currentTool === "perpendicular" && perpendicularDirectionPick
@@ -1759,7 +2015,7 @@ function App() {
         ? getPointWorldPosition(displayDocument, perpendicularDirectionPick.pointId) ??
           perpendicularDirectionPick.basePoint
       : currentTool === "parallel" && parallelPreviewSegment
-        ? parallelPreviewSegment.start
+        ? parallelOtherPreviewPosition
       : null;
 
   useEffect(() => {
@@ -1826,6 +2082,12 @@ function App() {
     parallelMode,
     parallelDraft,
     parallelStatusMessage,
+    displayDocument,
+  );
+  const intersectionToolStatus = getIntersectionToolStatus(
+    currentTool,
+    intersectionFirstTarget,
+    intersectionStatusMessage,
     displayDocument,
   );
   const measureLengthToolStatus = getMeasureLengthToolStatus(
@@ -1904,9 +2166,17 @@ function App() {
         displayDocument.entities[parallelDraft.sourcePlaneId]?.kind === "plane"
           ? parallelDraft.sourcePlaneId
           : null,
+        intersectionFirstTarget &&
+        (displayDocument.entities[intersectionFirstTarget.entityId]?.kind ===
+          "segment" ||
+          displayDocument.entities[intersectionFirstTarget.entityId]?.kind ===
+            "plane")
+          ? intersectionFirstTarget.entityId
+          : null,
       ].filter((entityId): entityId is EntityId => Boolean(entityId)),
     [
       displayDocument.entities,
+      intersectionFirstTarget,
       parallelDraft,
       perpendicularPlaneId,
       perpendicularSegmentId,
@@ -2001,6 +2271,93 @@ function App() {
     };
   };
 
+  const getParallelPointMoveAnchorPosition = (
+    point: PointEntity,
+    desiredPosition: Vec3,
+    sourceDocument: BoardDocument,
+  ): Vec3 | null => {
+    if (point.construction?.kind === "parallelSegmentEndpoint") {
+      const sourceSegment =
+        sourceDocument.entities[point.construction.sourceSegmentId];
+
+      if (sourceSegment?.kind !== "segment") {
+        return null;
+      }
+
+      const startPosition = getPointWorldPosition(
+        sourceDocument,
+        sourceSegment.pointIds[0],
+      );
+      const endPosition = getPointWorldPosition(
+        sourceDocument,
+        sourceSegment.pointIds[1],
+      );
+
+      if (!startPosition || !endPosition) {
+        return null;
+      }
+
+      const offset =
+        point.construction.sourceAnchorEndpoint === "start"
+          ? subtractVec3(endPosition, startPosition)
+          : subtractVec3(startPosition, endPosition);
+
+      return subtractVec3(desiredPosition, offset);
+    }
+
+    if (point.construction?.kind === "parallelPlaneVertex") {
+      const sourcePlane = sourceDocument.entities[point.construction.sourcePlaneId];
+
+      if (sourcePlane?.kind !== "plane") {
+        return null;
+      }
+
+      const sourcePositions = sourcePlane.pointIds.map((pointId) =>
+        getPointWorldPosition(sourceDocument, pointId),
+      );
+      const sourceAnchorPosition =
+        sourcePositions[point.construction.sourceAnchorVertexIndex];
+      const sourceVertexPosition =
+        sourcePositions[point.construction.sourceVertexIndex];
+
+      if (!sourceAnchorPosition || !sourceVertexPosition) {
+        return null;
+      }
+
+      return subtractVec3(
+        desiredPosition,
+        subtractVec3(sourceVertexPosition, sourceAnchorPosition),
+      );
+    }
+
+    return null;
+  };
+
+  const getParallelDragAnchorPointId = (
+    point: PointEntity,
+    sourceDocument: BoardDocument,
+  ): EntityId | null => {
+    if (point.construction?.kind === "parallelSegmentEndpoint") {
+      const parallelInfo = Object.values(sourceDocument.entities)
+        .filter((entity): entity is SegmentEntity => entity.kind === "segment")
+        .map((segment) => getParallelSegmentInfo(segment.id, sourceDocument))
+        .find((info) => info?.constructedPointId === point.id);
+
+      return parallelInfo?.anchorPointId ?? null;
+    }
+
+    if (point.construction?.kind === "parallelPlaneVertex") {
+      const parallelInfo = Object.values(sourceDocument.entities)
+        .filter((entity): entity is PlaneEntity => entity.kind === "plane")
+        .map((plane) => getParallelPlaneInfo(plane.id, sourceDocument))
+        .find((info) => info?.constructedPointIds.includes(point.id));
+
+      return parallelInfo?.anchorPointId ?? null;
+    }
+
+    return null;
+  };
+
   const getDragPosition = (pointerInfo: PointerInfo): Vec3 | null =>
     pointerInfo.snapResult?.position ?? pointerInfo.worldPosition ?? null;
 
@@ -2063,6 +2420,8 @@ function App() {
     setLinePlaneAngleSegmentId(null);
     setPlanePlaneAngleFirstPlaneId(null);
     setAngleStatusMessage(null);
+    setIntersectionFirstTarget(null);
+    setIntersectionStatusMessage(null);
     setShowLinePlaneAnglePanel(false);
     setShowPlanePlaneAnglePanel(false);
     setLastPointerInfo(null);
@@ -2088,7 +2447,10 @@ function App() {
   };
 
   const showFileError = async (title: string, error: unknown) => {
-    const errorMessage = error instanceof Error ? error.message : String(error);
+    const rawMessage = error instanceof Error ? error.message : String(error);
+    const errorMessage = rawMessage.includes("not allowed by ACL")
+      ? `${rawMessage}\n\nPlease check the application file-system permissions and choose a writable project file path.`
+      : rawMessage;
 
     if (isTauriEnvironment()) {
       try {
@@ -2182,7 +2544,7 @@ function App() {
     await writeTextFile(filePath, exportProject(commandManager.getDocument()));
     setCurrentFilePath(filePath);
     setIsDirty(false);
-    setFileStatusMessage("Saved");
+    setFileStatusMessage("Save succeeded");
   };
 
   const newProject = () => {
@@ -2320,6 +2682,51 @@ function App() {
 
   const updateEntity = (entityId: EntityId, patch: EntityUpdate) => {
     executeCommand(new UpdateEntityCommand(entityId, patch));
+  };
+
+  const setExtensionPartVisibility = (
+    part: ExtensionPartInfo,
+    visible: boolean,
+  ) => {
+    const currentDocument = commandManager.getDocument();
+    const sourceEntity = currentDocument.entities[part.sourceEntityId];
+    const command =
+      part.sourceEntityType === "extension" && sourceEntity?.kind === "extension"
+        ? new UpdateEntityCommand<ExtensionEntity>(sourceEntity.id, {
+            visible,
+            snapEnabled: visible,
+          })
+        : part.sourceEntityType === "perpendicularLine" &&
+            sourceEntity?.kind === "perpendicularLine"
+          ? new UpdateEntityCommand<PerpendicularLineEntity>(sourceEntity.id, {
+              style: {
+                ...sourceEntity.style,
+                showExtensionHelper: visible,
+              },
+            })
+          : part.sourceEntityType === "linePlanePerpendicular" &&
+              sourceEntity?.kind === "linePlanePerpendicular"
+            ? new UpdateEntityCommand<LinePlanePerpendicularEntity>(
+                sourceEntity.id,
+                {
+                  style: {
+                    ...sourceEntity.style,
+                    showExtensionHelper: visible,
+                  },
+                },
+              )
+            : null;
+
+    if (!command || part.visible === visible) {
+      return;
+    }
+
+    executeCommand(command);
+    showToast(
+      visible
+        ? `\u5df2\u663e\u793a\uff1a${part.label}`
+        : `\u5df2\u9690\u85cf\uff1a${part.label}`,
+    );
   };
 
   const commitDraftName = () => {
@@ -2969,6 +3376,7 @@ function App() {
       sourceAnchorEndpoint,
     });
     setParallelStatusMessage(null);
+    showToast("\u53ef\u6309 Ctrl+J \u5207\u6362\u8ddf\u968f\u7aef\u70b9");
   };
 
   const startParallelPlanePreview = (
@@ -2994,6 +3402,43 @@ function App() {
       sourceAnchorVertexIndex,
     });
     setParallelStatusMessage(null);
+    showToast("\u53ef\u6309 Ctrl+J \u5207\u6362\u8ddf\u968f\u9876\u70b9");
+  };
+
+  const switchParallelFollowTarget = () => {
+    if (!parallelDraft) {
+      return false;
+    }
+
+    if (parallelDraft.kind === "segment") {
+      const nextEndpoint =
+        parallelDraft.sourceAnchorEndpoint === "start" ? "end" : "start";
+
+      setParallelDraft({
+        ...parallelDraft,
+        sourceAnchorEndpoint: nextEndpoint,
+      });
+      setParallelStatusMessage(
+        nextEndpoint === "start"
+          ? "\u5df2\u5207\u6362\u4e3a\u8ddf\u968f\u8d77\u70b9"
+          : "\u5df2\u5207\u6362\u4e3a\u8ddf\u968f\u7ec8\u70b9",
+      );
+      showToast("\u5df2\u5207\u6362\u8ddf\u968f\u7aef\u70b9");
+      return true;
+    }
+
+    const nextVertexIndex =
+      ((parallelDraft.sourceAnchorVertexIndex + 1) % 3) as 0 | 1 | 2;
+
+    setParallelDraft({
+      ...parallelDraft,
+      sourceAnchorVertexIndex: nextVertexIndex,
+    });
+    setParallelStatusMessage(
+      `\u5df2\u5207\u6362\u4e3a\u8ddf\u968f\u7b2c ${nextVertexIndex + 1} \u4e2a\u9876\u70b9`,
+    );
+    showToast("\u5df2\u5207\u6362\u8ddf\u968f\u9876\u70b9");
+    return true;
   };
 
   const confirmParallelDraft = (anchorPosition: Vec3 | null): boolean => {
@@ -3117,6 +3562,162 @@ function App() {
     setParallelDraft(null);
     setParallelStatusMessage("\u5df2\u521b\u5efa\u5e73\u884c\u5e73\u9762");
     return true;
+  };
+
+  const getIntersectionFailureMessage = (
+    reason: IntersectionFailureReason,
+  ): string => {
+    switch (reason) {
+      case "degenerate-segment":
+        return "\u76ee\u6807\u7ebf\u6bb5\u9000\u5316\uff0c\u65e0\u6cd5\u6c42\u4ea4";
+      case "parallel-lines":
+        return "\u4e24\u6761\u7ebf\u5e73\u884c\uff0c\u65e0\u6cd5\u6784\u9020\u4ea4\u70b9";
+      case "coincident-lines":
+        return "\u4e24\u6761\u7ebf\u91cd\u5408\uff0c\u4ea4\u70b9\u4e0d\u552f\u4e00";
+      case "skew-lines":
+        return "\u4e24\u6761\u7ebf\u5f02\u9762\uff0c\u65e0\u6cd5\u6784\u9020\u4ea4\u70b9";
+      case "invalid-plane":
+        return "\u5e73\u9762\u65e0\u6548\uff0c\u65e0\u6cd5\u6c42\u4ea4";
+      case "line-plane-parallel":
+        return "\u7ebf\u4e0e\u5e73\u9762\u5e73\u884c\uff0c\u65e0\u6cd5\u6784\u9020\u4ea4\u70b9";
+      case "line-in-plane":
+        return "\u7ebf\u5728\u5e73\u9762\u5185\uff0c\u4ea4\u70b9\u4e0d\u552f\u4e00";
+      case "parallel-planes":
+        return "\u4e24\u4e2a\u5e73\u9762\u5e73\u884c\uff0c\u65e0\u6cd5\u6784\u9020\u4ea4\u7ebf";
+      case "coincident-planes":
+        return "\u4e24\u4e2a\u5e73\u9762\u91cd\u5408\uff0c\u4ea4\u7ebf\u4e0d\u552f\u4e00";
+      case "line-out-of-bounds":
+        return "\u4ea4\u7ebf\u4e0d\u5728\u5f53\u524d\u5750\u6807\u8fb9\u754c\u5185";
+    }
+  };
+
+  const createIntersectionForPair = (
+    firstTarget: IntersectionTarget,
+    secondTarget: IntersectionTarget,
+  ): boolean => {
+    const currentDocument = commandManager.getDocument();
+    const firstEntity = currentDocument.entities[firstTarget.entityId];
+    const secondEntity = currentDocument.entities[secondTarget.entityId];
+
+    if (
+      firstTarget.entityId === secondTarget.entityId ||
+      !firstEntity ||
+      !secondEntity
+    ) {
+      showToast("\u8bf7\u9009\u62e9\u4e24\u4e2a\u4e0d\u540c\u7684\u7ebf\u6bb5\u6216\u5e73\u9762");
+      return false;
+    }
+
+    if (firstEntity.kind === "segment" && secondEntity.kind === "segment") {
+      const intersection = getSegmentSegmentIntersection(
+        currentDocument,
+        firstEntity,
+        secondEntity,
+      );
+
+      if (!intersection.ok) {
+        showToast(getIntersectionFailureMessage(intersection.reason));
+        return false;
+      }
+
+      executeCommand(
+        new AddIntersectionPointCommand(
+          createLineLineIntersectionPointEntity(
+            createEntityId("point"),
+            getNextPointName(),
+            cloneVec3(intersection.value),
+            firstEntity.id,
+            secondEntity.id,
+          ),
+        ),
+      );
+      setIntersectionStatusMessage("\u5df2\u521b\u5efa\u7ebf\u7ebf\u4ea4\u70b9");
+      return true;
+    }
+
+    if (
+      (firstEntity.kind === "segment" && secondEntity.kind === "plane") ||
+      (firstEntity.kind === "plane" && secondEntity.kind === "segment")
+    ) {
+      const segment = (
+        firstEntity.kind === "segment" ? firstEntity : secondEntity
+      ) as SegmentEntity;
+      const plane = (
+        firstEntity.kind === "plane" ? firstEntity : secondEntity
+      ) as PlaneEntity;
+      const intersection = getSegmentPlaneIntersection(
+        currentDocument,
+        segment,
+        plane,
+      );
+
+      if (!intersection.ok) {
+        showToast(getIntersectionFailureMessage(intersection.reason));
+        return false;
+      }
+
+      executeCommand(
+        new AddIntersectionPointCommand(
+          createLinePlaneIntersectionPointEntity(
+            createEntityId("point"),
+            getNextPointName(),
+            cloneVec3(intersection.value),
+            segment.id,
+            plane.id,
+          ),
+        ),
+      );
+      setIntersectionStatusMessage("\u5df2\u521b\u5efa\u7ebf\u9762\u4ea4\u70b9");
+      return true;
+    }
+
+    if (firstEntity.kind === "plane" && secondEntity.kind === "plane") {
+      const intersection = getPlanePlaneIntersection(
+        currentDocument,
+        firstEntity,
+        secondEntity,
+      );
+
+      if (!intersection.ok) {
+        showToast(getIntersectionFailureMessage(intersection.reason));
+        return false;
+      }
+
+      const startPointId = createEntityId("point");
+      const endPointId = createEntityId("point");
+      const startPoint = createPlanePlaneIntersectionEndpointEntity(
+        startPointId,
+        getNextPointNameAtOffset(1),
+        cloneVec3(intersection.value[0]),
+        firstEntity.id,
+        secondEntity.id,
+        "start",
+      );
+      const endPoint = createPlanePlaneIntersectionEndpointEntity(
+        endPointId,
+        getNextPointNameAtOffset(2),
+        cloneVec3(intersection.value[1]),
+        firstEntity.id,
+        secondEntity.id,
+        "end",
+      );
+      const segment = createSegmentEntity(
+        createEntityId("segment"),
+        getNextSegmentName(),
+        startPointId,
+        endPointId,
+        "#111827",
+      );
+
+      executeCommand(
+        new AddPlanePlaneIntersectionCommand(startPoint, endPoint, segment),
+      );
+      setIntersectionStatusMessage("\u5df2\u521b\u5efa\u9762\u9762\u4ea4\u7ebf");
+      return true;
+    }
+
+    showToast("\u8bf7\u9009\u62e9\u7ebf\u6bb5\u6216\u5e73\u9762");
+    return false;
   };
 
   const addMidpoint = (pointAId: EntityId, pointBId: EntityId) => {
@@ -4409,6 +5010,15 @@ function App() {
           getSegmentPreselection(pointerInfo, sourceDocument) ??
           getPlanePreselection(pointerInfo, sourceDocument)
         );
+      case "intersection": {
+        const candidate =
+          getSegmentPreselection(pointerInfo, sourceDocument) ??
+          getPlanePreselection(pointerInfo, sourceDocument);
+
+        return candidate?.entityId === intersectionFirstTarget?.entityId
+          ? null
+          : candidate;
+      }
       case "perpendicular":
         if (perpendicularDirectionPick) {
           return getSnapTargetPreselection(pointerInfo, sourceDocument);
@@ -4493,7 +5103,11 @@ function App() {
       return;
     }
 
-    if (entity.pointKind === "constructed") {
+    if (
+      entity.pointKind === "constructed" &&
+      entity.construction?.kind !== "parallelSegmentEndpoint" &&
+      entity.construction?.kind !== "parallelPlaneVertex"
+    ) {
       setCurrentPreselection(null);
       setDraggedPointId(null);
       selectEntity(entity.id);
@@ -4502,15 +5116,33 @@ function App() {
       return;
     }
 
+    const movePointId =
+      entity.pointKind === "constructed"
+        ? getParallelDragAnchorPointId(entity, commandManager.getDocument())
+        : entity.id;
+
+    if (!movePointId) {
+      showToast("\u5e73\u884c\u5bf9\u8c61\u4f9d\u8d56\u7f3a\u5931\uff0c\u65e0\u6cd5\u62d6\u52a8");
+      return;
+    }
+
+    const movePoint = commandManager.getDocument().entities[movePointId];
+
+    if (!movePoint || movePoint.kind !== "point" || movePoint.pointKind === "constructed") {
+      showToast("\u5e73\u884c\u5bf9\u8c61\u4f9d\u8d56\u7f3a\u5931\uff0c\u65e0\u6cd5\u62d6\u52a8");
+      return;
+    }
+
     pointDragStateRef.current = {
       pointId: entity.id,
+      movePointId,
       oldPosition: cloneVec3(
-        getPointWorldPosition(commandManager.getDocument(), entity.id) ??
-          entity.position,
+        getPointWorldPosition(commandManager.getDocument(), movePointId) ??
+          movePoint.position,
       ),
       latestPosition: cloneVec3(
-        getPointWorldPosition(commandManager.getDocument(), entity.id) ??
-          entity.position,
+        getPointWorldPosition(commandManager.getDocument(), movePointId) ??
+          movePoint.position,
       ),
     };
     setCurrentPreselection(null);
@@ -4520,9 +5152,25 @@ function App() {
 
   const handleSelectPointDragMove = (pointerInfo: PointerInfo) => {
     const dragState = pointDragStateRef.current;
-    const nextPosition = getDragPosition(pointerInfo);
+    const desiredPosition = getDragPosition(pointerInfo);
 
-    if (!dragState || !nextPosition) {
+    if (!dragState || !desiredPosition) {
+      return;
+    }
+
+    const sourceDocument = commandManager.getDocument();
+    const draggedPoint = sourceDocument.entities[dragState.pointId];
+    const nextPosition =
+      draggedPoint?.kind === "point" && draggedPoint.pointKind === "constructed"
+        ? getParallelPointMoveAnchorPosition(
+            draggedPoint,
+            desiredPosition,
+            sourceDocument,
+          )
+        : desiredPosition;
+
+    if (!nextPosition) {
+      showToast("\u5e73\u884c\u5bf9\u8c61\u4f9d\u8d56\u7f3a\u5931\uff0c\u65e0\u6cd5\u62d6\u52a8");
       return;
     }
 
@@ -4541,7 +5189,7 @@ function App() {
     setDragPreviewDocument(
       createPointMovePreviewDocument(
         commandManager.getDocument(),
-        dragState.pointId,
+        dragState.movePointId,
         nextPosition,
       ),
     );
@@ -4555,7 +5203,7 @@ function App() {
     }
 
     const finalPosition = cloneVec3(dragState.latestPosition);
-    const { pointId, oldPosition } = dragState;
+    const { pointId, movePointId, oldPosition } = dragState;
 
     cancelPointDrag();
 
@@ -4565,7 +5213,9 @@ function App() {
     }
 
     if (!areVec3Equal(oldPosition, finalPosition)) {
-      executeCommand(new MovePointCommand(pointId, oldPosition, finalPosition));
+      executeCommand(
+        new MovePointCommand(movePointId, oldPosition, finalPosition),
+      );
     }
 
     setSelection([pointId]);
@@ -4970,6 +5620,31 @@ function App() {
       return;
     }
 
+    if (currentTool === "intersection") {
+      const selectedTarget =
+        clickPreselection?.entityType === "segment" ||
+        clickPreselection?.entityType === "plane"
+          ? {
+              entityId: clickPreselection.entityId,
+              entityType: clickPreselection.entityType,
+            }
+          : null;
+
+      if (!selectedTarget) {
+        return;
+      }
+
+      if (!intersectionFirstTarget) {
+        setIntersectionFirstTarget(selectedTarget);
+        setIntersectionStatusMessage(null);
+        return;
+      }
+
+      createIntersectionForPair(intersectionFirstTarget, selectedTarget);
+      setIntersectionFirstTarget(null);
+      return;
+    }
+
     if (currentTool === "plane") {
       const pointInput = resolvePointInputFromPointer(
         nextPointerInfo,
@@ -5285,6 +5960,11 @@ function App() {
       setParallelStatusMessage(null);
     }
 
+    if (nextTool !== "intersection") {
+      setIntersectionFirstTarget(null);
+      setIntersectionStatusMessage(null);
+    }
+
     if (nextTool !== "measureAngle") {
       setShowAngleToolPanel(false);
       setShowLinePlaneAnglePanel(false);
@@ -5324,6 +6004,11 @@ function App() {
       setParallelStatusMessage(null);
     }
 
+    if (currentTool === "intersection" && nextTool !== "intersection") {
+      setIntersectionFirstTarget(null);
+      setIntersectionStatusMessage(null);
+    }
+
     if (currentTool === "measureLength" && nextTool !== "measureLength") {
       measureLengthToolRef.current.cancel();
       setMeasureFirstPointId(null);
@@ -5355,6 +6040,18 @@ function App() {
     };
 
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (
+        currentTool === "parallel" &&
+        parallelDraft &&
+        event.ctrlKey &&
+        event.key.toLowerCase() === "j" &&
+        !isEditingText(event.target)
+      ) {
+        event.preventDefault();
+        switchParallelFollowTarget();
+        return;
+      }
+
       if (
         (event.key === "Delete" || event.key === "Backspace") &&
         !isEditingText(event.target)
@@ -5499,6 +6196,12 @@ function App() {
         setParallelDraft(null);
         setParallelStatusMessage(null);
         setShowParallelToolPanel(false);
+        return;
+      }
+
+      if (currentTool === "intersection") {
+        setIntersectionFirstTarget(null);
+        setIntersectionStatusMessage(null);
         return;
       }
 
@@ -6205,6 +6908,8 @@ function App() {
           isDraggingPoint={draggedPointId !== null}
           preselectedEntityId={preselection?.entityId ?? null}
           previewPosition={previewPosition}
+          secondaryPreviewPosition={secondaryPreviewPosition}
+          tertiaryPreviewPosition={tertiaryPreviewPosition}
           segmentPreviewStartPosition={segmentPreviewStartPosition}
           planePreviewPoints={parallelPreviewPlane}
           onCanvasPointerDown={handleCanvasPointerDown}
@@ -6365,6 +7070,25 @@ function App() {
                     getPointWorldPosition(displayDocument, singleSelectedEntity.id),
                   )}
                 </span>
+              </div>
+            ) : null}
+            {selectedExtensionControlParts.length > 0 ? (
+              <div className="batch-naming">
+                <span>{"\u6750\u8d28 / \u5ef6\u957f\u90e8\u5206"}</span>
+                {selectedExtensionControlParts.map((part) => (
+                  <div className="extension-part-row" key={part.id}>
+                    <span>
+                      {part.label}
+                      {part.canSnap ? " / \u53ef\u5438\u9644" : ""}
+                    </span>
+                    <button
+                      onClick={() => setExtensionPartVisibility(part, !part.visible)}
+                      type="button"
+                    >
+                      {part.visible ? "\u9690\u85cf" : "\u663e\u793a"}
+                    </button>
+                  </div>
+                ))}
               </div>
             ) : null}
             {singleSelectedEntity?.kind === "plane" ? (
@@ -6949,6 +7673,7 @@ function App() {
         {midpointToolStatus ? <span>{midpointToolStatus}</span> : null}
         {extendToolStatus ? <span>{extendToolStatus}</span> : null}
         {parallelToolStatus ? <span>{parallelToolStatus}</span> : null}
+        {intersectionToolStatus ? <span>{intersectionToolStatus}</span> : null}
         {pointDragStatus ? <span>{pointDragStatus}</span> : null}
         {measureLengthToolStatus ? <span>{measureLengthToolStatus}</span> : null}
         {measureAngleToolStatus ? <span>{measureAngleToolStatus}</span> : null}

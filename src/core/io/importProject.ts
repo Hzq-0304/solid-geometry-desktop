@@ -140,6 +140,7 @@ const normalizeEntity = (
         extensionColor: "#64748b",
         extensionLineWidth: 1,
         extensionDash: true,
+        showExtensionHelper: true,
         ...perpendicularLine.style,
       },
     };
@@ -166,6 +167,7 @@ const normalizeEntity = (
         extensionFillOpacity: 0.14,
         helperLineColor: "#64748b",
         helperLineDash: true,
+        showExtensionHelper: true,
         ...linePlanePerpendicular.style,
       },
     };
@@ -180,6 +182,7 @@ const normalizeEntity = (
       type: "extension",
       mode: extension.mode ?? "toBoundaryCube",
       visible: extension.visible ?? true,
+      snapEnabled: extension.snapEnabled ?? extension.visible ?? true,
       locked: extension.locked ?? false,
       nameSource: extension.nameSource ?? "auto",
       style: {

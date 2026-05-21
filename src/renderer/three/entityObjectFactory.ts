@@ -38,6 +38,7 @@ import {
   getPointWorldPosition,
   getSegmentWorldPositions,
 } from "../../core/geometry/pointPositionUtils";
+import type { Vec3 } from "../../core/geometry/Vec3";
 import {
   createPlaneBoundaryMaterial,
   createSegmentMaterial,
@@ -92,6 +93,31 @@ const applyEntityUserData = (
 ): void => {
   object.userData.entityId = entity.id;
   object.userData.entityType = entity.kind;
+};
+
+const markObjectSelectable = (
+  object: THREE.Object3D,
+  selectable: boolean,
+): void => {
+  object.userData.selectable = selectable;
+};
+
+const markSegmentExtensionSnapTarget = (
+  object: THREE.Object3D,
+  extension: ExtensionEntity,
+  sourceSegment: SegmentEntity,
+  extensionPart: "start" | "end",
+  extensionSegment: readonly [Vec3, Vec3],
+): void => {
+  object.userData.snapTarget = extension.snapEnabled !== false;
+  object.userData.extensionTargetType = "segment";
+  object.userData.extensionPart = "segmentExtension";
+  object.userData.extensionSegmentPart = extensionPart;
+  object.userData.sourceSegmentId = sourceSegment.id;
+  object.userData.extensionSegmentStart = extensionSegment[0];
+  object.userData.extensionSegmentEnd = extensionSegment[1];
+  object.userData.entityId = extension.id;
+  object.userData.entityType = extension.kind;
 };
 
 const getMeasurementTargetIds = (
@@ -583,7 +609,11 @@ export const createPerpendicularLineObject = (
         ? segmentPositions[1]
         : null;
 
-  if (extensionStart && perpendicularLine.constructionMode !== "userDirection") {
+  if (
+    extensionStart &&
+    perpendicularLine.constructionMode !== "userDirection" &&
+    style.showExtensionHelper !== false
+  ) {
     const extensionGeometry = new THREE.BufferGeometry().setFromPoints([
       new THREE.Vector3(
         extensionStart.x,
@@ -761,25 +791,29 @@ export const createLinePlanePerpendicularObject = (
   const group = new THREE.Group();
 
   const showFootHelpers =
-    linePlanePerpendicular.constructionMode !== "userDirection";
+    linePlanePerpendicular.constructionMode !== "userDirection" &&
+    style.showExtensionHelper !== false;
 
   if (showFootHelpers) {
     projection.extensionTriangles.forEach((triangle) => {
-    const mesh = new THREE.Mesh(
-      createVec3TriangleGeometry(triangle),
-      new THREE.MeshBasicMaterial({
-        color: fillColor,
-        opacity: fillOpacity,
-        transparent: true,
-        side: THREE.DoubleSide,
-        depthTest: true,
-        depthWrite: false,
-      }),
-    );
+      const mesh = new THREE.Mesh(
+        createVec3TriangleGeometry(triangle),
+        new THREE.MeshBasicMaterial({
+          color: fillColor,
+          opacity: fillOpacity,
+          transparent: true,
+          side: THREE.DoubleSide,
+          depthTest: true,
+          depthWrite: false,
+        }),
+      );
 
-    mesh.renderOrder = LINE_PLANE_EXTENSION_RENDER_ORDER;
-    mesh.userData.ignorePicking = true;
-    group.add(mesh);
+      mesh.renderOrder = LINE_PLANE_EXTENSION_RENDER_ORDER;
+      applyEntityUserData(mesh, linePlanePerpendicular);
+      markObjectSelectable(mesh, false);
+      mesh.userData.snapTarget = true;
+      mesh.userData.extensionTargetType = "plane";
+      group.add(mesh);
     });
 
     projection.helperSegments.forEach(([start, end]) => {
@@ -978,7 +1012,7 @@ const createDashedLineObject = (
     new THREE.Vector3(end.x, end.y, end.z),
   ]);
   const material = new THREE.LineDashedMaterial({
-    color: selected || preselected ? SELECTED_ENTITY_COLOR : color,
+    color,
     dashSize: 0.16,
     gapSize: 0.1,
     linewidth: selected || preselected ? 2 : 1,
@@ -1023,6 +1057,10 @@ export const createExtensionObject = (
   document: BoardDocument,
   preselected = false,
 ): THREE.Group | null => {
+  if (extension.visible === false) {
+    return null;
+  }
+
   const target = document.entities[extension.targetId];
   const selected = document.selectedEntityIds.includes(extension.id);
   const style = extension.style ?? {};
@@ -1050,6 +1088,14 @@ export const createExtensionObject = (
         preselected,
       );
       applyEntityUserData(line, extension);
+      markObjectSelectable(line, false);
+      markSegmentExtensionSnapTarget(
+        line,
+        extension,
+        target,
+        "start",
+        result.startExtension,
+      );
       group.add(line);
     }
 
@@ -1062,6 +1108,14 @@ export const createExtensionObject = (
         preselected,
       );
       applyEntityUserData(line, extension);
+      markObjectSelectable(line, false);
+      markSegmentExtensionSnapTarget(
+        line,
+        extension,
+        target,
+        "end",
+        result.endExtension,
+      );
       group.add(line);
     }
 
@@ -1070,6 +1124,7 @@ export const createExtensionObject = (
     }
 
     applyEntityUserData(group, extension);
+    markObjectSelectable(group, false);
     return group;
   }
 
@@ -1099,6 +1154,9 @@ export const createExtensionObject = (
 
   mesh.renderOrder = EXTENSION_PLANE_RENDER_ORDER;
   applyEntityUserData(mesh, extension);
+  markObjectSelectable(mesh, false);
+  mesh.userData.snapTarget = extension.snapEnabled !== false;
+  mesh.userData.extensionTargetType = "plane";
   group.add(mesh);
 
   if (result.vertices.length > 2) {
@@ -1122,10 +1180,12 @@ export const createExtensionObject = (
     boundary.computeLineDistances();
     boundary.renderOrder = EXTENSION_LINE_RENDER_ORDER;
     applyEntityUserData(boundary, extension);
+    markObjectSelectable(boundary, false);
     group.add(boundary);
   }
 
   applyEntityUserData(group, extension);
+  markObjectSelectable(group, false);
   return group;
 };
 

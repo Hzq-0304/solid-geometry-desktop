@@ -71,6 +71,22 @@ export type PointConstruction =
       readonly sourcePlaneId: EntityId;
       readonly sourceAnchorVertexIndex: 0 | 1 | 2;
       readonly sourceVertexIndex: 0 | 1 | 2;
+    }
+  | {
+      readonly kind: "lineLineIntersection";
+      readonly segmentAId: EntityId;
+      readonly segmentBId: EntityId;
+    }
+  | {
+      readonly kind: "linePlaneIntersection";
+      readonly segmentId: EntityId;
+      readonly planeId: EntityId;
+    }
+  | {
+      readonly kind: "planePlaneIntersectionEndpoint";
+      readonly planeAId: EntityId;
+      readonly planeBId: EntityId;
+      readonly endpoint: "start" | "end";
     };
 
 export interface PointEntity extends BaseEntity {
@@ -93,6 +109,7 @@ export interface PerpendicularLineStyle extends EntityStyle {
   readonly extensionColor?: string;
   readonly extensionLineWidth?: number;
   readonly extensionDash?: boolean;
+  readonly showExtensionHelper?: boolean;
 }
 
 export interface PerpendicularLineEntity extends BaseEntity {
@@ -115,6 +132,7 @@ export interface LinePlanePerpendicularStyle extends EntityStyle {
   readonly extensionFillOpacity?: number;
   readonly helperLineColor?: string;
   readonly helperLineDash?: boolean;
+  readonly showExtensionHelper?: boolean;
 }
 
 export interface LinePlanePerpendicularEntity extends BaseEntity {
@@ -145,6 +163,7 @@ export interface ExtensionEntity extends BaseEntity {
   readonly targetId: EntityId;
   readonly targetType: "segment" | "plane";
   readonly mode: "toBoundaryCube";
+  readonly snapEnabled?: boolean;
   readonly nameSource?: "auto" | "manual";
   readonly style?: ExtensionEntityStyle;
 }

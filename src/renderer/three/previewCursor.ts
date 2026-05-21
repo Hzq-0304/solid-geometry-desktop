@@ -2,8 +2,14 @@ import * as THREE from "three";
 import type { Vec3 } from "../../core/geometry/Vec3";
 
 const PREVIEW_CURSOR_NAME = "preview-cursor";
-const PREVIEW_POINT_PIXEL_SIZE = 10;
-const PREVIEW_CURSOR_RENDER_ORDER = 52;
+const PREVIEW_POINT_PIXEL_SIZE = 12;
+const PREVIEW_CURSOR_RENDER_ORDER = 1000;
+
+interface PreviewCursorOptions {
+  readonly name?: string;
+  readonly size?: number;
+  readonly opacity?: number;
+}
 
 const isFiniteVec3 = (position: Vec3): boolean =>
   Number.isFinite(position.x) &&
@@ -40,7 +46,11 @@ const createPreviewPointTexture = (): THREE.CanvasTexture => {
   return texture;
 };
 
-const createPreviewCursor = (): THREE.Points => {
+const createPreviewCursor = (
+  name = PREVIEW_CURSOR_NAME,
+  size = PREVIEW_POINT_PIXEL_SIZE,
+  opacity = 1,
+): THREE.Points => {
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute(
     "position",
@@ -49,17 +59,19 @@ const createPreviewCursor = (): THREE.Points => {
 
   const material = new THREE.PointsMaterial({
     map: createPreviewPointTexture(),
-    size: PREVIEW_POINT_PIXEL_SIZE,
+    size,
     sizeAttenuation: false,
     transparent: true,
-    alphaTest: 0.2,
+    alphaTest: 0.01,
     depthTest: false,
     depthWrite: false,
     color: 0xffffff,
+    toneMapped: false,
   });
   const cursor = new THREE.Points(geometry, material);
 
-  cursor.name = PREVIEW_CURSOR_NAME;
+  material.opacity = opacity;
+  cursor.name = name;
   cursor.userData.ignorePicking = true;
   cursor.renderOrder = PREVIEW_CURSOR_RENDER_ORDER;
   cursor.frustumCulled = false;
@@ -68,7 +80,11 @@ const createPreviewCursor = (): THREE.Points => {
   return cursor;
 };
 
-const resetPreviewCursorStyle = (cursor: THREE.Points): void => {
+const resetPreviewCursorStyle = (
+  cursor: THREE.Points,
+  size = PREVIEW_POINT_PIXEL_SIZE,
+  opacity = 1,
+): void => {
   cursor.renderOrder = PREVIEW_CURSOR_RENDER_ORDER;
   cursor.frustumCulled = false;
 
@@ -78,25 +94,35 @@ const resetPreviewCursorStyle = (cursor: THREE.Points): void => {
 
   materials.forEach((material) => {
     if (material instanceof THREE.PointsMaterial) {
-      material.size = PREVIEW_POINT_PIXEL_SIZE;
-      material.opacity = 1;
+      material.size = size;
+      material.opacity = opacity;
       material.transparent = true;
-      material.alphaTest = 0.2;
+      material.alphaTest = 0.01;
       material.depthTest = false;
       material.depthWrite = false;
+      material.sizeAttenuation = false;
+      material.toneMapped = false;
       material.needsUpdate = true;
     }
   });
 };
 
-const getPreviewCursor = (scene: THREE.Scene): THREE.Points => {
-  const existing = scene.getObjectByName(PREVIEW_CURSOR_NAME);
+const getPreviewCursor = (
+  scene: THREE.Scene,
+  options: PreviewCursorOptions = {},
+): THREE.Points => {
+  const name = options.name ?? PREVIEW_CURSOR_NAME;
+  const existing = scene.getObjectByName(name);
 
   if (existing instanceof THREE.Points) {
     return existing;
   }
 
-  const cursor = createPreviewCursor();
+  const cursor = createPreviewCursor(
+    name,
+    options.size ?? PREVIEW_POINT_PIXEL_SIZE,
+    options.opacity ?? 1,
+  );
   scene.add(cursor);
 
   return cursor;
@@ -106,8 +132,9 @@ export const syncPreviewCursor = (
   scene: THREE.Scene,
   position: Vec3 | null,
   visible: boolean,
+  options: PreviewCursorOptions = {},
 ): void => {
-  const cursor = getPreviewCursor(scene);
+  const cursor = getPreviewCursor(scene, options);
   const shouldShow = visible && position !== null && isFiniteVec3(position);
   cursor.visible = shouldShow;
 
@@ -115,12 +142,19 @@ export const syncPreviewCursor = (
     return;
   }
 
-  resetPreviewCursorStyle(cursor);
+  resetPreviewCursorStyle(
+    cursor,
+    options.size ?? PREVIEW_POINT_PIXEL_SIZE,
+    options.opacity ?? 1,
+  );
+
+  cursor.position.set(position.x, position.y, position.z);
+  cursor.updateMatrixWorld(true);
 
   const positionAttribute = cursor.geometry.getAttribute(
     "position",
   ) as THREE.BufferAttribute;
-  positionAttribute.setXYZ(0, position.x, position.y, position.z);
+  positionAttribute.setXYZ(0, 0, 0, 0);
   positionAttribute.needsUpdate = true;
   cursor.geometry.computeBoundingSphere();
 };

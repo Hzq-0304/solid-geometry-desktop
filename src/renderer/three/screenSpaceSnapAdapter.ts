@@ -5,14 +5,21 @@ import type {
 } from "../../core/document/BoardDocument";
 import type {
   EntityId,
+  ExtensionEntity,
+  LinePlanePerpendicularEntity,
+  PerpendicularLineEntity,
   PlaneEntity,
   PointEntity,
   SegmentEntity,
 } from "../../core/document/EntityTypes";
 import {
   createVec3,
+  projectPointToLine,
   snapNumberToGrid,
 } from "../../core/geometry/geometryUtils";
+import {
+  calculateSegmentBoundaryExtension,
+} from "../../core/geometry/extensionUtils";
 import {
   getPlaneFromThreePoints,
   getPlanePoints,
@@ -20,6 +27,7 @@ import {
 import {
   getPlaneWorldPositions,
   getPointWorldPosition,
+  getSegmentWorldPositions,
 } from "../../core/geometry/pointPositionUtils";
 import type { Vec3 } from "../../core/geometry/Vec3";
 import type { SnapResult } from "../../core/snap/SnapTypes";
@@ -53,6 +61,14 @@ interface SegmentCandidate {
   readonly position: Vec3;
 }
 
+interface SegmentExtensionCandidate {
+  readonly sourceEntity: ExtensionEntity | PerpendicularLineEntity;
+  readonly sourceSegmentId: EntityId;
+  readonly extensionPart: "start" | "end";
+  readonly distance: number;
+  readonly position: Vec3;
+}
+
 interface AxisCandidate {
   readonly axisName: "X" | "Y" | "Z";
   readonly distance: number;
@@ -69,10 +85,11 @@ const SNAP_PRIORITIES = {
   origin: 1,
   axisGridPoint: 2,
   segment: 3,
-  axis: 4,
-  entityPlane: 5,
-  grid: 6,
-  drawingPlane: 7,
+  segmentExtension: 4,
+  axis: 5,
+  entityPlane: 6,
+  grid: 7,
+  drawingPlane: 8,
 } as const;
 
 const MAX_PLANE_SNAP_COORDINATE = 10000;
@@ -278,6 +295,72 @@ const getPlaneName = (plane: PlaneEntity, document: BoardDocument): string => {
     : plane.name?.trim() || plane.id;
 };
 
+const getPlaneSnapSource = (
+  document: BoardDocument,
+  entityId: EntityId,
+): {
+  readonly plane: PlaneEntity;
+  readonly snapEntityId: EntityId;
+  readonly snapEntityType:
+    | PlaneEntity["kind"]
+    | ExtensionEntity["kind"]
+    | LinePlanePerpendicularEntity["kind"];
+  readonly description: string;
+} | null => {
+  const entity = document.entities[entityId];
+
+  if (entity?.kind === "plane" && entity.visible) {
+    return {
+      plane: entity,
+      snapEntityId: entity.id,
+      snapEntityType: "plane",
+      description: `plane ${getPlaneName(entity, document)}`,
+    };
+  }
+
+  if (
+    entity?.kind === "extension" &&
+    entity.visible !== false &&
+    entity.snapEnabled !== false &&
+    entity.targetType === "plane"
+  ) {
+    const target = document.entities[entity.targetId];
+
+    if (target?.kind !== "plane" || !target.visible) {
+      return null;
+    }
+
+    return {
+      plane: target,
+      snapEntityId: entity.id,
+      snapEntityType: "extension",
+      description: `plane extension ${entity.name ?? entity.id}`,
+    };
+  }
+
+  if (
+    entity?.kind === "linePlanePerpendicular" &&
+    entity.visible &&
+    entity.style?.showExtensionHelper !== false &&
+    entity.constructionMode !== "userDirection"
+  ) {
+    const target = document.entities[entity.planeId];
+
+    if (target?.kind !== "plane" || !target.visible) {
+      return null;
+    }
+
+    return {
+      plane: target,
+      snapEntityId: entity.id,
+      snapEntityType: entity.kind,
+      description: `line-plane perpendicular extension ${entity.name ?? entity.id}`,
+    };
+  }
+
+  return null;
+};
+
 const isFiniteSnapPosition = (position: Vec3): boolean =>
   Number.isFinite(position.x) &&
   Number.isFinite(position.y) &&
@@ -416,6 +499,195 @@ const getNearestSegmentSnap = (
     description: `segment ${getSegmentName(nearestCandidate.segment)}`,
     screenDistance: nearestCandidate.distance,
     priority: SNAP_PRIORITIES.segment,
+  });
+};
+
+const getNearestSegmentExtensionSnap = (
+  context: ScreenSpaceSnapContext,
+): ScreenSpaceSnapCandidate | null => {
+  let nearestCandidate: SegmentExtensionCandidate | null = null;
+
+  for (const entity of Object.values(context.document.entities)) {
+    if (
+      entity.kind !== "extension" ||
+      entity.visible === false ||
+      entity.snapEnabled === false ||
+      entity.targetType !== "segment" ||
+      context.ignoredEntityIds?.includes(entity.id) ||
+      context.ignoredEntityIds?.includes(entity.targetId)
+    ) {
+      continue;
+    }
+
+    const sourceSegment = context.document.entities[entity.targetId];
+
+    if (sourceSegment?.kind !== "segment" || !sourceSegment.visible) {
+      continue;
+    }
+
+    const extensionResult = calculateSegmentBoundaryExtension(
+      sourceSegment,
+      context.document,
+    );
+
+    if (extensionResult.status !== "valid") {
+      continue;
+    }
+
+    const extensionSegments: readonly {
+      readonly part: "start" | "end";
+      readonly endpoints: readonly [Vec3, Vec3];
+    }[] = [
+      ...(extensionResult.startExtension
+        ? [
+            {
+              part: "start" as const,
+              endpoints: extensionResult.startExtension,
+            },
+          ]
+        : []),
+      ...(extensionResult.endExtension
+        ? [
+            {
+              part: "end" as const,
+              endpoints: extensionResult.endExtension,
+            },
+          ]
+        : []),
+    ];
+
+    for (const extensionSegment of extensionSegments) {
+      const [startPoint, endPoint] = extensionSegment.endpoints;
+      const startScreen = worldPositionToScreenPosition(
+        startPoint,
+        context.camera,
+        context.canvas,
+      );
+      const endScreen = worldPositionToScreenPosition(
+        endPoint,
+        context.camera,
+        context.canvas,
+      );
+
+      if (!startScreen || !endScreen) {
+        continue;
+      }
+
+      const projection = distanceScreenPointToWorldSegmentProjection(
+        context.pointerScreenPosition,
+        startScreen,
+        endScreen,
+        startPoint,
+        endPoint,
+      );
+
+      if (
+        projection.distance > getSegmentSnapPixelRadius(context.document) ||
+        (nearestCandidate && projection.distance >= nearestCandidate.distance)
+      ) {
+        continue;
+      }
+
+      nearestCandidate = {
+        sourceEntity: entity,
+        sourceSegmentId: sourceSegment.id,
+        extensionPart: extensionSegment.part,
+        distance: projection.distance,
+        position: projection.worldPosition,
+      };
+    }
+  }
+
+  for (const entity of Object.values(context.document.entities)) {
+    if (
+      entity.kind !== "perpendicularLine" ||
+      !entity.visible ||
+      entity.style?.showExtensionHelper === false ||
+      entity.constructionMode === "userDirection" ||
+      context.ignoredEntityIds?.includes(entity.id) ||
+      context.ignoredEntityIds?.includes(entity.segmentId)
+    ) {
+      continue;
+    }
+
+    const sourcePoint = getPointWorldPosition(context.document, entity.pointId);
+    const segmentPositions = getSegmentWorldPositions(
+      context.document,
+      entity.segmentId,
+    );
+
+    if (!sourcePoint || !segmentPositions) {
+      continue;
+    }
+
+    const projection = projectPointToLine(
+      sourcePoint,
+      segmentPositions[0],
+      segmentPositions[1],
+    );
+
+    if (!projection || (projection.t >= 0 && projection.t <= 1)) {
+      continue;
+    }
+
+    const footPoint = entity.footPointId
+      ? getPointWorldPosition(context.document, entity.footPointId) ??
+        projection.foot
+      : projection.foot;
+    const extensionStart =
+      projection.t < 0 ? segmentPositions[0] : segmentPositions[1];
+    const startScreen = worldPositionToScreenPosition(
+      extensionStart,
+      context.camera,
+      context.canvas,
+    );
+    const endScreen = worldPositionToScreenPosition(
+      footPoint,
+      context.camera,
+      context.canvas,
+    );
+
+    if (!startScreen || !endScreen) {
+      continue;
+    }
+
+    const extensionProjection = distanceScreenPointToWorldSegmentProjection(
+      context.pointerScreenPosition,
+      startScreen,
+      endScreen,
+      extensionStart,
+      footPoint,
+    );
+
+    if (
+      extensionProjection.distance > getSegmentSnapPixelRadius(context.document) ||
+      (nearestCandidate &&
+        extensionProjection.distance >= nearestCandidate.distance)
+    ) {
+      continue;
+    }
+
+    nearestCandidate = {
+      sourceEntity: entity,
+      sourceSegmentId: entity.segmentId,
+      extensionPart: projection.t < 0 ? "start" : "end",
+      distance: extensionProjection.distance,
+      position: extensionProjection.worldPosition,
+    };
+  }
+
+  if (!nearestCandidate) {
+    return null;
+  }
+
+  return createCandidate(context, {
+    position: nearestCandidate.position,
+    type: "segmentExtension",
+    targetEntityId: nearestCandidate.sourceEntity.id,
+    targetEntityType: nearestCandidate.sourceEntity.kind,
+    description: "segment extension",
+    screenDistance: nearestCandidate.distance,
+    priority: SNAP_PRIORITIES.segmentExtension,
   });
 };
 
@@ -680,19 +952,24 @@ const getEntityPlaneSnap = (
     return null;
   }
 
-  const entity = context.document.entities[context.planeSnapEntityId];
+  const snapSource = getPlaneSnapSource(
+    context.document,
+    context.planeSnapEntityId,
+  );
 
-  if (entity?.kind !== "plane" || !entity.visible) {
+  if (!snapSource) {
     return null;
   }
 
+  const { plane } = snapSource;
+
   if (
-    entity.pointIds.some((pointId) => context.ignoredEntityIds?.includes(pointId))
+    plane.pointIds.some((pointId) => context.ignoredEntityIds?.includes(pointId))
   ) {
     return null;
   }
 
-  const points = getPlaneWorldPositions(context.document, entity.pointIds);
+  const points = getPlaneWorldPositions(context.document, plane.pointIds);
 
   if (!points) {
     return null;
@@ -734,9 +1011,9 @@ const getEntityPlaneSnap = (
   return createCandidate(context, {
     position,
     type: "plane",
-    targetEntityId: entity.id,
-    targetEntityType: "plane",
-    description: `plane ${getPlaneName(entity, context.document)}`,
+    targetEntityId: snapSource.snapEntityId,
+    targetEntityType: snapSource.snapEntityType,
+    description: snapSource.description,
     screenDistance: 0,
     priority: SNAP_PRIORITIES.entityPlane,
   });
@@ -791,6 +1068,12 @@ export const getScreenSpaceSnapResult = (
 
     if (segmentSnap) {
       candidates.push(segmentSnap);
+    }
+
+    const segmentExtensionSnap = getNearestSegmentExtensionSnap(planeContext);
+
+    if (segmentExtensionSnap) {
+      candidates.push(segmentExtensionSnap);
     }
   }
 

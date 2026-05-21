@@ -9,6 +9,8 @@ export type SnapTargetType =
   | "axis"
   | "axisGridPoint"
   | "segment"
+  | "segmentExtension"
+  | "boundary"
   | "plane";
 
 export interface SnapResult {

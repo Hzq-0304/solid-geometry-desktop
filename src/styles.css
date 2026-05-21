@@ -260,6 +260,11 @@ input {
   width: 156px;
 }
 
+.parallel-tool-flyout {
+  top: 302px;
+  width: 156px;
+}
+
 .viewport-panel {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
@@ -812,6 +817,21 @@ input {
   background: #e8f0ff;
   cursor: pointer;
   font-size: 12px;
+}
+
+.extension-part-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.extension-part-row span {
+  min-width: 0;
+}
+
+.extension-part-row button {
+  min-width: 54px;
 }
 
 .danger-button {

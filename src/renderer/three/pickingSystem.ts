@@ -7,12 +7,14 @@ import type {
   EntityId,
   EntityKind,
   PointEntity,
+  SegmentEntity,
 } from "../../core/document/EntityTypes";
 import type { Vec3 } from "../../core/geometry/Vec3";
 import { getPointWorldPosition } from "../../core/geometry/pointPositionUtils";
 import type { PointerInfo } from "../../core/tool/ToolTypes";
 import {
   distancePointToScreenPoint,
+  distanceScreenPointToWorldSegmentProjection,
   getPointerScreenPosition,
   worldPositionToScreenPosition,
   type ScreenPosition,
@@ -71,6 +73,61 @@ const toVec3 = (value: THREE.Vector3): Vec3 => ({
   y: value.y,
   z: value.z,
 });
+
+const getBoundaryHalfSize = (document: BoardDocument): number => {
+  const halfSize = document.settings.coordinateHalfSize;
+
+  return Number.isFinite(halfSize) && halfSize > 0 ? halfSize : 10;
+};
+
+const intersectRayWithBoundaryBox = (
+  ray: THREE.Ray,
+  halfSize: number,
+): Vec3 | null => {
+  const axes = ["x", "y", "z"] as const;
+  let near = Number.NEGATIVE_INFINITY;
+  let far = Number.POSITIVE_INFINITY;
+
+  for (const axis of axes) {
+    const origin = ray.origin[axis];
+    const direction = ray.direction[axis];
+
+    if (Math.abs(direction) < 1e-9) {
+      if (origin < -halfSize || origin > halfSize) {
+        return null;
+      }
+
+      continue;
+    }
+
+    const t1 = (-halfSize - origin) / direction;
+    const t2 = (halfSize - origin) / direction;
+    near = Math.max(near, Math.min(t1, t2));
+    far = Math.min(far, Math.max(t1, t2));
+
+    if (near > far) {
+      return null;
+    }
+  }
+
+  const distance = near >= 0 ? near : far >= 0 ? far : null;
+
+  if (distance === null || !Number.isFinite(distance)) {
+    return null;
+  }
+
+  const intersection = new THREE.Vector3();
+  ray.at(distance, intersection);
+
+  return Number.isFinite(intersection.x) &&
+    Number.isFinite(intersection.y) &&
+    Number.isFinite(intersection.z)
+    ? toVec3(intersection)
+    : null;
+};
+
+const isSelectableObject = (object: THREE.Object3D): boolean =>
+  object.userData.selectable !== false;
 
 export const getDrawingPlaneIntersection = (
   raycaster: THREE.Raycaster,
@@ -150,6 +207,7 @@ const getEntityHit = (
 
     if (
       entityObject &&
+      isSelectableObject(entityObject) &&
       entityType &&
       entityType !== "point" &&
       PICKABLE_ENTITY_TYPES.has(entityType)
@@ -184,9 +242,53 @@ const getEntityHit = (
       };
 };
 
+const getPlaneSnapHit = (
+  intersections: THREE.Intersection[],
+): EntityId | null => {
+  for (const intersection of intersections) {
+    const entityObject = findEntityObject(intersection.object);
+    const entityType = entityObject?.userData.entityType as
+      | EntityKind
+      | undefined;
+
+    if (!entityObject || !entityType) {
+      continue;
+    }
+
+    if (entityType === "plane") {
+      return entityObject.userData.entityId;
+    }
+
+    if (
+      entityType === "extension" &&
+      entityObject.userData.snapTarget === true &&
+      entityObject.userData.extensionTargetType === "plane"
+    ) {
+      return entityObject.userData.entityId;
+    }
+
+    if (
+      entityType === "linePlanePerpendicular" &&
+      entityObject.userData.snapTarget === true &&
+      entityObject.userData.extensionTargetType === "plane"
+    ) {
+      return entityObject.userData.entityId;
+    }
+  }
+
+  return null;
+};
+
 export interface ScreenPointPickResult {
   readonly entityId: EntityId;
   readonly entityType: "point";
+  readonly screenDistance: number;
+  readonly worldPosition: Vec3;
+}
+
+export interface ScreenSegmentPickResult {
+  readonly entityId: EntityId;
+  readonly entityType: "segment";
   readonly screenDistance: number;
   readonly worldPosition: Vec3;
 }
@@ -256,6 +358,82 @@ export const findNearestPointByScreenDistance = (
     : null;
 };
 
+export const findNearestSegmentByScreenDistance = (
+  pointerScreenPosition: ScreenPosition,
+  document: BoardDocument,
+  camera: THREE.Camera,
+  canvas: HTMLCanvasElement,
+  options: {
+    readonly segmentPickPixelRadius?: number;
+    readonly ignoredEntityIds?: readonly EntityId[];
+  } = {},
+): ScreenSegmentPickResult | null => {
+  const segmentPickPixelRadius =
+    options.segmentPickPixelRadius ??
+    document.settings.segmentSnapPixelRadius ??
+    document.settings.snapPixelRadius;
+  let nearestSegment: SegmentEntity | null = null;
+  let nearestPosition: Vec3 | null = null;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+
+  for (const entity of Object.values(document.entities)) {
+    if (
+      entity.kind !== "segment" ||
+      !entity.visible ||
+      options.ignoredEntityIds?.includes(entity.id)
+    ) {
+      continue;
+    }
+
+    const [startPointId, endPointId] = entity.pointIds;
+    const startPoint = getPointWorldPosition(document, startPointId);
+    const endPoint = getPointWorldPosition(document, endPointId);
+
+    if (!startPoint || !endPoint) {
+      continue;
+    }
+
+    const startScreen = worldPositionToScreenPosition(
+      startPoint,
+      camera,
+      canvas,
+    );
+    const endScreen = worldPositionToScreenPosition(endPoint, camera, canvas);
+
+    if (!startScreen || !endScreen) {
+      continue;
+    }
+
+    const projection = distanceScreenPointToWorldSegmentProjection(
+      pointerScreenPosition,
+      startScreen,
+      endScreen,
+      startPoint,
+      endPoint,
+    );
+
+    if (
+      projection.distance > segmentPickPixelRadius ||
+      projection.distance >= nearestDistance
+    ) {
+      continue;
+    }
+
+    nearestSegment = entity;
+    nearestPosition = projection.worldPosition;
+    nearestDistance = projection.distance;
+  }
+
+  return nearestSegment && nearestPosition
+    ? {
+        entityId: nearestSegment.id,
+        entityType: "segment",
+        screenDistance: nearestDistance,
+        worldPosition: nearestPosition,
+      }
+    : null;
+};
+
 export const getPointerInfoFromEvent = (
   event: PointerEvent,
   element: HTMLCanvasElement,
@@ -280,16 +458,39 @@ export const getPointerInfoFromEvent = (
     element,
     { ignoredEntityIds },
   );
+  const segmentHit = findNearestSegmentByScreenDistance(
+    getPointerScreenPosition(event, element),
+    document,
+    camera,
+    element,
+    { ignoredEntityIds },
+  );
   const intersections = raycaster.intersectObjects(
     collectPickableObjects(scene),
     false,
   );
   const entityHit = getEntityHit(intersections);
+  const planeSnapEntityId = getPlaneSnapHit(intersections);
+  const drawingPlanePosition = getDrawingPlaneIntersection(
+    raycaster,
+    drawingPlane,
+  );
+  const boundaryPosition = drawingPlanePosition
+    ? null
+    : intersectRayWithBoundaryBox(raycaster.ray, getBoundaryHalfSize(document));
 
   return {
-    hitEntityId: pointHit?.entityId ?? entityHit.hitEntityId,
-    hitEntityType: pointHit?.entityType ?? entityHit.hitEntityType,
-    worldPosition: getDrawingPlaneIntersection(raycaster, drawingPlane),
+    hitEntityId:
+      pointHit?.entityId ?? segmentHit?.entityId ?? entityHit.hitEntityId,
+    hitEntityType:
+      pointHit?.entityType ?? segmentHit?.entityType ?? entityHit.hitEntityType,
+    planeSnapEntityId,
+    worldPosition: drawingPlanePosition ?? boundaryPosition,
+    rawPositionSource: drawingPlanePosition
+      ? "drawingPlane"
+      : boundaryPosition
+        ? "boundary"
+        : undefined,
     drawingPlane,
     snapResult: null,
     ctrlKey: event.ctrlKey,

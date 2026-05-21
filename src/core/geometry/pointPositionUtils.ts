@@ -2,6 +2,11 @@ import type { BoardDocument } from "../document/BoardDocument";
 import type { EntityId, PointEntity, SegmentEntity } from "../document/EntityTypes";
 import type { Vec3 } from "./Vec3";
 import {
+  getPlanePlaneIntersection,
+  getSegmentPlaneIntersection,
+  getSegmentSegmentIntersection,
+} from "./intersectionUtils";
+import {
   addVec3,
   dotVec3,
   normalizeVec3,
@@ -147,6 +152,72 @@ export const resolvePointPosition = (
     );
 
     return isFiniteVec3(vertex) ? vertex : null;
+  }
+
+  if (point.construction.kind === "lineLineIntersection") {
+    const firstSegment = getSegmentEntity(
+      document,
+      point.construction.segmentAId,
+    );
+    const secondSegment = getSegmentEntity(
+      document,
+      point.construction.segmentBId,
+    );
+
+    if (!firstSegment || !secondSegment) {
+      return null;
+    }
+
+    const intersection = getSegmentSegmentIntersection(
+      document,
+      firstSegment,
+      secondSegment,
+    );
+
+    return intersection.ok && isFiniteVec3(intersection.value)
+      ? intersection.value
+      : null;
+  }
+
+  if (point.construction.kind === "linePlaneIntersection") {
+    const segment = getSegmentEntity(document, point.construction.segmentId);
+    const plane = document.entities[point.construction.planeId];
+
+    if (!segment || plane?.kind !== "plane") {
+      return null;
+    }
+
+    const intersection = getSegmentPlaneIntersection(document, segment, plane);
+
+    return intersection.ok && isFiniteVec3(intersection.value)
+      ? intersection.value
+      : null;
+  }
+
+  if (point.construction.kind === "planePlaneIntersectionEndpoint") {
+    const firstPlane = document.entities[point.construction.planeAId];
+    const secondPlane = document.entities[point.construction.planeBId];
+
+    if (firstPlane?.kind !== "plane" || secondPlane?.kind !== "plane") {
+      return null;
+    }
+
+    const intersection = getPlanePlaneIntersection(
+      document,
+      firstPlane,
+      secondPlane,
+    );
+
+    if (!intersection.ok) {
+      return null;
+    }
+
+    const endpoint =
+      point.construction.endpoint === "start"
+        ? intersection.value[0]
+        : intersection.value[1];
+
+    return isFiniteVec3(endpoint) ? endpoint : null;
   }
 
   const sourcePoint = getPointEntity(

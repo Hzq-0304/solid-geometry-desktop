@@ -10,7 +10,7 @@ export interface CreateEmptyDocumentOptions {
 }
 
 const DEFAULT_FILE_VERSION = 1;
-const DEFAULT_APP_VERSION = "1.2.1";
+const DEFAULT_APP_VERSION = "1.2.2";
 
 export const createDefaultBoardSettings = (): BoardSettings => ({
   showGrid: true,

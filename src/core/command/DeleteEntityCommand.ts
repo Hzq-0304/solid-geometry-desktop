@@ -200,6 +200,27 @@ const referencesEntity = (entity: BoardEntity, targetEntityId: EntityId): boolea
         );
       }
 
+      if (entity.construction?.kind === "lineLineIntersection") {
+        return (
+          entity.construction.segmentAId === targetEntityId ||
+          entity.construction.segmentBId === targetEntityId
+        );
+      }
+
+      if (entity.construction?.kind === "linePlaneIntersection") {
+        return (
+          entity.construction.segmentId === targetEntityId ||
+          entity.construction.planeId === targetEntityId
+        );
+      }
+
+      if (entity.construction?.kind === "planePlaneIntersectionEndpoint") {
+        return (
+          entity.construction.planeAId === targetEntityId ||
+          entity.construction.planeBId === targetEntityId
+        );
+      }
+
       return false;
     case "segment":
       return entity.pointIds.includes(targetEntityId);

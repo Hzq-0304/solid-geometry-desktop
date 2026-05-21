@@ -12,6 +12,7 @@ export type ToolName =
   | "midpoint"
   | "extend"
   | "parallel"
+  | "intersection"
   | "plane"
   | "move"
   | "measureLength"
@@ -19,8 +20,10 @@ export type ToolName =
 
 export interface PointerInfo {
   readonly worldPosition: Vec3 | null;
+  readonly rawPositionSource?: "drawingPlane" | "boundary";
   readonly hitEntityId: EntityId | null;
   readonly hitEntityType: EntityKind | null;
+  readonly planeSnapEntityId?: EntityId | null;
   readonly drawingPlane: ActiveDrawingPlane;
   readonly snapResult: SnapResult | null;
   readonly ctrlKey: boolean;

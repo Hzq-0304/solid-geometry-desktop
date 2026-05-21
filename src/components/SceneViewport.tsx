@@ -17,6 +17,7 @@ import {
   getPlaneWorldPositions,
   getPointWorldPosition,
 } from "../core/geometry/pointPositionUtils";
+import type { SnapResult } from "../core/snap/SnapTypes";
 import {
   createAxesWithLabels,
   disposeAxesWithLabels,
@@ -62,6 +63,8 @@ interface SceneViewportProps {
   highlightedEntityIds: readonly EntityId[];
   preselectedEntityId: EntityId | null;
   previewPosition: Vec3 | null;
+  secondaryPreviewPosition: Vec3 | null;
+  tertiaryPreviewPosition: Vec3 | null;
   segmentPreviewStartPosition: Vec3 | null;
   planePreviewPoints: readonly [Vec3, Vec3, Vec3] | null;
   focusRequestId: number;
@@ -134,6 +137,20 @@ const areObjectLabelsEqual = (
     );
   });
 
+const isDefaultPlaneRawSnap = (snapResult: SnapResult | null): boolean =>
+  snapResult?.type === "plane" && !snapResult.targetEntityId;
+
+const createBoundaryFallbackSnapResult = (
+  pointerInfo: PointerInfo,
+): SnapResult | null =>
+  pointerInfo.rawPositionSource === "boundary" && pointerInfo.worldPosition
+    ? {
+        position: pointerInfo.worldPosition,
+        type: "boundary",
+        description: "boundary",
+      }
+    : null;
+
 function SceneViewport({
   document,
   currentTool,
@@ -141,6 +158,8 @@ function SceneViewport({
   highlightedEntityIds,
   preselectedEntityId,
   previewPosition,
+  secondaryPreviewPosition,
+  tertiaryPreviewPosition,
   segmentPreviewStartPosition,
   planePreviewPoints,
   focusRequestId,
@@ -276,6 +295,38 @@ function SceneViewport({
     resizeObserver.observe(host);
     resize();
 
+    const resolveScreenSpaceSnapResult = (
+      event: PointerEvent,
+      pointerInfo: PointerInfo,
+      ignoredSnapEntityIds: readonly EntityId[] = [],
+    ): SnapResult | null => {
+      if (!pointerInfo.worldPosition) {
+        return null;
+      }
+
+      const snapResult = getScreenSpaceSnapResult({
+        document: documentRef.current,
+        activeDrawingPlane: documentRef.current.settings.activeDrawingPlane,
+        rawWorldPosition: pointerInfo.worldPosition,
+        pointerScreenPosition: getPointerScreenPosition(
+          event,
+          renderer.domElement,
+        ),
+        camera,
+        canvas: renderer.domElement,
+        ignoredEntityIds: ignoredSnapEntityIds,
+        planeSnapEntityId:
+          pointerInfo.planeSnapEntityId ??
+          (pointerInfo.hitEntityType === "plane" ? pointerInfo.hitEntityId : null),
+      });
+
+      const boundarySnapResult = createBoundaryFallbackSnapResult(pointerInfo);
+
+      return boundarySnapResult && isDefaultPlaneRawSnap(snapResult)
+        ? boundarySnapResult
+        : snapResult;
+    };
+
     const createPointerInfo = (
       event: PointerEvent,
       ignoredSnapEntityIds: readonly EntityId[] = [],
@@ -292,25 +343,11 @@ function SceneViewport({
 
       return {
         ...pointerInfo,
-        snapResult: pointerInfo.worldPosition
-          ? getScreenSpaceSnapResult({
-              document: documentRef.current,
-              activeDrawingPlane:
-                documentRef.current.settings.activeDrawingPlane,
-              rawWorldPosition: pointerInfo.worldPosition,
-              pointerScreenPosition: getPointerScreenPosition(
-                event,
-                renderer.domElement,
-              ),
-              camera,
-              canvas: renderer.domElement,
-              ignoredEntityIds: ignoredSnapEntityIds,
-              planeSnapEntityId:
-                pointerInfo.hitEntityType === "plane"
-                  ? pointerInfo.hitEntityId
-                  : null,
-            })
-          : null,
+        snapResult: resolveScreenSpaceSnapResult(
+          event,
+          pointerInfo,
+          ignoredSnapEntityIds,
+        ),
       };
     };
 
@@ -423,24 +460,10 @@ function SceneViewport({
 
       onCanvasPointerMoveRef.current({
         ...pointerInfo,
-        snapResult: pointerInfo.worldPosition
-          ? getScreenSpaceSnapResult({
-              document: documentRef.current,
-              activeDrawingPlane:
-                documentRef.current.settings.activeDrawingPlane,
-              rawWorldPosition: pointerInfo.worldPosition,
-              pointerScreenPosition: getPointerScreenPosition(
-                latestPointerMoveEvent,
-                renderer.domElement,
-              ),
-              camera,
-              canvas: renderer.domElement,
-              planeSnapEntityId:
-                pointerInfo.hitEntityType === "plane"
-                  ? pointerInfo.hitEntityId
-                  : null,
-            })
-          : null,
+        snapResult: resolveScreenSpaceSnapResult(
+          latestPointerMoveEvent,
+          pointerInfo,
+        ),
       });
       latestPointerMoveEvent = null;
     };
@@ -818,7 +841,24 @@ function SceneViewport({
         currentTool === "parallel" ||
         currentTool === "plane",
     );
-  }, [currentTool, previewPosition]);
+    syncPreviewCursor(
+      sceneRef.current,
+      secondaryPreviewPosition,
+      currentTool === "parallel" && secondaryPreviewPosition !== null,
+      { name: "secondary-preview-cursor", size: 8, opacity: 0.58 },
+    );
+    syncPreviewCursor(
+      sceneRef.current,
+      tertiaryPreviewPosition,
+      currentTool === "parallel" && tertiaryPreviewPosition !== null,
+      { name: "tertiary-preview-cursor", size: 8, opacity: 0.58 },
+    );
+  }, [
+    currentTool,
+    previewPosition,
+    secondaryPreviewPosition,
+    tertiaryPreviewPosition,
+  ]);
 
   useEffect(() => {
     if (!sceneRef.current) {
@@ -859,6 +899,7 @@ function SceneViewport({
           currentTool === "perpendicular" ||
           currentTool === "midpoint" ||
           currentTool === "parallel" ||
+          currentTool === "intersection" ||
           currentTool === "plane"
             ? "point-tool-active"
             : "",
