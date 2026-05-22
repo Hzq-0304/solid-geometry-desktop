@@ -970,6 +970,18 @@ const clamp = (value: number, min: number, max: number): number =>
 interface LineDirectionPreview {
   readonly guidePosition: Vec3;
   readonly directionPoint: Vec3;
+  readonly source: "rayDirectionPlane" | "snapProjected";
+  readonly snapResult: SnapResult;
+}
+
+interface LineDirectionSnapCandidate {
+  readonly position: Vec3;
+  readonly type: SnapResult["type"];
+  readonly description: string;
+  readonly priority: number;
+  readonly targetEntityId?: EntityId;
+  readonly targetEntityType?: BoardEntity["kind"];
+  readonly worldDistance: number;
 }
 
 interface PlaneDirectionPreview {
@@ -978,11 +990,23 @@ interface PlaneDirectionPreview {
   readonly directionPoint: Vec3;
 }
 
+type PerpendicularDirectionPreview =
+  | {
+      readonly kind: "line";
+      readonly preview: LineDirectionPreview;
+    }
+  | {
+      readonly kind: "plane";
+      readonly preview: PlaneDirectionPreview;
+    };
+
 const getLinePerpendicularDirectionPreview = (
   basePoint: Vec3,
   segmentStart: Vec3,
   segmentEnd: Vec3,
   guidePosition: Vec3,
+  source: LineDirectionPreview["source"] = "snapProjected",
+  snapResult?: SnapResult,
 ): LineDirectionPreview | null => {
   const segmentDirection = normalizeVec3(
     subtractVec3(segmentEnd, segmentStart),
@@ -993,6 +1017,8 @@ const getLinePerpendicularDirectionPreview = (
   }
 
   const guideVector = subtractVec3(guidePosition, basePoint);
+  // Project the resolved 3D pointer position onto the plane through P
+  // perpendicular to AB. This keeps point-line direction picking fully 3D.
   const perpendicularVector = subtractVec3(
     guideVector,
     scaleVec3(segmentDirection, dotVec3(guideVector, segmentDirection)),
@@ -1002,10 +1028,293 @@ const getLinePerpendicularDirectionPreview = (
     return null;
   }
 
+  const directionPoint = addVec3(basePoint, perpendicularVector);
+
   return {
-    guidePosition,
-    directionPoint: addVec3(basePoint, perpendicularVector),
+    guidePosition: directionPoint,
+    directionPoint,
+    source,
+    snapResult: snapResult ?? {
+      position: directionPoint,
+      type: "none",
+      description: "perpendicular direction",
+    },
   };
+};
+
+const getWorldUnitsPerScreenPixel = (
+  pointerInfo: PointerInfo,
+  position: Vec3,
+): number | null => {
+  const viewInfo = pointerInfo.pointerViewInfo;
+
+  if (!viewInfo || viewInfo.viewportHeight <= 0) {
+    return null;
+  }
+
+  if (viewInfo.perspectiveFovRadians) {
+    const cameraDistance = distanceBetweenVec3(
+      viewInfo.cameraPosition,
+      position,
+    );
+
+    return (
+      (2 *
+        cameraDistance *
+        Math.tan(viewInfo.perspectiveFovRadians / 2)) /
+      viewInfo.viewportHeight
+    );
+  }
+
+  return viewInfo.orthographicWorldHeight
+    ? viewInfo.orthographicWorldHeight / viewInfo.viewportHeight
+    : null;
+};
+
+const getDirectionSnapPixelRadius = (document: BoardDocument): number =>
+  Math.max(
+    document.settings.pointSnapPixelRadius,
+    document.settings.segmentSnapPixelRadius,
+    document.settings.axisSnapPixelRadius,
+    document.settings.axisGridPointSnapPixelRadius,
+    document.settings.gridSnapPixelRadius,
+    document.settings.snapPixelRadius,
+  );
+
+const intersectRayWithPlane = (
+  rayOrigin: Vec3,
+  rayDirection: Vec3,
+  planePoint: Vec3,
+  planeNormal: Vec3,
+): Vec3 | null => {
+  const denominator = dotVec3(rayDirection, planeNormal);
+
+  if (Math.abs(denominator) < CONSTRUCTION_EPSILON) {
+    return null;
+  }
+
+  const t =
+    dotVec3(subtractVec3(planePoint, rayOrigin), planeNormal) / denominator;
+
+  if (t <= CONSTRUCTION_EPSILON || !Number.isFinite(t)) {
+    return null;
+  }
+
+  const intersection = addVec3(rayOrigin, scaleVec3(rayDirection, t));
+
+  return Number.isFinite(intersection.x) &&
+    Number.isFinite(intersection.y) &&
+    Number.isFinite(intersection.z)
+    ? intersection
+    : null;
+};
+
+const getExplicitDirectionSnapPosition = (
+  snapResult: SnapResult | null,
+): Vec3 | null => {
+  if (!snapResult || snapResult.type === "boundary") {
+    return null;
+  }
+
+  if (snapResult.type === "plane" && !snapResult.targetEntityId) {
+    return null;
+  }
+
+  return snapResult.position;
+};
+
+const isGridLikeDirectionSnap = (snapResult: SnapResult): boolean =>
+  snapResult.type === "grid" ||
+  snapResult.type === "axisGridPoint" ||
+  snapResult.type === "origin";
+
+const projectPointToPlane = (
+  point: Vec3,
+  planePoint: Vec3,
+  planeNormal: Vec3,
+): Vec3 =>
+  subtractVec3(
+    point,
+    scaleVec3(
+      planeNormal,
+      dotVec3(subtractVec3(point, planePoint), planeNormal),
+    ),
+  );
+
+const getLineDirectionSnapPriority = (
+  type: SnapResult["type"],
+): number => {
+  switch (type) {
+    case "point":
+    case "origin":
+      return 0;
+    case "segment":
+      return 1;
+    case "segmentExtension":
+      return 2;
+    case "axis":
+      return 3;
+    case "axisGridPoint":
+    case "grid":
+      return 4;
+    case "plane":
+      return 5;
+    default:
+      return 6;
+  }
+};
+
+const createLineDirectionSnapCandidate = (
+  candidatePosition: Vec3,
+  q0: Vec3,
+  maxWorldDistance: number,
+  options: Omit<LineDirectionSnapCandidate, "position" | "worldDistance">,
+): LineDirectionSnapCandidate | null => {
+  const worldDistance = distanceBetweenVec3(candidatePosition, q0);
+
+  if (
+    worldDistance > maxWorldDistance ||
+    !Number.isFinite(candidatePosition.x) ||
+    !Number.isFinite(candidatePosition.y) ||
+    !Number.isFinite(candidatePosition.z)
+  ) {
+    return null;
+  }
+
+  return {
+    ...options,
+    position: candidatePosition,
+    worldDistance,
+  };
+};
+
+const getAxisDirectionSnapCandidates = (
+  q0: Vec3,
+  basePoint: Vec3,
+  directionPlaneNormal: Vec3,
+  maxWorldDistance: number,
+): LineDirectionSnapCandidate[] => {
+  const axes = [
+    {
+      description: "perpendicular direction / X axis",
+      direction: createVec3(1, 0, 0),
+    },
+    {
+      description: "perpendicular direction / Y axis",
+      direction: createVec3(0, 1, 0),
+    },
+    {
+      description: "perpendicular direction / Z axis",
+      direction: createVec3(0, 0, 1),
+    },
+  ];
+
+  return axes.flatMap((axis) => {
+    const denominator = dotVec3(axis.direction, directionPlaneNormal);
+    const origin = createVec3(0, 0, 0);
+    let axisSnapPoint: Vec3 | null = null;
+
+    if (Math.abs(denominator) >= CONSTRUCTION_EPSILON) {
+      const t =
+        dotVec3(
+          subtractVec3(basePoint, origin),
+          directionPlaneNormal,
+        ) / denominator;
+      axisSnapPoint = scaleVec3(axis.direction, t);
+    } else {
+      const planeDistance = Math.abs(
+        dotVec3(subtractVec3(origin, basePoint), directionPlaneNormal),
+      );
+
+      if (planeDistance <= CONSTRUCTION_EPSILON) {
+        axisSnapPoint =
+          projectPointToLine(q0, origin, axis.direction)?.foot ?? null;
+      }
+    }
+
+    const candidate = axisSnapPoint
+      ? createLineDirectionSnapCandidate(axisSnapPoint, q0, maxWorldDistance, {
+          type: "axis",
+          description: axis.description,
+          priority: getLineDirectionSnapPriority("axis"),
+        })
+      : null;
+
+    return candidate ? [candidate] : [];
+  });
+};
+
+const getGridDirectionSnapCandidates = (
+  document: BoardDocument,
+  q0: Vec3,
+  basePoint: Vec3,
+  directionPlaneNormal: Vec3,
+  maxWorldDistance: number,
+): LineDirectionSnapCandidate[] => {
+  const gridSize = Math.max(document.settings.gridSize, CONSTRUCTION_EPSILON);
+  const center = {
+    x: Math.round(q0.x / gridSize),
+    y: Math.round(q0.y / gridSize),
+    z: Math.round(q0.z / gridSize),
+  };
+  const candidates: LineDirectionSnapCandidate[] = [];
+
+  for (let dx = -1; dx <= 1; dx += 1) {
+    for (let dy = -1; dy <= 1; dy += 1) {
+      for (let dz = -1; dz <= 1; dz += 1) {
+        const gridPoint = createVec3(
+          (center.x + dx) * gridSize,
+          (center.y + dy) * gridSize,
+          (center.z + dz) * gridSize,
+        );
+        const planeDistance = Math.abs(
+          dotVec3(
+            subtractVec3(gridPoint, basePoint),
+            directionPlaneNormal,
+          ),
+        );
+
+        if (planeDistance > maxWorldDistance) {
+          continue;
+        }
+
+        const isOrigin =
+          distanceBetweenVec3(gridPoint, createVec3(0, 0, 0)) <
+          CONSTRUCTION_EPSILON;
+        const isAxisGridPoint =
+          !isOrigin &&
+          ([gridPoint.x, gridPoint.y, gridPoint.z].filter(
+            (value) => Math.abs(value) < CONSTRUCTION_EPSILON,
+          ).length >= 2);
+        const type: SnapResult["type"] = isOrigin
+          ? "origin"
+          : isAxisGridPoint
+            ? "axisGridPoint"
+            : "grid";
+        const candidate = createLineDirectionSnapCandidate(
+          gridPoint,
+          q0,
+          maxWorldDistance,
+          {
+            type,
+            description:
+              type === "origin"
+                ? "perpendicular direction / origin"
+                : type === "axisGridPoint"
+                  ? "perpendicular direction / axis grid point"
+                  : "perpendicular direction / grid point",
+            priority: getLineDirectionSnapPriority(type),
+          },
+        );
+
+        if (candidate) {
+          candidates.push(candidate);
+        }
+      }
+    }
+  }
+
+  return candidates;
 };
 
 const getPlaneNormalDirectionPreview = (
@@ -1857,6 +2166,8 @@ function App() {
   const preselectionRef = useRef<Preselection | null>(null);
   const latestPointToolResolvedResultRef =
     useRef<ResolvedPointerResult | null>(null);
+  const perpendicularDirectionPreviewRef =
+    useRef<PerpendicularDirectionPreview | null>(null);
   const nextToastIdRef = useRef(1);
   const pointToolRef = useRef(new PointTool());
   const planeToolRef = useRef(new PlaneTool());
@@ -2875,12 +3186,8 @@ function App() {
 
   const getLineDirectionPreviewForState = (
     state: Extract<PerpendicularDirectionPickState, { kind: "line" }>,
-    guidePosition: Vec3 | null,
+    pointerInfo: PointerInfo,
   ): LineDirectionPreview | null => {
-    if (!guidePosition) {
-      return null;
-    }
-
     const currentDocument = commandManager.getDocument();
     const segment = currentDocument.entities[state.segmentId];
 
@@ -2899,14 +3206,274 @@ function App() {
     const basePoint =
       getPointWorldPosition(currentDocument, state.pointId) ?? state.basePoint;
 
-    return startPosition && endPosition
+    if (!startPosition || !endPosition) {
+      return null;
+    }
+
+    const snapGuidePosition = getExplicitDirectionSnapPosition(
+      pointerInfo.snapResult,
+    );
+
+    const segmentDirection = normalizeVec3(
+      subtractVec3(endPosition, startPosition),
+    );
+
+    if (!segmentDirection || !pointerInfo.pointerRay) {
+      return null;
+    }
+
+    const directionPlanePoint = intersectRayWithPlane(
+      pointerInfo.pointerRay.origin,
+      pointerInfo.pointerRay.direction,
+      basePoint,
+      segmentDirection,
+    );
+
+    const rawPreview = directionPlanePoint
       ? getLinePerpendicularDirectionPreview(
           basePoint,
           startPosition,
           endPosition,
-          guidePosition,
+          directionPlanePoint,
+          "rayDirectionPlane",
         )
       : null;
+
+    if (rawPreview && currentDocument.settings.snapEnabled) {
+      const worldUnitsPerPixel = getWorldUnitsPerScreenPixel(
+        pointerInfo,
+        rawPreview.directionPoint,
+      );
+      const maxWorldDistance =
+        (worldUnitsPerPixel ?? 0) *
+        getDirectionSnapPixelRadius(currentDocument);
+
+      if (worldUnitsPerPixel !== null && maxWorldDistance > 0) {
+        const candidates: LineDirectionSnapCandidate[] = [];
+        const addCandidate = (
+          candidate: LineDirectionSnapCandidate | null,
+        ): void => {
+          if (candidate) {
+            candidates.push(candidate);
+          }
+        };
+
+        if (snapGuidePosition && pointerInfo.snapResult) {
+          const constrainedSnapPosition = projectPointToPlane(
+            snapGuidePosition,
+            basePoint,
+            segmentDirection,
+          );
+          const snapPlaneDistance = Math.abs(
+            dotVec3(
+              subtractVec3(snapGuidePosition, basePoint),
+              segmentDirection,
+            ),
+          );
+          const isGridLikeSnap = isGridLikeDirectionSnap(pointerInfo.snapResult);
+
+          if (!isGridLikeSnap || snapPlaneDistance <= maxWorldDistance) {
+            addCandidate(
+              createLineDirectionSnapCandidate(
+                constrainedSnapPosition,
+                rawPreview.directionPoint,
+                maxWorldDistance,
+                {
+                  type: pointerInfo.snapResult.type,
+                  description: `perpendicular direction / ${
+                    pointerInfo.snapResult.description ??
+                    pointerInfo.snapResult.type
+                  }`,
+                  priority: getLineDirectionSnapPriority(
+                    pointerInfo.snapResult.type,
+                  ),
+                  targetEntityId: pointerInfo.snapResult.targetEntityId,
+                  targetEntityType: pointerInfo.snapResult.targetEntityType,
+                },
+              ),
+            );
+          }
+        }
+
+        if (currentDocument.settings.snapToPoints) {
+          Object.values(currentDocument.entities).forEach((entity) => {
+            if (entity.kind !== "point" || entity.id === state.pointId) {
+              return;
+            }
+
+            const pointPosition = getPointWorldPosition(
+              currentDocument,
+              entity.id,
+            );
+
+            if (!pointPosition) {
+              return;
+            }
+
+            addCandidate(
+              createLineDirectionSnapCandidate(
+                projectPointToPlane(pointPosition, basePoint, segmentDirection),
+                rawPreview.directionPoint,
+                maxWorldDistance,
+                {
+                  type: "point",
+                  description: `perpendicular direction / ${
+                    entity.name || "point"
+                  }`,
+                  priority: getLineDirectionSnapPriority("point"),
+                  targetEntityId: entity.id,
+                  targetEntityType: "point",
+                },
+              ),
+            );
+          });
+        }
+
+        if (currentDocument.settings.snapToSegments) {
+          Object.values(currentDocument.entities).forEach((entity) => {
+            if (entity.kind !== "segment" || entity.id === state.segmentId) {
+              return;
+            }
+
+            const candidateStart = getPointWorldPosition(
+              currentDocument,
+              entity.pointIds[0],
+            );
+            const candidateEnd = getPointWorldPosition(
+              currentDocument,
+              entity.pointIds[1],
+            );
+
+            if (!candidateStart || !candidateEnd) {
+              return;
+            }
+
+            const candidateDirection = subtractVec3(
+              candidateEnd,
+              candidateStart,
+            );
+
+            if (
+              distanceBetweenVec3(candidateDirection, createVec3(0, 0, 0)) <
+              CONSTRUCTION_EPSILON
+            ) {
+              return;
+            }
+
+            const startPlaneDistance = dotVec3(
+              subtractVec3(candidateStart, basePoint),
+              segmentDirection,
+            );
+            const denominator = dotVec3(candidateDirection, segmentDirection);
+            let constrainedSegmentPoint: Vec3 | null = null;
+
+            if (Math.abs(denominator) >= CONSTRUCTION_EPSILON) {
+              const t = -startPlaneDistance / denominator;
+
+              if (t >= 0 && t <= 1) {
+                constrainedSegmentPoint = addVec3(
+                  candidateStart,
+                  scaleVec3(candidateDirection, t),
+                );
+              }
+            }
+
+            if (!constrainedSegmentPoint) {
+              const projection = projectPointToLine(
+                rawPreview.directionPoint,
+                candidateStart,
+                candidateEnd,
+              );
+
+              if (projection) {
+                const clampedT = clamp(projection.t, 0, 1);
+                const closestPoint = addVec3(
+                  candidateStart,
+                  scaleVec3(candidateDirection, clampedT),
+                );
+                constrainedSegmentPoint = projectPointToPlane(
+                  closestPoint,
+                  basePoint,
+                  segmentDirection,
+                );
+              }
+            }
+
+            addCandidate(
+              constrainedSegmentPoint
+                ? createLineDirectionSnapCandidate(
+                    constrainedSegmentPoint,
+                    rawPreview.directionPoint,
+                    maxWorldDistance,
+                    {
+                      type: "segment",
+                      description: `perpendicular direction / ${
+                        entity.name || "segment"
+                      }`,
+                      priority: getLineDirectionSnapPriority("segment"),
+                      targetEntityId: entity.id,
+                      targetEntityType: "segment",
+                    },
+                  )
+                : null,
+            );
+          });
+        }
+
+        if (currentDocument.settings.snapToAxes) {
+          candidates.push(
+            ...getAxisDirectionSnapCandidates(
+              rawPreview.directionPoint,
+              basePoint,
+              segmentDirection,
+              maxWorldDistance,
+            ),
+          );
+        }
+
+        if (currentDocument.settings.snapToGrid) {
+          candidates.push(
+            ...getGridDirectionSnapCandidates(
+              currentDocument,
+              rawPreview.directionPoint,
+              basePoint,
+              segmentDirection,
+              maxWorldDistance,
+            ),
+          );
+        }
+
+        const [bestCandidate] = candidates.sort(
+          (a, b) =>
+            a.priority - b.priority || a.worldDistance - b.worldDistance,
+        );
+
+        if (bestCandidate) {
+          const snapPreview = getLinePerpendicularDirectionPreview(
+            basePoint,
+            startPosition,
+            endPosition,
+            bestCandidate.position,
+            "snapProjected",
+            {
+              position: bestCandidate.position,
+              type: bestCandidate.type,
+              targetEntityId: bestCandidate.targetEntityId,
+              targetEntityType: bestCandidate.targetEntityType,
+              description: bestCandidate.description,
+              worldDistance: bestCandidate.worldDistance,
+              priority: bestCandidate.priority,
+            },
+          );
+
+          if (snapPreview) {
+            return snapPreview;
+          }
+        }
+      }
+    }
+
+    return rawPreview;
   };
 
   const getPlaneDirectionPreviewForState = (
@@ -2949,6 +3516,7 @@ function App() {
   };
 
   const clearPerpendicularDirectionPick = () => {
+    perpendicularDirectionPreviewRef.current = null;
     setPerpendicularDirectionPick(null);
     setPerpendicularDirectionPreviewEnd(null);
   };
@@ -3114,7 +3682,8 @@ function App() {
   };
 
   const confirmPerpendicularDirection = (
-    guidePosition: Vec3 | null,
+    pointerInfo: PointerInfo,
+    resolvedPointer: ResolvedPointerResult,
   ): boolean => {
     const directionPick = perpendicularDirectionPick;
 
@@ -3123,10 +3692,11 @@ function App() {
     }
 
     if (directionPick.kind === "line") {
-      const preview = getLineDirectionPreviewForState(
-        directionPick,
-        guidePosition,
-      );
+      const preview =
+        getLineDirectionPreviewForState(directionPick, pointerInfo) ??
+        (perpendicularDirectionPreviewRef.current?.kind === "line"
+            ? perpendicularDirectionPreviewRef.current.preview
+            : null);
 
       if (!preview) {
         showToast("\u8bf7\u79fb\u52a8\u9f20\u6807\u9009\u62e9\u5782\u7ebf\u65b9\u5411");
@@ -3163,10 +3733,15 @@ function App() {
       return true;
     }
 
-    const preview = getPlaneDirectionPreviewForState(
-      directionPick,
-      guidePosition,
-    );
+    const preview =
+      resolvedPointer.finalPosition !== null
+        ? getPlaneDirectionPreviewForState(
+            directionPick,
+            resolvedPointer.finalPosition,
+          )
+        : perpendicularDirectionPreviewRef.current?.kind === "plane"
+          ? perpendicularDirectionPreviewRef.current.preview
+          : null;
 
     if (!preview) {
       showToast("\u8bf7\u9009\u62e9\u6cd5\u7ebf\u65b9\u5411");
@@ -4318,6 +4893,7 @@ function App() {
     setPerpendicularPointId(null);
     setPerpendicularSegmentId(null);
     setPerpendicularPlaneId(null);
+    clearPerpendicularDirectionPick();
     setPerpendicularStatusMessage(null);
     changeTool("perpendicular");
   };
@@ -5235,28 +5811,54 @@ function App() {
       latestPointToolResolvedResultRef.current = null;
     }
 
-    if (currentTool === "perpendicular" && perpendicularDirectionPick) {
-      const directionPreview =
-        perpendicularDirectionPick.kind === "line"
+    const directionPreview =
+      currentTool === "perpendicular" && perpendicularDirectionPick
+        ? perpendicularDirectionPick.kind === "line"
           ? getLineDirectionPreviewForState(
               perpendicularDirectionPick,
-              resolvedPointer.finalPosition,
-            )
+              nextPointerInfo,
+            ) ??
+            (perpendicularDirectionPreviewRef.current?.kind === "line"
+              ? perpendicularDirectionPreviewRef.current.preview
+              : null)
           : getPlaneDirectionPreviewForState(
               perpendicularDirectionPick,
               resolvedPointer.finalPosition,
-            );
+            )
+        : null;
 
+    if (currentTool === "perpendicular" && perpendicularDirectionPick) {
+      perpendicularDirectionPreviewRef.current = directionPreview
+        ? {
+            kind: perpendicularDirectionPick.kind,
+            preview: directionPreview,
+          } as PerpendicularDirectionPreview
+        : null;
       setPerpendicularDirectionPreviewEnd(
         directionPreview?.directionPoint ?? null,
       );
     } else if (perpendicularDirectionPreviewEnd) {
+      perpendicularDirectionPreviewRef.current = null;
       setPerpendicularDirectionPreviewEnd(null);
+    } else {
+      perpendicularDirectionPreviewRef.current = null;
     }
 
-    setLastPointerInfo(nextPointerInfo);
-    setLastSnapResult(snapResult);
-    setCurrentPreselection(getPointerPreselection(nextPointerInfo));
+    const displayPointerInfo =
+      currentTool === "perpendicular" &&
+      perpendicularDirectionPick?.kind === "line"
+        ? {
+            ...nextPointerInfo,
+            snapResult:
+              directionPreview && "source" in directionPreview
+                ? directionPreview.snapResult
+                : null,
+          }
+        : nextPointerInfo;
+
+    setLastPointerInfo(displayPointerInfo);
+    setLastSnapResult(displayPointerInfo.snapResult);
+    setCurrentPreselection(getPointerPreselection(displayPointerInfo));
   };
 
   const handleCanvasPointerDown = (pointerInfo: PointerInfo) => {
@@ -5407,7 +6009,7 @@ function App() {
 
     if (currentTool === "perpendicular") {
       if (perpendicularDirectionPick) {
-        confirmPerpendicularDirection(resolvedPointer.finalPosition);
+        confirmPerpendicularDirection(nextPointerInfo, resolvedPointer);
         return;
       }
 

@@ -18,9 +18,23 @@ export type ToolName =
   | "measureLength"
   | "measureAngle";
 
+export interface PointerRay {
+  readonly origin: Vec3;
+  readonly direction: Vec3;
+}
+
+export interface PointerViewInfo {
+  readonly cameraPosition: Vec3;
+  readonly viewportHeight: number;
+  readonly perspectiveFovRadians?: number;
+  readonly orthographicWorldHeight?: number;
+}
+
 export interface PointerInfo {
   readonly worldPosition: Vec3 | null;
   readonly rawPositionSource?: "drawingPlane" | "boundary";
+  readonly pointerRay?: PointerRay;
+  readonly pointerViewInfo?: PointerViewInfo;
   readonly hitEntityId: EntityId | null;
   readonly hitEntityType: EntityKind | null;
   readonly planeSnapEntityId?: EntityId | null;

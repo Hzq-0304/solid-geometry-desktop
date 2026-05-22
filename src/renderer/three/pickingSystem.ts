@@ -74,6 +74,22 @@ const toVec3 = (value: THREE.Vector3): Vec3 => ({
   z: value.z,
 });
 
+const getPointerViewInfo = (
+  camera: THREE.Camera,
+  element: HTMLCanvasElement,
+): PointerInfo["pointerViewInfo"] => ({
+  cameraPosition: toVec3(camera.position),
+  viewportHeight: Math.max(element.clientHeight, 1),
+  perspectiveFovRadians:
+    camera instanceof THREE.PerspectiveCamera
+      ? THREE.MathUtils.degToRad(camera.fov)
+      : undefined,
+  orthographicWorldHeight:
+    camera instanceof THREE.OrthographicCamera
+      ? (camera.top - camera.bottom) / Math.max(camera.zoom, 1e-6)
+      : undefined,
+});
+
 const getBoundaryHalfSize = (document: BoardDocument): number => {
   const halfSize = document.settings.coordinateHalfSize;
 
@@ -491,6 +507,11 @@ export const getPointerInfoFromEvent = (
       : boundaryPosition
         ? "boundary"
         : undefined,
+    pointerRay: {
+      origin: toVec3(raycaster.ray.origin),
+      direction: toVec3(raycaster.ray.direction),
+    },
+    pointerViewInfo: getPointerViewInfo(camera, element),
     drawingPlane,
     snapResult: null,
     ctrlKey: event.ctrlKey,
