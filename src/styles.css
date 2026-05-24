@@ -1030,42 +1030,107 @@ input {
 
 .plane-canvas-viewport {
   position: relative;
-  display: block;
+  display: grid;
+  grid-template-columns: 168px minmax(0, 1fr);
   width: 100%;
   height: 100%;
+  min-width: 0;
+  min-height: 0;
   overflow: hidden;
   background: #ffffff;
 }
 
 .plane2d-toolbar {
-  position: absolute;
-  top: 16px;
-  left: 16px;
-  z-index: 2;
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 6px;
-  width: 126px;
-  padding: 10px;
-  border: 1px solid #d8dde6;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.94);
-  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.12);
+  gap: 14px;
+  width: 168px;
+  height: 100%;
+  min-height: 0;
+  padding: 12px;
+  border-right: 1px solid #d8dde6;
+  background: #fbfcfe;
 }
 
 .plane2d-toolbar-title {
-  padding: 0 4px 4px;
+  display: flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 0 10px;
+  border-radius: 8px;
+  color: #ffffff;
+  background: #2d6cdf;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.plane2d-toolbar-groups {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+  overflow: auto;
+}
+
+.plane2d-tool-group {
+  display: grid;
+  gap: 7px;
+}
+
+.plane2d-tool-group h2 {
+  margin: 0;
   color: #647083;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.plane2d-tool-list {
+  display: grid;
+  gap: 6px;
 }
 
 .plane2d-toolbar .tool-button {
   width: 100%;
 }
 
+.plane2d-tool-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  color: currentColor;
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.plane2d-tool-svg-icon {
+  width: 18px;
+  min-width: 18px;
+  height: 18px;
+  color: currentColor;
+}
+
+.plane2d-tool-icon-solid,
+.plane2d-tool-icon-dash {
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-width: 2;
+}
+
+.plane2d-tool-icon-dash {
+  stroke-dasharray: 2 2;
+}
+
 .plane2d-svg {
+  min-width: 0;
+  min-height: 0;
   width: 100%;
   height: 100%;
   touch-action: none;
@@ -1095,6 +1160,22 @@ input {
 .plane2d-segment.extension {
   stroke: #6b7280;
   stroke-dasharray: 7 5;
+}
+
+.plane2d-extension-segment {
+  stroke: #6b7280;
+  stroke-dasharray: 6 5;
+  stroke-linecap: round;
+}
+
+.plane2d-extension-segment.selected {
+  stroke: #2563eb;
+  stroke-dasharray: 6 5;
+}
+
+.plane2d-extension-segment.hovered {
+  stroke: #3b82f6;
+  stroke-dasharray: 6 5;
 }
 
 .plane2d-segment.selected {
@@ -1159,6 +1240,40 @@ input {
   pointer-events: none;
 }
 
+.plane2d-measurement-label {
+  fill: #7c3aed;
+  paint-order: stroke;
+  stroke: #ffffff;
+  stroke-width: 3px;
+  stroke-linejoin: round;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.plane2d-measurement-label.hovered {
+  fill: #2563eb;
+}
+
+.plane2d-measurement-label.selected {
+  fill: #dc2626;
+}
+
+.property-subgroup {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.property-subgroup h4 {
+  margin: 0;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .plane2d-dialog-hint {
   margin: 0;
   color: #647083;
@@ -1167,7 +1282,7 @@ input {
 
 .plane2d-readout {
   position: absolute;
-  left: 12px;
+  left: 180px;
   bottom: 12px;
   z-index: 2;
   padding: 6px 9px;

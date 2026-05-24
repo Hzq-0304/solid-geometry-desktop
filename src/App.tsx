@@ -120,6 +120,8 @@ import type { SnapResult } from "./core/snap/SnapTypes";
 import type {
   Plane2DEntity,
   Plane2DCircleEntity,
+  Plane2DExtensionEntity,
+  Plane2DMeasurementEntity,
   Plane2DPointEntity,
   Plane2DSegmentEntity,
   Plane2DToolName,
@@ -128,11 +130,24 @@ import type {
 } from "./core/plane2d/PlaneCanvasTypes";
 import {
   createPlaneCanvasDocument,
+  createPlane2DExtension,
   deletePlane2DEntities,
   distanceBetweenVec2,
+  getPlane2DMeasurementInfo,
   normalizePlaneCanvasDocument,
+  plane2DExtensionId,
   syncPlane2DIntersections,
 } from "./core/plane2d/planeCanvasUtils";
+import {
+  createPlane2DHistoryState,
+  pushPlane2DHistoryEntry,
+  redoPlane2DHistory,
+  undoPlane2DHistory,
+} from "./core/plane2d/plane2DHistory";
+import type {
+  Plane2DDocumentChangeOptions,
+  Plane2DHistoryState,
+} from "./core/plane2d/plane2DHistory";
 import {
   findDuplicatePlane2DNames,
   findPlane2DNameOwner,
@@ -2134,6 +2149,10 @@ function App() {
     string | null
   >(null);
   const [plane2DBatchNameStart, setPlane2DBatchNameStart] = useState("A");
+  const [plane2DHistory, setPlane2DHistory] = useState<Plane2DHistoryState>(
+    createPlane2DHistoryState,
+  );
+  const [plane2DResetSignal, setPlane2DResetSignal] = useState(0);
   const [currentTool, setCurrentTool] = useState<ToolName>("select");
   const [focusRequestId, setFocusRequestId] = useState(0);
   const [lastPointerInfo, setLastPointerInfo] = useState<PointerInfo | null>(
@@ -2823,6 +2842,12 @@ function App() {
     setCurrentPreselection(null);
   };
 
+  const resetPlane2DTransientState = () => {
+    setPlane2DPendingSegmentPointId(null);
+    setPlane2DStatusMessage(null);
+    setPlane2DResetSignal((value) => value + 1);
+  };
+
   const resetProjectDocument = (
     nextDocument: BoardDocument,
     nextFilePath: string | null,
@@ -2838,6 +2863,8 @@ function App() {
     setIsDirty(false);
     setCurrentTool("select");
     setPlaneCanvasDocument(null);
+    setPlane2DHistory(createPlane2DHistoryState());
+    resetPlane2DTransientState();
     setWorkspaceMode("geometry3d");
     resetTransientToolState();
   };
@@ -2852,11 +2879,11 @@ function App() {
 
     resetTransientToolState();
     setPlaneCanvasDocument(normalizedDocument);
+    setPlane2DHistory(createPlane2DHistoryState());
     setCurrentFilePath(nextFilePath);
     setIsDirty(false);
     setPlane2DTool("select");
-    setPlane2DPendingSegmentPointId(null);
-    setPlane2DStatusMessage(null);
+    resetPlane2DTransientState();
     setWorkspaceMode("plane2d");
   };
 
@@ -3029,6 +3056,8 @@ function App() {
   const newPlaneCanvas = () => {
     resetTransientToolState();
     setPlaneCanvasDocument(createPlaneCanvasDocument());
+    setPlane2DHistory(createPlane2DHistoryState());
+    resetPlane2DTransientState();
     setWorkspaceMode("plane2d");
     setCurrentFilePath(null);
     setIsDirty(false);
@@ -3040,6 +3069,8 @@ function App() {
     resetTransientToolState();
     setWorkspaceMode("none");
     setPlaneCanvasDocument(null);
+    setPlane2DHistory(createPlane2DHistoryState());
+    resetPlane2DTransientState();
     setCurrentFilePath(null);
     setIsDirty(false);
     setCurrentTool("select");
@@ -3049,10 +3080,30 @@ function App() {
   const updatePlaneCanvasDocument = (
     nextDocument: PlaneCanvasDocument,
     dirty = true,
+    options?: Plane2DDocumentChangeOptions,
   ) => {
-    setPlaneCanvasDocument(nextDocument);
+    const syncedDocument = syncPlane2DIntersections(nextDocument);
+
+    setPlaneCanvasDocument(syncedDocument);
     if (dirty) {
       setIsDirty(true);
+    }
+
+    const historyMode = options?.history ?? (dirty ? "record" : "silent");
+
+    if (dirty && historyMode !== "silent") {
+      const beforeDocument = options?.before ?? planeCanvasDocument;
+
+      if (beforeDocument) {
+        setPlane2DHistory((currentHistory) =>
+          pushPlane2DHistoryEntry(
+            currentHistory,
+            options?.label ?? "更新平面画布",
+            beforeDocument,
+            syncedDocument,
+          ),
+        );
+      }
     }
   };
 
@@ -5030,6 +5081,21 @@ function App() {
   };
 
   const undo = () => {
+    if (workspaceMode === "plane2d") {
+      const result = undoPlane2DHistory(plane2DHistory);
+
+      if (!result.document) {
+        return;
+      }
+
+      setPlane2DHistory(result.history);
+      setPlaneCanvasDocument(syncPlane2DIntersections(result.document));
+      resetPlane2DTransientState();
+      setPlane2DStatusMessage("已撤销");
+      setIsDirty(true);
+      return;
+    }
+
     if (workspaceMode !== "geometry3d") {
       return;
     }
@@ -5045,6 +5111,21 @@ function App() {
   };
 
   const redo = () => {
+    if (workspaceMode === "plane2d") {
+      const result = redoPlane2DHistory(plane2DHistory);
+
+      if (!result.document) {
+        return;
+      }
+
+      setPlane2DHistory(result.history);
+      setPlaneCanvasDocument(syncPlane2DIntersections(result.document));
+      resetPlane2DTransientState();
+      setPlane2DStatusMessage("已重做");
+      setIsDirty(true);
+      return;
+    }
+
     if (workspaceMode !== "geometry3d") {
       return;
     }
@@ -6926,13 +7007,23 @@ function App() {
           return;
         }
 
-        if (workspaceMode === "geometry3d" && key === "z") {
+        if (
+          (workspaceMode === "geometry3d" || workspaceMode === "plane2d") &&
+          key === "z"
+        ) {
           event.preventDefault();
-          undo();
+          if (event.shiftKey) {
+            redo();
+          } else {
+            undo();
+          }
           return;
         }
 
-        if (workspaceMode === "geometry3d" && key === "y") {
+        if (
+          (workspaceMode === "geometry3d" || workspaceMode === "plane2d") &&
+          key === "y"
+        ) {
           event.preventDefault();
           redo();
           return;
@@ -7198,6 +7289,14 @@ function App() {
     (entity): entity is Plane2DCircleEntity =>
       entity.type === "plane2d-circle",
   );
+  const plane2DMeasurements = plane2DEntities.filter(
+    (entity): entity is Plane2DMeasurementEntity =>
+      entity.type === "plane2d-measurement",
+  );
+  const plane2DExtensions = plane2DEntities.filter(
+    (entity): entity is Plane2DExtensionEntity =>
+      entity.type === "plane2d-extension",
+  );
   const selectedPlane2DEntity =
     planeCanvasDocument?.selectedEntityIds[0]
       ? planeCanvasDocument.entities[planeCanvasDocument.selectedEntityIds[0]]
@@ -7295,6 +7394,72 @@ function App() {
     setPlane2DStatusMessage(`已连续命名 ${selectedPlane2DPointEntities.length} 个点。`);
   };
 
+  const getPlane2DExtensionForSegment = (segmentId: string) =>
+    plane2DExtensions.find((extension) => extension.targetSegmentId === segmentId);
+
+  const createPlane2DExtensionForSegment = (segmentId: string) => {
+    if (!planeCanvasDocument) {
+      return;
+    }
+
+    const segment = planeCanvasDocument.entities[segmentId];
+
+    if (segment?.type !== "plane2d-segment" || segment.segmentKind === "extension") {
+      return;
+    }
+
+    const extensionId = plane2DExtensionId(segmentId);
+    const existing = planeCanvasDocument.entities[extensionId];
+    const nextExtension =
+      existing?.type === "plane2d-extension"
+        ? {
+            ...existing,
+            visible: true,
+            snapEnabled: true,
+            updatedAt: new Date().toISOString(),
+          }
+        : createPlane2DExtension(extensionId, segmentId);
+
+    updatePlaneCanvasDocument({
+      ...planeCanvasDocument,
+      entities: {
+        ...planeCanvasDocument.entities,
+        [nextExtension.id]: nextExtension,
+      },
+      selectedEntityIds: [nextExtension.id],
+    });
+    setPlane2DStatusMessage("已创建延长部分。");
+  };
+
+  const setPlane2DExtensionVisibility = (
+    extensionId: string,
+    visible: boolean,
+  ) => {
+    if (!planeCanvasDocument) {
+      return;
+    }
+
+    const extension = planeCanvasDocument.entities[extensionId];
+
+    if (extension?.type !== "plane2d-extension" || extension.visible === visible) {
+      return;
+    }
+
+    updatePlaneCanvasDocument({
+      ...planeCanvasDocument,
+      entities: {
+        ...planeCanvasDocument.entities,
+        [extension.id]: {
+          ...extension,
+          visible,
+          snapEnabled: visible,
+          updatedAt: new Date().toISOString(),
+        },
+      },
+    });
+    setPlane2DStatusMessage(visible ? "已显示延长部分。" : "已隐藏延长部分。");
+  };
+
   return (
     <main className={`app-shell workspace-${workspaceMode}`}>
       <TopMenuBar
@@ -7306,12 +7471,24 @@ function App() {
               ? Boolean(planeCanvasDocument?.selectedEntityIds.length)
               : false
         }
-        canRedo={workspaceMode === "geometry3d" && commandManager.canRedo()}
+        canRedo={
+          workspaceMode === "geometry3d"
+            ? commandManager.canRedo()
+            : workspaceMode === "plane2d"
+              ? plane2DHistory.redoStack.length > 0
+              : false
+        }
         canSave={
           workspaceMode === "geometry3d" ||
           (workspaceMode === "plane2d" && Boolean(planeCanvasDocument))
         }
-        canUndo={workspaceMode === "geometry3d" && commandManager.canUndo()}
+        canUndo={
+          workspaceMode === "geometry3d"
+            ? commandManager.canUndo()
+            : workspaceMode === "plane2d"
+              ? plane2DHistory.undoStack.length > 0
+              : false
+        }
         canUse3dCommands={workspaceMode === "geometry3d"}
         hasWorkspace={workspaceMode !== "none"}
         onAbout={() =>
@@ -8733,6 +8910,7 @@ function App() {
                 onToolChange={setPlane2DTool}
                 onToast={showToast}
                 pendingSegmentPointId={plane2DPendingSegmentPointId}
+                resetSignal={plane2DResetSignal}
               />
             ) : null}
           </section>
@@ -8747,7 +8925,11 @@ function App() {
                     ? "已选择点"
                     : selectedPlane2DEntity.type === "plane2d-segment"
                       ? "已选择线段"
-                      : "已选择圆"
+                    : selectedPlane2DEntity.type === "plane2d-circle"
+                      ? "已选择圆"
+                      : selectedPlane2DEntity.type === "plane2d-extension"
+                        ? "已选择延长线"
+                        : "已选择测量"
                   : "平面画布"}
               </span>
             </div>
@@ -8920,6 +9102,82 @@ function App() {
                     readOnly
                   />
                 </label>
+                {selectedPlane2DEntity.segmentKind !== "extension" ? (
+                  <section className="property-subgroup">
+                    <h4>延长部分</h4>
+                    {(() => {
+                      const extension = getPlane2DExtensionForSegment(
+                        selectedPlane2DEntity.id,
+                      );
+
+                      if (!extension) {
+                        return (
+                          <button
+                            onClick={() =>
+                              createPlane2DExtensionForSegment(
+                                selectedPlane2DEntity.id,
+                              )
+                            }
+                            type="button"
+                          >
+                            创建延长
+                          </button>
+                        );
+                      }
+
+                      return (
+                        <button
+                          onClick={() =>
+                            setPlane2DExtensionVisibility(
+                              extension.id,
+                              extension.visible === false,
+                            )
+                          }
+                          type="button"
+                        >
+                          {extension.visible === false
+                            ? "显示延长部分"
+                            : "隐藏延长部分"}
+                        </button>
+                      );
+                    })()}
+                  </section>
+                ) : null}
+                <button
+                  className="danger-button"
+                  onClick={deleteSelectedPlane2DEntities}
+                  type="button"
+                >
+                  删除对象
+                </button>
+              </section>
+            ) : selectedPlane2DEntity?.type === "plane2d-extension" ? (
+              <section className="property-group">
+                <h3>延长线段</h3>
+                <label>
+                  来源线段
+                  <input value={selectedPlane2DEntity.targetSegmentId} readOnly />
+                </label>
+                <label>
+                  状态
+                  <input
+                    value={selectedPlane2DEntity.visible === false ? "隐藏" : "显示"}
+                    readOnly
+                  />
+                </label>
+                <button
+                  onClick={() =>
+                    setPlane2DExtensionVisibility(
+                      selectedPlane2DEntity.id,
+                      selectedPlane2DEntity.visible === false,
+                    )
+                  }
+                  type="button"
+                >
+                  {selectedPlane2DEntity.visible === false
+                    ? "显示延长部分"
+                    : "隐藏延长部分"}
+                </button>
                 <button
                   className="danger-button"
                   onClick={deleteSelectedPlane2DEntities}
@@ -8961,6 +9219,77 @@ function App() {
                   删除对象
                 </button>
               </section>
+            ) : selectedPlane2DEntity?.type === "plane2d-measurement" ? (
+              <section className="property-group">
+                <h3>
+                  {selectedPlane2DEntity.measurementKind === "length"
+                    ? "长度测量"
+                    : "角度测量"}
+                </h3>
+                <label>
+                  测量方式
+                  <input
+                    value={
+                      selectedPlane2DEntity.definition.kind === "segmentLength"
+                        ? "线段长度"
+                        : selectedPlane2DEntity.definition.kind === "pointDistance"
+                          ? "两点距离"
+                          : selectedPlane2DEntity.definition.kind === "segmentSegmentAngle"
+                            ? "两线段夹角"
+                            : "三点角"
+                    }
+                    readOnly
+                  />
+                </label>
+                <label>
+                  当前值
+                  <input
+                    value={(() => {
+                      if (!planeCanvasDocument) {
+                        return "无效";
+                      }
+
+                      return (
+                        getPlane2DMeasurementInfo(
+                          planeCanvasDocument,
+                          selectedPlane2DEntity,
+                        )?.label ?? "无效"
+                      );
+                    })()}
+                    readOnly
+                  />
+                </label>
+                <label>
+                  依赖对象
+                  <input
+                    value={(() => {
+                      const definition = selectedPlane2DEntity.definition;
+
+                      if (definition.kind === "segmentLength") {
+                        return definition.segmentId;
+                      }
+
+                      if (definition.kind === "pointDistance") {
+                        return `${definition.pointAId} / ${definition.pointBId}`;
+                      }
+
+                      if (definition.kind === "segmentSegmentAngle") {
+                        return `${definition.segmentAId} / ${definition.segmentBId}`;
+                      }
+
+                      return `${definition.pointAId} / ${definition.vertexPointId} / ${definition.pointCId}`;
+                    })()}
+                    readOnly
+                  />
+                </label>
+                <button
+                  className="danger-button"
+                  onClick={deleteSelectedPlane2DEntities}
+                  type="button"
+                >
+                  删除对象
+                </button>
+              </section>
             ) : hasMultipleSelectedPlane2DPoints ? null : (
               <section className="property-group">
                 <h3>平面画布</h3>
@@ -8982,7 +9311,7 @@ function App() {
                 <label>
                   对象
                   <input
-                    value={`点 ${plane2DPoints.length} / 线段 ${plane2DSegments.length} / 圆 ${plane2DCircles.length}`}
+                    value={`点 ${plane2DPoints.length} / 线段 ${plane2DSegments.length} / 延长 ${plane2DExtensions.length} / 圆 ${plane2DCircles.length} / 测量 ${plane2DMeasurements.length}`}
                     readOnly
                   />
                 </label>
@@ -8996,6 +9325,8 @@ function App() {
             <span>工具：{plane2DTool}</span>
             <span>点：{plane2DPoints.length}</span>
             <span>线段：{plane2DSegments.length}</span>
+            <span>延长：{plane2DExtensions.length}</span>
+            <span>测量：{plane2DMeasurements.length}</span>
           </footer>
         </>
       ) : (

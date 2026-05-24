@@ -1,6 +1,8 @@
-import type {
+﻿import type {
   Plane2DCircleEntity,
   Plane2DEntity,
+  Plane2DExtensionEntity,
+  Plane2DMeasurementEntity,
   Plane2DPointEntity,
   Plane2DSegmentEntity,
   PlaneCanvasDocument,
@@ -9,6 +11,7 @@ import type {
 
 const EPSILON = 1e-6;
 const ENDPOINT_EPSILON = 1e-4;
+const EXTENSION_INTERSECTION_SPAN = 10000;
 
 export const createPlaneCanvasDocument = (): PlaneCanvasDocument => {
   const now = new Date().toISOString();
@@ -88,6 +91,54 @@ export const createPlane2DCircle = (
     type: "plane2d-circle",
     centerPointId,
     radiusPointId,
+    nameSource: "auto",
+    showName: false,
+    createdAt: now,
+    updatedAt: now,
+    ...options,
+  };
+};
+
+export const createPlane2DMeasurement = (
+  id: string,
+  options: Omit<
+    Plane2DMeasurementEntity,
+    "id" | "type" | "nameSource" | "showName" | "createdAt" | "updatedAt"
+  > &
+    Partial<
+      Pick<
+        Plane2DMeasurementEntity,
+        "name" | "nameSource" | "showName" | "createdAt" | "updatedAt"
+      >
+    >,
+): Plane2DMeasurementEntity => {
+  const now = new Date().toISOString();
+
+  return {
+    id,
+    type: "plane2d-measurement",
+    nameSource: "auto",
+    showName: false,
+    createdAt: now,
+    updatedAt: now,
+    ...options,
+  };
+};
+
+export const createPlane2DExtension = (
+  id: string,
+  targetSegmentId: string,
+  options: Partial<Plane2DExtensionEntity> = {},
+): Plane2DExtensionEntity => {
+  const now = new Date().toISOString();
+
+  return {
+    id,
+    type: "plane2d-extension",
+    targetSegmentId,
+    extensionKind: "segmentExtension",
+    visible: true,
+    snapEnabled: true,
     nameSource: "auto",
     showName: false,
     createdAt: now,
@@ -257,6 +308,136 @@ export const getPlane2DCircleGeometry = (
   };
 };
 
+const clamp = (value: number, min: number, max: number): number =>
+  Math.min(max, Math.max(min, value));
+
+const angleBetweenVec2 = (a: Vec2, b: Vec2): number | null => {
+  const lengthA = Math.hypot(a.x, a.y);
+  const lengthB = Math.hypot(b.x, b.y);
+
+  if (lengthA < EPSILON || lengthB < EPSILON) {
+    return null;
+  }
+
+  const cosine = clamp(dotVec2(a, b) / (lengthA * lengthB), -1, 1);
+
+  return (Math.acos(cosine) * 180) / Math.PI;
+};
+
+export const getPlane2DMeasurementInfo = (
+  document: PlaneCanvasDocument,
+  measurement: Plane2DMeasurementEntity,
+): { readonly value: number; readonly label: string; readonly position: Vec2 } | null => {
+  if (measurement.measurementKind === "length") {
+    if (measurement.definition.kind === "segmentLength") {
+      const segment = document.entities[measurement.definition.segmentId];
+      const positions =
+        segment?.type === "plane2d-segment"
+          ? getPlane2DSegmentPositions(document, segment)
+          : null;
+
+      if (!positions) {
+        return null;
+      }
+
+      const value = distanceBetweenVec2(positions[0], positions[1]);
+
+      return {
+        value,
+        label: `长度：${value.toFixed(2)}`,
+        position: measurement.labelPosition ?? midpointVec2(positions[0], positions[1]),
+      };
+    }
+
+    if (measurement.definition.kind !== "pointDistance") {
+      return null;
+    }
+
+    const pointA = getPlane2DPointPosition(document, measurement.definition.pointAId);
+    const pointB = getPlane2DPointPosition(document, measurement.definition.pointBId);
+
+    if (!pointA || !pointB) {
+      return null;
+    }
+
+    const value = distanceBetweenVec2(pointA, pointB);
+
+    return {
+      value,
+      label: `长度：${value.toFixed(2)}`,
+      position: measurement.labelPosition ?? midpointVec2(pointA, pointB),
+    };
+  }
+
+  if (measurement.definition.kind === "segmentSegmentAngle") {
+    const segmentA = document.entities[measurement.definition.segmentAId];
+    const segmentB = document.entities[measurement.definition.segmentBId];
+    const positionsA =
+      segmentA?.type === "plane2d-segment"
+        ? getPlane2DSegmentPositions(document, segmentA)
+        : null;
+    const positionsB =
+      segmentB?.type === "plane2d-segment"
+        ? getPlane2DSegmentPositions(document, segmentB)
+        : null;
+
+    if (!positionsA || !positionsB) {
+      return null;
+    }
+
+    const value = angleBetweenVec2(
+      subtractVec2(positionsA[1], positionsA[0]),
+      subtractVec2(positionsB[1], positionsB[0]),
+    );
+
+    if (value === null) {
+      return null;
+    }
+
+    const shared = positionsA.find((pointA) =>
+      positionsB.some((pointB) => distanceBetweenVec2(pointA, pointB) < ENDPOINT_EPSILON),
+    );
+    const midA = midpointVec2(positionsA[0], positionsA[1]);
+    const midB = midpointVec2(positionsB[0], positionsB[1]);
+
+    return {
+      value,
+      label: `角度：${value.toFixed(2)}°`,
+      position: measurement.labelPosition ?? shared ?? midpointVec2(midA, midB),
+    };
+  }
+
+  if (measurement.definition.kind !== "threePointAngle") {
+    return null;
+  }
+
+  const pointA = getPlane2DPointPosition(document, measurement.definition.pointAId);
+  const vertex = getPlane2DPointPosition(
+    document,
+    measurement.definition.vertexPointId,
+  );
+  const pointC = getPlane2DPointPosition(document, measurement.definition.pointCId);
+
+  if (!pointA || !vertex || !pointC) {
+    return null;
+  }
+
+  const value = angleBetweenVec2(
+    subtractVec2(pointA, vertex),
+    subtractVec2(pointC, vertex),
+  );
+
+  if (value === null) {
+    return null;
+  }
+
+  return {
+    value,
+    label: `角度：${value.toFixed(2)}°`,
+    position: measurement.labelPosition ?? vertex,
+  };
+};
+
 export const getClosestPointOnSegment2D = (
   point: Vec2,
   start: Vec2,
@@ -358,6 +539,61 @@ export const plane2DPerpendicularTargetExtensionId = (
   segmentId: string,
 ): string => `plane2d-perpendicular-target-extension-${pointId}-${segmentId}`;
 
+export const plane2DExtensionId = (segmentId: string): string =>
+  `plane2d-extension-${segmentId}`;
+
+export type Plane2DExtensionPart = {
+  readonly id: string;
+  readonly extensionId: string;
+  readonly part: "start" | "end";
+  readonly start: Vec2;
+  readonly end: Vec2;
+};
+
+export const getPlane2DExtensionParts = (
+  document: PlaneCanvasDocument,
+  extension: Plane2DExtensionEntity,
+  span = EXTENSION_INTERSECTION_SPAN,
+): readonly Plane2DExtensionPart[] => {
+  if (extension.visible === false || extension.snapEnabled === false) {
+    return [];
+  }
+
+  const target = document.entities[extension.targetSegmentId];
+  const positions =
+    target?.type === "plane2d-segment"
+      ? getPlane2DSegmentPositions(document, target)
+      : null;
+
+  if (!positions) {
+    return [];
+  }
+
+  const [start, end] = positions;
+  const direction = normalizeVec2(subtractVec2(end, start));
+
+  if (!direction) {
+    return [];
+  }
+
+  return [
+    {
+      id: `${extension.id}:start`,
+      extensionId: extension.id,
+      part: "start",
+      start: addVec2(start, scaleVec2(direction, -span)),
+      end: start,
+    },
+    {
+      id: `${extension.id}:end`,
+      extensionId: extension.id,
+      part: "end",
+      start: end,
+      end: addVec2(end, scaleVec2(direction, span)),
+    },
+  ];
+};
+
 const isEndpointIntersection = (t: number, u: number): boolean =>
   t <= ENDPOINT_EPSILON ||
   t >= 1 - ENDPOINT_EPSILON ||
@@ -423,6 +659,13 @@ export const syncPlane2DConstructions = (
     if (
       entity.type === "plane2d-segment" &&
       entity.construction?.kind === "perpendicularTargetExtension"
+    ) {
+      return;
+    }
+
+    if (
+      entity.type === "plane2d-extension" &&
+      document.entities[entity.targetSegmentId]?.type !== "plane2d-segment"
     ) {
       return;
     }
@@ -608,33 +851,53 @@ export const syncPlane2DConstructions = (
     });
   });
 
-  const segments = Object.values(nextEntities).filter(
-    (entity): entity is Plane2DSegmentEntity =>
-      entity.type === "plane2d-segment",
-  );
+  type IntersectionSegmentCandidate = {
+    readonly id: string;
+    readonly start: Vec2;
+    readonly end: Vec2;
+  };
 
-  for (let i = 0; i < segments.length; i += 1) {
-    for (let j = i + 1; j < segments.length; j += 1) {
-      const segmentA = segments[i];
-      const segmentB = segments[j];
-      const positionsA = getPlane2DSegmentPositions(
+  const segmentCandidates: IntersectionSegmentCandidate[] = [];
+
+  Object.values(nextEntities).forEach((entity) => {
+    if (entity.type === "plane2d-segment") {
+      const positions = getPlane2DSegmentPositions(
         { ...document, entities: nextEntities },
-        segmentA,
-      );
-      const positionsB = getPlane2DSegmentPositions(
-        { ...document, entities: nextEntities },
-        segmentB,
+        entity,
       );
 
-      if (!positionsA || !positionsB) {
-        continue;
+      if (positions) {
+        segmentCandidates.push({
+          id: entity.id,
+          start: positions[0],
+          end: positions[1],
+        });
       }
+    }
 
+    if (entity.type === "plane2d-extension") {
+      getPlane2DExtensionParts(
+        { ...document, entities: nextEntities },
+        entity,
+      ).forEach((part) => {
+        segmentCandidates.push({
+          id: part.id,
+          start: part.start,
+          end: part.end,
+        });
+      });
+    }
+  });
+
+  for (let i = 0; i < segmentCandidates.length; i += 1) {
+    for (let j = i + 1; j < segmentCandidates.length; j += 1) {
+      const segmentA = segmentCandidates[i];
+      const segmentB = segmentCandidates[j];
       const intersection = computeSegmentIntersection2D(
-        positionsA[0],
-        positionsA[1],
-        positionsB[0],
-        positionsB[1],
+        segmentA.start,
+        segmentA.end,
+        segmentB.start,
+        segmentB.end,
       );
 
       if (
@@ -659,6 +922,15 @@ export const syncPlane2DConstructions = (
       });
     }
   }
+
+  Object.values(nextEntities).forEach((entity) => {
+    if (
+      entity.type === "plane2d-measurement" &&
+      !getPlane2DMeasurementInfo({ ...document, entities: nextEntities }, entity)
+    ) {
+      delete nextEntities[entity.id];
+    }
+  });
 
   const selectedEntityIds = document.selectedEntityIds.filter((entityId) =>
     Boolean(nextEntities[entityId]),
@@ -710,6 +982,37 @@ export const deletePlane2DEntities = (
       ) {
         toDelete.add(entity.id);
         changed = true;
+      }
+
+      if (
+        entity.type === "plane2d-extension" &&
+        toDelete.has(entity.targetSegmentId) &&
+        !toDelete.has(entity.id)
+      ) {
+        toDelete.add(entity.id);
+        changed = true;
+      }
+
+      if (entity.type === "plane2d-measurement" && !toDelete.has(entity.id)) {
+        const definition = entity.definition;
+        const dependsOnDeleted =
+          (definition.kind === "segmentLength" &&
+            toDelete.has(definition.segmentId)) ||
+          (definition.kind === "pointDistance" &&
+            (toDelete.has(definition.pointAId) ||
+              toDelete.has(definition.pointBId))) ||
+          (definition.kind === "segmentSegmentAngle" &&
+            (toDelete.has(definition.segmentAId) ||
+              toDelete.has(definition.segmentBId))) ||
+          (definition.kind === "threePointAngle" &&
+            (toDelete.has(definition.pointAId) ||
+              toDelete.has(definition.vertexPointId) ||
+              toDelete.has(definition.pointCId)));
+
+        if (dependsOnDeleted) {
+          toDelete.add(entity.id);
+          changed = true;
+        }
       }
 
       if (

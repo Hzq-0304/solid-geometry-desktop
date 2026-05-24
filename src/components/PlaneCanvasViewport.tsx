@@ -1,6 +1,8 @@
 ﻿import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   Plane2DCircleEntity,
+  Plane2DExtensionEntity,
+  Plane2DMeasurementEntity,
   Plane2DPointEntity,
   Plane2DSegmentEntity,
   Plane2DToolName,
@@ -9,6 +11,8 @@ import type {
 } from "../core/plane2d/PlaneCanvasTypes";
 import {
   createPlane2DCircle,
+  createPlane2DExtension,
+  createPlane2DMeasurement,
   createPlane2DPoint,
   createPlane2DSegment,
   distanceBetweenVec2,
@@ -16,6 +20,7 @@ import {
   getPerpendicularEndpointOnLine2D,
   getPerpendicularFootOnLine2D,
   getPlane2DCircleGeometry,
+  getPlane2DMeasurementInfo,
   getPlane2DPointPosition,
   getPlane2DSegmentPositions,
   getSignedPerpendicularSide2D,
@@ -23,14 +28,21 @@ import {
   plane2DMidpointId,
   plane2DPerpendicularEndpointId,
   plane2DPerpendicularFootId,
+  plane2DExtensionId,
   syncPlane2DConstructions,
 } from "../core/plane2d/planeCanvasUtils";
+import type { Plane2DDocumentChangeOptions } from "../core/plane2d/plane2DHistory";
 
 interface PlaneCanvasViewportProps {
   readonly document: PlaneCanvasDocument;
   readonly currentTool: Plane2DToolName;
   readonly pendingSegmentPointId: string | null;
-  readonly onChange: (document: PlaneCanvasDocument, dirty?: boolean) => void;
+  readonly resetSignal: number;
+  readonly onChange: (
+    document: PlaneCanvasDocument,
+    dirty?: boolean,
+    options?: Plane2DDocumentChangeOptions,
+  ) => void;
   readonly onToolChange: (tool: Plane2DToolName) => void;
   readonly onPendingSegmentPointChange: (pointId: string | null) => void;
   readonly onStatus: (message: string | null) => void;
@@ -40,6 +52,7 @@ interface PlaneCanvasViewportProps {
 type Plane2DSnapResult =
   | { readonly type: "point"; readonly position: Vec2; readonly entityId: string }
   | { readonly type: "segment"; readonly position: Vec2; readonly entityId: string }
+  | { readonly type: "extension"; readonly position: Vec2; readonly entityId: string }
   | { readonly type: "circle"; readonly position: Vec2; readonly entityId: string }
   | { readonly type: "none"; readonly position: Vec2 };
 
@@ -51,7 +64,19 @@ type Plane2DPickResult =
       readonly distancePx: number;
       readonly closestWorld: Vec2;
     }
-  | { readonly kind: "circle"; readonly circleId: string; readonly distancePx: number };
+  | {
+      readonly kind: "extension";
+      readonly extensionId: string;
+      readonly part: "start" | "end";
+      readonly distancePx: number;
+      readonly closestWorld: Vec2;
+    }
+  | { readonly kind: "circle"; readonly circleId: string; readonly distancePx: number }
+  | {
+      readonly kind: "measurement";
+      readonly measurementId: string;
+      readonly distancePx: number;
+    };
 
 type Plane2DViewportState = {
   readonly panX: number;
@@ -101,12 +126,17 @@ type PerpendicularPreview =
   | { readonly kind: "foot"; readonly start: Vec2; readonly end: Vec2 }
   | { readonly kind: "direction"; readonly start: Vec2; readonly end: Vec2; readonly side: 1 | -1; readonly length: number };
 
+type AngleFirstTarget =
+  | { readonly kind: "point"; readonly pointId: string }
+  | { readonly kind: "segment"; readonly segmentId: string };
+
 const POINT_EPSILON = 1e-5;
 const WORLD_UNIT_TO_CSS_PX = 37.7952755906;
 const MIN_ZOOM = 0.2;
 const MAX_ZOOM = 8;
 const PAN_THRESHOLD_PX = 4;
 const CIRCLE_HIT_RADIUS_PX = 8;
+const MEASUREMENT_HIT_RADIUS_PX = 18;
 const DEFAULT_PERPENDICULAR_LENGTH = 2;
 
 const makePlane2DId = (prefix: string): string =>
@@ -119,7 +149,44 @@ const planeToolLabels: Record<Plane2DToolName, string> = {
   circle: "圆",
   midpoint: "中点",
   perpendicular: "垂直",
+  extend: "延长",
+  length: "长度",
+  angle: "角度",
 };
+
+const planeToolIcons: Record<Plane2DToolName, string> = {
+  select: "↖",
+  point: "•",
+  segment: "╱",
+  circle: "○",
+  midpoint: "◉",
+  perpendicular: "⊥",
+  extend: "",
+  length: "↔",
+  angle: "∠",
+};
+
+const Plane2DExtendIcon = () => (
+  <svg
+    aria-hidden="true"
+    className="plane2d-tool-svg-icon"
+    focusable="false"
+    viewBox="0 0 24 24"
+  >
+    <line className="plane2d-tool-icon-dash" x1="2" x2="8" y1="12" y2="12" />
+    <line className="plane2d-tool-icon-solid" x1="8" x2="16" y1="12" y2="12" />
+    <line className="plane2d-tool-icon-dash" x1="16" x2="22" y1="12" y2="12" />
+  </svg>
+);
+
+const planeToolGroups: ReadonlyArray<{
+  readonly title: string;
+  readonly tools: readonly Plane2DToolName[];
+}> = [
+  { title: "基础", tools: ["select"] },
+  { title: "构造", tools: ["point", "segment", "circle", "midpoint", "perpendicular", "extend"] },
+  { title: "测量", tools: ["length", "angle"] },
+];
 
 const getBaseToolHint = (tool: Plane2DToolName): string => {
   switch (tool) {
@@ -133,6 +200,12 @@ const getBaseToolHint = (tool: Plane2DToolName): string => {
       return "请选择两个点，也可按 Ctrl+K 输入坐标建点。";
     case "perpendicular":
       return "请选择点和线段，也可按 Ctrl+K 输入坐标建点。";
+    case "extend":
+      return "请选择要延长的线段。";
+    case "length":
+      return "请选择线段或两个点进行长度测量，也可按 Ctrl+K 输入坐标点。";
+    case "angle":
+      return "请选择两条线段或三个点进行角度测量，也可按 Ctrl+K 输入坐标点。";
     default:
       return "选择对象，拖动空白处可平移画布。";
   }
@@ -142,6 +215,8 @@ const getEntityDisplayName = (
     | Plane2DPointEntity
     | Plane2DSegmentEntity
     | Plane2DCircleEntity
+    | Plane2DMeasurementEntity
+    | Plane2DExtensionEntity
     | undefined,
 ): string => {
   const manualName =
@@ -154,6 +229,7 @@ export default function PlaneCanvasViewport({
   document,
   currentTool,
   pendingSegmentPointId,
+  resetSignal,
   onChange,
   onToolChange,
   onPendingSegmentPointChange,
@@ -162,6 +238,8 @@ export default function PlaneCanvasViewport({
 }: PlaneCanvasViewportProps) {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const latestPointerLocalRef = useRef<Vec2 | null>(null);
+  const latestDocumentRef = useRef(document);
+  const dragStartDocumentRef = useRef<PlaneCanvasDocument | null>(null);
   const lastHintRef = useRef<string | null>(null);
   const [previewPosition, setPreviewPosition] = useState<Vec2 | null>(null);
   const [hoverTarget, setHoverTarget] = useState<Plane2DPickResult | null>(null);
@@ -180,6 +258,10 @@ export default function PlaneCanvasViewport({
     useState<PerpendicularFirstTarget | null>(null);
   const [perpendicularDirectionPick, setPerpendicularDirectionPick] =
     useState<PerpendicularDirectionPickState | null>(null);
+  const [lengthFirstPointId, setLengthFirstPointId] = useState<string | null>(null);
+  const [angleFirstTarget, setAngleFirstTarget] =
+    useState<AngleFirstTarget | null>(null);
+  const [angleVertexPointId, setAngleVertexPointId] = useState<string | null>(null);
   const [coordinateDialog, setCoordinateDialog] =
     useState<CoordinateDialogState | null>(null);
 
@@ -213,6 +295,40 @@ export default function PlaneCanvasViewport({
       ),
     [document.entities],
   );
+  const measurements = useMemo(
+    () =>
+      Object.values(document.entities).filter(
+        (entity): entity is Plane2DMeasurementEntity =>
+          entity.type === "plane2d-measurement",
+      ),
+    [document.entities],
+  );
+  const extensions = useMemo(
+    () =>
+      Object.values(document.entities).filter(
+        (entity): entity is Plane2DExtensionEntity =>
+          entity.type === "plane2d-extension",
+      ),
+    [document.entities],
+  );
+
+  useEffect(() => {
+    latestDocumentRef.current = document;
+  }, [document]);
+
+  useEffect(() => {
+    setCircleCenterPointId(null);
+    setMidpointFirstPointId(null);
+    setPerpendicularFirstTarget(null);
+    setPerpendicularDirectionPick(null);
+    setLengthFirstPointId(null);
+    setAngleFirstTarget(null);
+    setAngleVertexPointId(null);
+    setInteraction({ kind: "idle" });
+    setHoverTarget(null);
+    dragStartDocumentRef.current = null;
+    onPendingSegmentPointChange(null);
+  }, [onPendingSegmentPointChange, resetSignal]);
 
   useEffect(() => {
     const svg = svgRef.current;
@@ -267,8 +383,130 @@ export default function PlaneCanvasViewport({
     };
   };
 
-  const setDocument = (nextDocument: PlaneCanvasDocument, dirty = true) => {
-    onChange(syncPlane2DConstructions(nextDocument), dirty);
+  const getViewportWorldBounds = () => {
+    const topLeft = screenToWorld({ x: 0, y: 0 });
+    const bottomRight = screenToWorld({
+      x: viewportSize.width,
+      y: viewportSize.height,
+    });
+
+    return {
+      minX: Math.min(topLeft.x, bottomRight.x),
+      maxX: Math.max(topLeft.x, bottomRight.x),
+      minY: Math.min(topLeft.y, bottomRight.y),
+      maxY: Math.max(topLeft.y, bottomRight.y),
+    };
+  };
+
+  const getExtensionViewportParts = (
+    extension: Plane2DExtensionEntity,
+  ): ReadonlyArray<{
+    readonly extensionId: string;
+    readonly part: "start" | "end";
+    readonly start: Vec2;
+    readonly end: Vec2;
+  }> => {
+    if (extension.visible === false || extension.snapEnabled === false) {
+      return [];
+    }
+
+    const target = document.entities[extension.targetSegmentId];
+    const positions =
+      target?.type === "plane2d-segment"
+        ? getPlane2DSegmentPositions(document, target)
+        : null;
+
+    if (!positions) {
+      return [];
+    }
+
+    const [start, end] = positions;
+    const direction = { x: end.x - start.x, y: end.y - start.y };
+    const length = Math.hypot(direction.x, direction.y);
+
+    if (length < POINT_EPSILON) {
+      return [];
+    }
+
+    const unit = { x: direction.x / length, y: direction.y / length };
+    const bounds = getViewportWorldBounds();
+    const tValues: number[] = [];
+    const addIfInside = (point: Vec2, t: number) => {
+      if (
+        point.x >= bounds.minX - POINT_EPSILON &&
+        point.x <= bounds.maxX + POINT_EPSILON &&
+        point.y >= bounds.minY - POINT_EPSILON &&
+        point.y <= bounds.maxY + POINT_EPSILON
+      ) {
+        tValues.push(t);
+      }
+    };
+
+    if (Math.abs(unit.x) > POINT_EPSILON) {
+      [bounds.minX, bounds.maxX].forEach((x) => {
+        const t = (x - start.x) / unit.x;
+        addIfInside({ x, y: start.y + unit.y * t }, t);
+      });
+    }
+
+    if (Math.abs(unit.y) > POINT_EPSILON) {
+      [bounds.minY, bounds.maxY].forEach((y) => {
+        const t = (y - start.y) / unit.y;
+        addIfInside({ x: start.x + unit.x * t, y }, t);
+      });
+    }
+
+    const uniqueTValues = [...new Set(tValues.map((value) => value.toFixed(8)))]
+      .map(Number)
+      .sort((a, b) => a - b);
+
+    if (uniqueTValues.length < 2) {
+      return [];
+    }
+
+    const minT = uniqueTValues[0];
+    const maxT = uniqueTValues[uniqueTValues.length - 1];
+    const parts: Array<{
+      readonly extensionId: string;
+      readonly part: "start" | "end";
+      readonly start: Vec2;
+      readonly end: Vec2;
+    }> = [];
+
+    if (minT < -POINT_EPSILON) {
+      parts.push({
+        extensionId: extension.id,
+        part: "start",
+        start: { x: start.x + unit.x * minT, y: start.y + unit.y * minT },
+        end: start,
+      });
+    }
+
+    if (maxT > length + POINT_EPSILON) {
+      parts.push({
+        extensionId: extension.id,
+        part: "end",
+        start: end,
+        end: { x: start.x + unit.x * maxT, y: start.y + unit.y * maxT },
+      });
+    }
+
+    return parts;
+  };
+
+  const extensionViewportParts = extensions.flatMap((extension) =>
+    getExtensionViewportParts(extension),
+  );
+
+  const setDocument = (
+    nextDocument: PlaneCanvasDocument,
+    dirty = true,
+    options?: Plane2DDocumentChangeOptions,
+  ) => {
+    const syncedDocument = syncPlane2DConstructions(nextDocument);
+
+    latestDocumentRef.current = syncedDocument;
+    onChange(syncedDocument, dirty, options);
   };
 
   const selectEntity = (entityId: string | null) => {
@@ -339,6 +577,32 @@ export default function PlaneCanvasViewport({
       return segmentCandidate;
     }
 
+    const extensionCandidate = extensionViewportParts
+      .map((part) => {
+        const closest = getClosestPointOnSegment2D(
+          screenPosition,
+          worldToScreen(part.start),
+          worldToScreen(part.end),
+        );
+
+        return {
+          kind: "extension" as const,
+          extensionId: part.extensionId,
+          part: part.part,
+          distancePx: closest.distance,
+          closestWorld: {
+            x: part.start.x + (part.end.x - part.start.x) * closest.t,
+            y: part.start.y + (part.end.y - part.start.y) * closest.t,
+          },
+        };
+      })
+      .filter((candidate) => candidate.distancePx <= document.settings.snapDistancePx)
+      .sort((a, b) => a.distancePx - b.distancePx)[0];
+
+    if (extensionCandidate) {
+      return extensionCandidate;
+    }
+
     const circleCandidate = circles
       .map((circle) => {
         const geometry = getPlane2DCircleGeometry(document, circle);
@@ -361,7 +625,37 @@ export default function PlaneCanvasViewport({
       .filter((candidate) => candidate.distancePx <= CIRCLE_HIT_RADIUS_PX)
       .sort((a, b) => a.distancePx - b.distancePx)[0];
 
-    return circleCandidate ?? null;
+    if (circleCandidate) {
+      return circleCandidate;
+    }
+
+    const measurementCandidate = measurements
+      .map((measurement) => {
+        const info = getPlane2DMeasurementInfo(document, measurement);
+
+        if (!info) {
+          return null;
+        }
+
+        const labelScreen = worldToScreen(info.position);
+        const distancePx = distanceBetweenVec2(labelScreen, screenPosition);
+
+        return {
+          kind: "measurement" as const,
+          measurementId: measurement.id,
+          distancePx,
+        };
+      })
+      .filter(
+        (
+          candidate,
+        ): candidate is Extract<Plane2DPickResult, { kind: "measurement" }> =>
+          candidate !== null,
+      )
+      .filter((candidate) => candidate.distancePx <= MEASUREMENT_HIT_RADIUS_PX)
+      .sort((a, b) => a.distancePx - b.distancePx)[0];
+
+    return measurementCandidate ?? null;
   };
 
   const resolveSnap = (
@@ -381,6 +675,10 @@ export default function PlaneCanvasViewport({
 
     if (pick?.kind === "segment" && document.settings.snapToSegments) {
       return { type: "segment", position: pick.closestWorld, entityId: pick.segmentId };
+    }
+
+    if (pick?.kind === "extension" && document.settings.snapToSegments) {
+      return { type: "extension", position: pick.closestWorld, entityId: pick.extensionId };
     }
 
     if (pick?.kind === "circle") {
@@ -774,6 +1072,193 @@ export default function PlaneCanvasViewport({
     onStatus("已创建中点。");
   };
 
+  const createLengthMeasurementForSegment = (segmentId: string) => {
+    const segment = document.entities[segmentId];
+
+    if (segment?.type !== "plane2d-segment") {
+      return;
+    }
+
+    const measurement = createPlane2DMeasurement(
+      makePlane2DId("plane2d-length"),
+      {
+        measurementKind: "length",
+        definition: { kind: "segmentLength", segmentId },
+      },
+    );
+
+    setDocument({
+      ...document,
+      entities: { ...document.entities, [measurement.id]: measurement },
+      selectedEntityIds: [measurement.id],
+    });
+    setLengthFirstPointId(null);
+    onStatus("已创建长度测量。");
+  };
+
+  const createOrShowExtensionForSegment = (segmentId: string) => {
+    const segment = document.entities[segmentId];
+
+    if (segment?.type !== "plane2d-segment" || segment.segmentKind === "extension") {
+      onStatus("请选择可延长的线段。");
+      return;
+    }
+
+    const extensionId = plane2DExtensionId(segmentId);
+    const existing = document.entities[extensionId];
+
+    if (existing?.type === "plane2d-extension") {
+      if (existing.visible !== false) {
+        onStatus("该线段已显示延长部分。");
+        onToast?.("该线段已显示延长部分。");
+        selectEntity(existing.id);
+        return;
+      }
+
+      setDocument({
+        ...document,
+        entities: {
+          ...document.entities,
+          [existing.id]: {
+            ...existing,
+            visible: true,
+            snapEnabled: true,
+            updatedAt: new Date().toISOString(),
+          },
+        },
+        selectedEntityIds: [existing.id],
+      });
+      onStatus("已显示延长部分。");
+      return;
+    }
+
+    const extension = createPlane2DExtension(extensionId, segmentId);
+
+    setDocument({
+      ...document,
+      entities: {
+        ...document.entities,
+        [extension.id]: extension,
+      },
+      selectedEntityIds: [extension.id],
+    });
+    onStatus("已创建延长部分。");
+  };
+
+  const createLengthMeasurementForPoints = (
+    pointAId: string,
+    snap: Plane2DSnapResult,
+  ) => {
+    const pointB = snap.type === "point" ? null : createPointEntityAt(snap.position);
+    const pointBId = snap.type === "point" ? snap.entityId : pointB!.id;
+
+    if (pointAId === pointBId) {
+      onStatus("请选择两个不同的点。");
+      onToast?.("请选择两个不同的点。");
+      return;
+    }
+
+    const measurement = createPlane2DMeasurement(
+      makePlane2DId("plane2d-length"),
+      {
+        measurementKind: "length",
+        definition: { kind: "pointDistance", pointAId, pointBId },
+      },
+    );
+
+    setDocument({
+      ...document,
+      entities: {
+        ...document.entities,
+        ...(pointB ? { [pointB.id]: pointB } : {}),
+        [measurement.id]: measurement,
+      },
+      selectedEntityIds: [measurement.id],
+    });
+    setLengthFirstPointId(null);
+    onStatus("已创建长度测量。");
+  };
+
+  const createAngleMeasurementForSegments = (
+    segmentAId: string,
+    segmentBId: string,
+  ) => {
+    if (segmentAId === segmentBId) {
+      onStatus("请选择两条不同的线段。");
+      onToast?.("请选择两条不同的线段。");
+      return;
+    }
+
+    const measurement = createPlane2DMeasurement(makePlane2DId("plane2d-angle"), {
+      measurementKind: "angle",
+      definition: { kind: "segmentSegmentAngle", segmentAId, segmentBId },
+    });
+
+    if (!getPlane2DMeasurementInfo({ ...document, entities: { ...document.entities, [measurement.id]: measurement } }, measurement)) {
+      onStatus("线段过短，无法测量角度。");
+      onToast?.("线段过短，无法测量角度。");
+      return;
+    }
+
+    setDocument({
+      ...document,
+      entities: { ...document.entities, [measurement.id]: measurement },
+      selectedEntityIds: [measurement.id],
+    });
+    setAngleFirstTarget(null);
+    onStatus("已创建角度测量。");
+  };
+
+  const createAngleMeasurementForPoints = (
+    pointAId: string,
+    vertexPointId: string,
+    snap: Plane2DSnapResult,
+  ) => {
+    const pointC = snap.type === "point" ? null : createPointEntityAt(snap.position);
+    const pointCId = snap.type === "point" ? snap.entityId : pointC!.id;
+
+    if (
+      pointAId === vertexPointId ||
+      pointCId === vertexPointId ||
+      pointAId === pointCId
+    ) {
+      onStatus("角度退化，无法测量。");
+      onToast?.("角度退化，无法测量。");
+      return;
+    }
+
+    const measurement = createPlane2DMeasurement(makePlane2DId("plane2d-angle"), {
+      measurementKind: "angle",
+      definition: {
+        kind: "threePointAngle",
+        pointAId,
+        vertexPointId,
+        pointCId,
+      },
+    });
+
+    const entitiesWithPoint = {
+      ...document.entities,
+      ...(pointC ? { [pointC.id]: pointC } : {}),
+      [measurement.id]: measurement,
+    };
+
+    if (!getPlane2DMeasurementInfo({ ...document, entities: entitiesWithPoint }, measurement)) {
+      onStatus("角度退化，无法测量。");
+      onToast?.("角度退化，无法测量。");
+      return;
+    }
+
+    setDocument({
+      ...document,
+      entities: entitiesWithPoint,
+      selectedEntityIds: [measurement.id],
+    });
+    setAngleFirstTarget(null);
+    setAngleVertexPointId(null);
+    onStatus("已创建角度测量。");
+  };
+
   const applyPointInput = (snap: Plane2DSnapResult) => {
     if (currentTool === "point" || currentTool === "select") {
       if (snap.type === "point") {
@@ -842,6 +1327,64 @@ export default function PlaneCanvasViewport({
 
       const pointId = resolvePointInput(snap);
       handlePerpendicularTarget({ kind: "point", pointId }, snap.position);
+      return;
+    }
+
+    if (currentTool === "length") {
+      if (!lengthFirstPointId) {
+        const pointId = resolvePointInput(snap);
+
+        setLengthFirstPointId(pointId);
+        if (snap.type === "point") {
+          selectEntity(pointId);
+        }
+        onStatus("请选择第二个点。");
+        return;
+      }
+
+      createLengthMeasurementForPoints(lengthFirstPointId, snap);
+      return;
+    }
+
+    if (currentTool === "angle") {
+      if (!angleFirstTarget) {
+        const pointId = resolvePointInput(snap);
+
+        setAngleFirstTarget({ kind: "point", pointId });
+        if (snap.type === "point") {
+          selectEntity(pointId);
+        }
+        onStatus("请选择顶点。");
+        return;
+      }
+
+      if (angleFirstTarget.kind !== "point") {
+        onStatus("请选择第二条线段。");
+        return;
+      }
+
+      if (!angleVertexPointId) {
+        const vertexPointId = resolvePointInput(snap);
+
+        if (vertexPointId === angleFirstTarget.pointId) {
+          onStatus("角度退化，无法测量。");
+          onToast?.("角度退化，无法测量。");
+          return;
+        }
+
+        setAngleVertexPointId(vertexPointId);
+        if (snap.type === "point") {
+          selectEntity(vertexPointId);
+        }
+        onStatus("请选择第三个点。");
+        return;
+      }
+
+      createAngleMeasurementForPoints(
+        angleFirstTarget.pointId,
+        angleVertexPointId,
+        snap,
+      );
     }
   };
 
@@ -851,7 +1394,9 @@ export default function PlaneCanvasViewport({
       currentTool === "segment" ||
       currentTool === "circle" ||
       currentTool === "midpoint" ||
-      currentTool === "perpendicular"
+      currentTool === "perpendicular" ||
+      currentTool === "length" ||
+      currentTool === "angle"
     ) {
       applyPointInput(snap);
       return;
@@ -869,7 +1414,7 @@ export default function PlaneCanvasViewport({
       return;
     }
 
-    if (snap.type === "segment" || snap.type === "circle") {
+    if (snap.type === "segment" || snap.type === "circle" || snap.type === "extension") {
       selectEntity(snap.entityId);
       return;
     }
@@ -1034,17 +1579,21 @@ export default function PlaneCanvasViewport({
         return;
       }
 
-      setDocument({
-        ...document,
-        entities: {
-          ...document.entities,
-          [interaction.pointId]: {
-            ...point,
-            position: snap.position,
-            updatedAt: new Date().toISOString(),
+      setDocument(
+        {
+          ...document,
+          entities: {
+            ...document.entities,
+            [interaction.pointId]: {
+              ...point,
+              position: snap.position,
+              updatedAt: new Date().toISOString(),
+            },
           },
         },
-      });
+        true,
+        { history: "silent" },
+      );
     }
   };
 
@@ -1095,6 +1644,116 @@ export default function PlaneCanvasViewport({
       return;
     }
 
+    if (currentTool === "extend") {
+      if (pick?.kind === "segment") {
+        createOrShowExtensionForSegment(pick.segmentId);
+        return;
+      }
+
+      if (pick?.kind === "extension") {
+        selectEntity(pick.extensionId);
+        onStatus("该对象已经是延长部分。");
+        return;
+      }
+
+      startPendingPanOrClick(event);
+      return;
+    }
+
+    if (currentTool === "length") {
+      if (pick?.kind === "point") {
+        const pickedPoint = document.entities[pick.pointId];
+
+        applyPointInput({
+          type: "point",
+          position:
+            pickedPoint?.type === "plane2d-point" ? pickedPoint.position : snap.position,
+          entityId: pick.pointId,
+        });
+        return;
+      }
+
+      if (pick?.kind === "segment") {
+        if (lengthFirstPointId) {
+          applyPointInput({
+            type: "segment",
+            position: pick.closestWorld,
+            entityId: pick.segmentId,
+          });
+        } else {
+          createLengthMeasurementForSegment(pick.segmentId);
+        }
+        return;
+      }
+
+      if (pick?.kind === "extension") {
+        applyPointInput({
+          type: "extension",
+          position: pick.closestWorld,
+          entityId: pick.extensionId,
+        });
+        return;
+      }
+
+      startPendingPanOrClick(event);
+      return;
+    }
+
+    if (currentTool === "angle") {
+      if (!angleFirstTarget && pick?.kind === "segment") {
+        setAngleFirstTarget({ kind: "segment", segmentId: pick.segmentId });
+        selectEntity(pick.segmentId);
+        onStatus("请选择第二条线段。");
+        return;
+      }
+
+      if (angleFirstTarget?.kind === "segment") {
+        if (pick?.kind === "segment") {
+          createAngleMeasurementForSegments(
+            angleFirstTarget.segmentId,
+            pick.segmentId,
+          );
+          return;
+        }
+
+        startPendingPanOrClick(event);
+        return;
+      }
+
+      if (pick?.kind === "point") {
+        const pickedPoint = document.entities[pick.pointId];
+
+        applyPointInput({
+          type: "point",
+          position:
+            pickedPoint?.type === "plane2d-point" ? pickedPoint.position : snap.position,
+          entityId: pick.pointId,
+        });
+        return;
+      }
+
+      if (pick?.kind === "segment") {
+        applyPointInput({
+          type: "segment",
+          position: pick.closestWorld,
+          entityId: pick.segmentId,
+        });
+        return;
+      }
+
+      if (pick?.kind === "extension") {
+        applyPointInput({
+          type: "extension",
+          position: pick.closestWorld,
+          entityId: pick.extensionId,
+        });
+        return;
+      }
+
+      startPendingPanOrClick(event);
+      return;
+    }
+
     if (currentTool !== "select") {
       if (pick?.kind === "point") {
         const pickedPoint = document.entities[pick.pointId];
@@ -1110,6 +1769,15 @@ export default function PlaneCanvasViewport({
 
       if (pick?.kind === "segment") {
         applyPointInput({ type: "segment", position: pick.closestWorld, entityId: pick.segmentId });
+        return;
+      }
+
+      if (pick?.kind === "extension") {
+        applyPointInput({
+          type: "extension",
+          position: pick.closestWorld,
+          entityId: pick.extensionId,
+        });
         return;
       }
 
@@ -1130,6 +1798,7 @@ export default function PlaneCanvasViewport({
       selectEntity(pick.pointId);
 
       if (point?.type === "plane2d-point" && point.pointKind !== "constructed") {
+        dragStartDocumentRef.current = document;
         setInteraction({ kind: "dragPoint", pointerId: event.pointerId, pointId: point.id });
         event.currentTarget.setPointerCapture(event.pointerId);
       } else if (point?.type === "plane2d-point") {
@@ -1149,6 +1818,16 @@ export default function PlaneCanvasViewport({
       return;
     }
 
+    if (pick?.kind === "extension") {
+      if (event.ctrlKey) {
+        onStatus("连续命名仅支持点。");
+        return;
+      }
+
+      selectEntity(pick.extensionId);
+      return;
+    }
+
     if (pick?.kind === "circle") {
       if (event.ctrlKey) {
         onStatus("连续命名仅支持点。");
@@ -1156,6 +1835,16 @@ export default function PlaneCanvasViewport({
       }
 
       selectEntity(pick.circleId);
+      return;
+    }
+
+    if (pick?.kind === "measurement") {
+      if (event.ctrlKey) {
+        onStatus("连续命名仅支持点。");
+        return;
+      }
+
+      selectEntity(pick.measurementId);
       return;
     }
 
@@ -1189,6 +1878,19 @@ export default function PlaneCanvasViewport({
       releasePointerCapture(event);
       if (interaction.kind === "pan") {
         onStatus(getBaseToolHint(currentTool));
+      } else if (interaction.kind === "dragPoint") {
+        const before = dragStartDocumentRef.current;
+        const after = latestDocumentRef.current;
+
+        if (before) {
+          onChange(after, true, {
+            history: "commit",
+            label: "移动二维点",
+            before,
+          });
+        }
+
+        dragStartDocumentRef.current = null;
       }
     }
   };
@@ -1231,6 +1933,9 @@ export default function PlaneCanvasViewport({
     setMidpointFirstPointId(null);
     setPerpendicularFirstTarget(null);
     setPerpendicularDirectionPick(null);
+    setLengthFirstPointId(null);
+    setAngleFirstTarget(null);
+    setAngleVertexPointId(null);
     setInteraction({ kind: "idle" });
     onStatus(getBaseToolHint(currentTool));
   };
@@ -1308,6 +2013,22 @@ export default function PlaneCanvasViewport({
       return "请选择点，也可按 Ctrl+K 输入坐标建点。";
     }
 
+    if (currentTool === "length" && lengthFirstPointId) {
+      return "请选择第二个点。";
+    }
+
+    if (currentTool === "angle" && angleFirstTarget?.kind === "segment") {
+      return "请选择第二条线段。";
+    }
+
+    if (currentTool === "angle" && angleFirstTarget?.kind === "point" && !angleVertexPointId) {
+      return "请选择顶点，也可按 Ctrl+K 输入坐标建点。";
+    }
+
+    if (currentTool === "angle" && angleFirstTarget?.kind === "point" && angleVertexPointId) {
+      return "请选择第三个点，也可按 Ctrl+K 输入坐标建点。";
+    }
+
     return getBaseToolHint(currentTool);
   };
 
@@ -1356,18 +2077,57 @@ export default function PlaneCanvasViewport({
   const midpointFirstPosition = midpointFirstPointId
     ? getPlane2DPointPosition(document, midpointFirstPointId)
     : null;
+  const lengthFirstPosition = lengthFirstPointId
+    ? getPlane2DPointPosition(document, lengthFirstPointId)
+    : null;
+  const angleFirstPointPosition =
+    angleFirstTarget?.kind === "point"
+      ? getPlane2DPointPosition(document, angleFirstTarget.pointId)
+      : null;
+  const angleVertexPosition = angleVertexPointId
+    ? getPlane2DPointPosition(document, angleVertexPointId)
+    : null;
   const circlePreviewRadius =
     circleCenterPosition && previewPosition
       ? distanceBetweenVec2(circleCenterPosition, previewPosition)
       : null;
   const perpendicularPreview = getPerpendicularLivePreview(previewPosition);
+  const anglePreviewValue =
+    angleFirstPointPosition && angleVertexPosition && previewPosition
+      ? (() => {
+          const first = {
+            x: angleFirstPointPosition.x - angleVertexPosition.x,
+            y: angleFirstPointPosition.y - angleVertexPosition.y,
+          };
+          const second = {
+            x: previewPosition.x - angleVertexPosition.x,
+            y: previewPosition.y - angleVertexPosition.y,
+          };
+          const firstLength = Math.hypot(first.x, first.y);
+          const secondLength = Math.hypot(second.x, second.y);
+
+          if (firstLength < POINT_EPSILON || secondLength < POINT_EPSILON) {
+            return null;
+          }
+
+          const cosine = Math.min(
+            1,
+            Math.max(-1, (first.x * second.x + first.y * second.y) / (firstLength * secondLength)),
+          );
+
+          return (Math.acos(cosine) * 180) / Math.PI;
+        })()
+      : null;
   const formatVec2 = (position: Vec2) => `${position.x.toFixed(2)}, ${position.y.toFixed(2)}`;
   const svgModeClass =
     interaction.kind === "pan"
       ? "panning"
       : hoverTarget?.kind === "point"
         ? "hover-point"
-        : hoverTarget?.kind === "segment" || hoverTarget?.kind === "circle"
+        : hoverTarget?.kind === "segment" ||
+            hoverTarget?.kind === "extension" ||
+            hoverTarget?.kind === "circle" ||
+            hoverTarget?.kind === "measurement"
           ? "hover-segment"
           : "can-pan";
 
@@ -1375,25 +2135,46 @@ export default function PlaneCanvasViewport({
     <section className="plane-canvas-viewport" aria-label="平面画布">
       <aside className="plane2d-toolbar" aria-label="平面画布工具栏">
         <div className="plane2d-toolbar-title">平面工具</div>
-        {(["select", "point", "segment", "circle", "midpoint", "perpendicular"] as const).map((tool) => (
-          <button
-            className={currentTool === tool ? "tool-button active" : "tool-button"}
-            key={tool}
-            onClick={() => {
-              onToolChange(tool);
-              onPendingSegmentPointChange(null);
-              setCircleCenterPointId(null);
-              setMidpointFirstPointId(null);
-              setPerpendicularFirstTarget(null);
-              setPerpendicularDirectionPick(null);
-              setInteraction({ kind: "idle" });
-            }}
-            title={planeToolLabels[tool]}
-            type="button"
-          >
-            {planeToolLabels[tool]}
-          </button>
-        ))}
+        <div className="plane2d-toolbar-groups">
+          {planeToolGroups.map((group) => (
+            <section className="plane2d-tool-group" key={group.title}>
+              <h2>{group.title}</h2>
+              <div className="plane2d-tool-list">
+                {group.tools.map((tool) => (
+                  <button
+                    className={
+                      currentTool === tool ? "tool-button active" : "tool-button"
+                    }
+                    key={tool}
+                    onClick={() => {
+                      onToolChange(tool);
+                      onPendingSegmentPointChange(null);
+                      setCircleCenterPointId(null);
+                      setMidpointFirstPointId(null);
+                      setPerpendicularFirstTarget(null);
+                      setPerpendicularDirectionPick(null);
+                      setLengthFirstPointId(null);
+                      setAngleFirstTarget(null);
+                      setAngleVertexPointId(null);
+                      setInteraction({ kind: "idle" });
+                    }}
+                    title={planeToolLabels[tool]}
+                    type="button"
+                  >
+                    {tool === "extend" ? (
+                      <Plane2DExtendIcon />
+                    ) : (
+                      <span className="plane2d-tool-icon" aria-hidden="true">
+                        {planeToolIcons[tool]}
+                      </span>
+                    )}
+                    <span>{planeToolLabels[tool]}</span>
+                  </button>
+                ))}
+              </div>
+            </section>
+          ))}
+        </div>
       </aside>
       <svg
         className={`plane2d-svg ${svgModeClass}`}
@@ -1460,6 +2241,77 @@ export default function PlaneCanvasViewport({
               </g>
             );
           })}
+          {extensionViewportParts.map((part, index) => {
+            const extension = document.entities[part.extensionId];
+
+            if (extension?.type !== "plane2d-extension") {
+              return null;
+            }
+
+            const isSelected = selectedEntityIdSet.has(extension.id);
+            const isHovered =
+              hoverTarget?.kind === "extension" &&
+              hoverTarget.extensionId === extension.id;
+            const startScreen = worldToScreen(part.start);
+            const endScreen = worldToScreen(part.end);
+            const shouldShowLabel =
+              index ===
+                extensionViewportParts.findIndex(
+                  (candidate) => candidate.extensionId === extension.id,
+                ) &&
+              extension.showName &&
+              extension.name?.trim();
+
+            return (
+              <g key={`${extension.id}-${part.part}`}>
+                <line
+                  className={[
+                    "plane2d-extension-segment",
+                    isSelected ? "selected" : "",
+                    isHovered ? "hovered" : "",
+                  ].join(" ")}
+                  strokeWidth={isSelected || isHovered ? document.settings.lineWidthPx + 2 : document.settings.lineWidthPx}
+                  x1={startScreen.x}
+                  x2={endScreen.x}
+                  y1={startScreen.y}
+                  y2={endScreen.y}
+                />
+                {shouldShowLabel ? (
+                  <text className="plane2d-label" x={(startScreen.x + endScreen.x) / 2 + 8} y={(startScreen.y + endScreen.y) / 2 - 8}>
+                    {extension.name?.trim()}
+                  </text>
+                ) : null}
+              </g>
+            );
+          })}
+          {measurements.map((measurement) => {
+            const info = getPlane2DMeasurementInfo(document, measurement);
+
+            if (!info) {
+              return null;
+            }
+
+            const position = worldToScreen(info.position);
+            const isSelected = selectedEntityIdSet.has(measurement.id);
+            const isHovered =
+              hoverTarget?.kind === "measurement" &&
+              hoverTarget.measurementId === measurement.id;
+
+            return (
+              <text
+                className={[
+                  "plane2d-measurement-label",
+                  isSelected ? "selected" : "",
+                  isHovered ? "hovered" : "",
+                ].join(" ")}
+                key={measurement.id}
+                x={position.x + 8}
+                y={position.y - 8}
+              >
+                {info.label}
+              </text>
+            );
+          })}
           {pendingPosition && previewPosition ? (
             <line
               className="plane2d-segment preview"
@@ -1485,6 +2337,36 @@ export default function PlaneCanvasViewport({
                 cx={worldToScreen(midpointVec2(midpointFirstPosition, previewPosition)).x}
                 cy={worldToScreen(midpointVec2(midpointFirstPosition, previewPosition)).y}
                 r={document.settings.pointSizePx / 2}
+              />
+            </g>
+          ) : null}
+          {lengthFirstPosition && previewPosition ? (
+            <line
+              className="plane2d-segment preview measurement-preview"
+              strokeWidth={document.settings.lineWidthPx}
+              x1={worldToScreen(lengthFirstPosition).x}
+              x2={worldToScreen(previewPosition).x}
+              y1={worldToScreen(lengthFirstPosition).y}
+              y2={worldToScreen(previewPosition).y}
+            />
+          ) : null}
+          {angleFirstPointPosition && angleVertexPosition && previewPosition ? (
+            <g>
+              <line
+                className="plane2d-segment preview measurement-preview"
+                strokeWidth={document.settings.lineWidthPx}
+                x1={worldToScreen(angleVertexPosition).x}
+                x2={worldToScreen(angleFirstPointPosition).x}
+                y1={worldToScreen(angleVertexPosition).y}
+                y2={worldToScreen(angleFirstPointPosition).y}
+              />
+              <line
+                className="plane2d-segment preview measurement-preview"
+                strokeWidth={document.settings.lineWidthPx}
+                x1={worldToScreen(angleVertexPosition).x}
+                x2={worldToScreen(previewPosition).x}
+                y1={worldToScreen(angleVertexPosition).y}
+                y2={worldToScreen(previewPosition).y}
               />
             </g>
           ) : null}
@@ -1552,6 +2434,8 @@ export default function PlaneCanvasViewport({
         {previewPosition ? ` / 坐标 (${formatVec2(previewPosition)})` : ""}
         {circlePreviewRadius ? ` / 半径 ${circlePreviewRadius.toFixed(2)}` : ""}
         {perpendicularPreview?.kind === "direction" ? ` / 垂线长度 ${perpendicularPreview.length.toFixed(2)}` : ""}
+        {lengthFirstPosition && previewPosition ? ` / 当前长度 ${distanceBetweenVec2(lengthFirstPosition, previewPosition).toFixed(2)}` : ""}
+        {anglePreviewValue !== null ? ` / 当前角度 ${anglePreviewValue.toFixed(2)}°` : ""}
         {` / 缩放 ${Math.round(viewport.zoom * 100)}%`}
         {interaction.kind === "pan" ? " / 正在平移" : ""}
         {hoverTarget ? ` / 悬停 ${hoverTarget.kind}` : " / 悬停 none"}

@@ -9,7 +9,10 @@ export type Plane2DToolName =
   | "segment"
   | "circle"
   | "midpoint"
-  | "perpendicular";
+  | "perpendicular"
+  | "extend"
+  | "length"
+  | "angle";
 
 export type Plane2DPointConstruction =
   | {
@@ -88,10 +91,65 @@ export interface Plane2DCircleEntity {
   readonly updatedAt?: string;
 }
 
+export type Plane2DLengthMeasurementDefinition =
+  | {
+      readonly kind: "segmentLength";
+      readonly segmentId: string;
+    }
+  | {
+      readonly kind: "pointDistance";
+      readonly pointAId: string;
+      readonly pointBId: string;
+    };
+
+export type Plane2DAngleMeasurementDefinition =
+  | {
+      readonly kind: "segmentSegmentAngle";
+      readonly segmentAId: string;
+      readonly segmentBId: string;
+    }
+  | {
+      readonly kind: "threePointAngle";
+      readonly pointAId: string;
+      readonly vertexPointId: string;
+      readonly pointCId: string;
+    };
+
+export interface Plane2DMeasurementEntity {
+  readonly id: string;
+  readonly type: "plane2d-measurement";
+  readonly measurementKind: "length" | "angle";
+  readonly definition:
+    | Plane2DLengthMeasurementDefinition
+    | Plane2DAngleMeasurementDefinition;
+  readonly labelPosition?: Vec2;
+  readonly name?: string;
+  readonly nameSource?: "auto" | "manual";
+  readonly showName?: boolean;
+  readonly createdAt?: string;
+  readonly updatedAt?: string;
+}
+
+export interface Plane2DExtensionEntity {
+  readonly id: string;
+  readonly type: "plane2d-extension";
+  readonly targetSegmentId: string;
+  readonly extensionKind: "segmentExtension";
+  readonly visible: boolean;
+  readonly snapEnabled: boolean;
+  readonly name?: string;
+  readonly nameSource?: "auto" | "manual";
+  readonly showName?: boolean;
+  readonly createdAt?: string;
+  readonly updatedAt?: string;
+}
+
 export type Plane2DEntity =
   | Plane2DPointEntity
   | Plane2DSegmentEntity
-  | Plane2DCircleEntity;
+  | Plane2DCircleEntity
+  | Plane2DMeasurementEntity
+  | Plane2DExtensionEntity;
 
 export interface PlaneCanvasDocument {
   readonly id: string;
