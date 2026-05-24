@@ -123,6 +123,7 @@ import type {
   Plane2DExtensionEntity,
   Plane2DMeasurementEntity,
   Plane2DPointEntity,
+  Plane2DPolygonEntity,
   Plane2DSegmentEntity,
   Plane2DToolName,
   PlaneCanvasDocument,
@@ -134,6 +135,7 @@ import {
   deletePlane2DEntities,
   distanceBetweenVec2,
   getPlane2DMeasurementInfo,
+  getPlane2DPolygonPoints,
   normalizePlaneCanvasDocument,
   plane2DExtensionId,
   syncPlane2DIntersections,
@@ -7289,6 +7291,10 @@ function App() {
     (entity): entity is Plane2DCircleEntity =>
       entity.type === "plane2d-circle",
   );
+  const plane2DPolygons = plane2DEntities.filter(
+    (entity): entity is Plane2DPolygonEntity =>
+      entity.type === "plane2d-polygon",
+  );
   const plane2DMeasurements = plane2DEntities.filter(
     (entity): entity is Plane2DMeasurementEntity =>
       entity.type === "plane2d-measurement",
@@ -8927,6 +8933,8 @@ function App() {
                       ? "已选择线段"
                     : selectedPlane2DEntity.type === "plane2d-circle"
                       ? "已选择圆"
+                    : selectedPlane2DEntity.type === "plane2d-polygon"
+                      ? "已选择多边形"
                       : selectedPlane2DEntity.type === "plane2d-extension"
                         ? "已选择延长线"
                         : "已选择测量"
@@ -8986,10 +8994,14 @@ function App() {
                     ? "线段交点"
                     : selectedPlane2DEntity.construction?.kind === "midpoint"
                       ? "中点"
-                      : selectedPlane2DEntity.construction?.kind === "perpendicularFoot"
-                        ? "垂足"
+                        : selectedPlane2DEntity.construction?.kind === "perpendicularFoot"
+                          ? "垂足"
                         : selectedPlane2DEntity.construction?.kind === "perpendicularEndpoint"
                           ? "垂线端点"
+                          : selectedPlane2DEntity.construction?.kind === "copiedCircleRadiusPoint"
+                            ? "复制圆半径点"
+                          : selectedPlane2DEntity.construction?.kind === "regularPolygonVertex"
+                            ? "正多边形顶点"
                           : "二维点"}
                 </h3>
                 <label>
@@ -9011,6 +9023,10 @@ function App() {
                             ? "点到线段垂足"
                             : selectedPlane2DEntity.construction?.kind === "perpendicularEndpoint"
                               ? "点在线段上作垂线方向点"
+                              : selectedPlane2DEntity.construction?.kind === "copiedCircleRadiusPoint"
+                                ? "复制圆半径辅助点"
+                              : selectedPlane2DEntity.construction?.kind === "regularPolygonVertex"
+                                ? "正多边形顶点"
                               : "自由点"
                     }
                     readOnly
@@ -9022,6 +9038,26 @@ function App() {
                     来源
                     <input
                       value={`${selectedPlane2DEntity.construction.segmentAId} / ${selectedPlane2DEntity.construction.segmentBId}`}
+                      readOnly
+                    />
+                  </label>
+                ) : null}
+                {selectedPlane2DEntity.construction?.kind ===
+                "copiedCircleRadiusPoint" ? (
+                  <label>
+                    来源圆 / 圆心
+                    <input
+                      value={`${selectedPlane2DEntity.construction.sourceCircleId} / ${selectedPlane2DEntity.construction.centerPointId}`}
+                      readOnly
+                    />
+                  </label>
+                ) : null}
+                {selectedPlane2DEntity.construction?.kind ===
+                "regularPolygonVertex" ? (
+                  <label>
+                    多边形 / 序号
+                    <input
+                      value={`${selectedPlane2DEntity.construction.polygonId} / ${selectedPlane2DEntity.construction.vertexIndex + 1}`}
                       readOnly
                     />
                   </label>
@@ -9190,6 +9226,26 @@ function App() {
               <section className="property-group">
                 <h3>二维圆</h3>
                 <label>
+                  构造方式
+                  <input
+                    value={
+                      selectedPlane2DEntity.construction?.kind === "copyCircle"
+                        ? "复制圆"
+                        : "圆心和半径点"
+                    }
+                    readOnly
+                  />
+                </label>
+                {selectedPlane2DEntity.construction?.kind === "copyCircle" ? (
+                  <label>
+                    源圆
+                    <input
+                      value={selectedPlane2DEntity.construction.sourceCircleId}
+                      readOnly
+                    />
+                  </label>
+                ) : null}
+                <label>
                   圆心 / 半径点
                   <input
                     value={`${selectedPlane2DEntity.centerPointId} / ${selectedPlane2DEntity.radiusPointId}`}
@@ -9208,6 +9264,90 @@ function App() {
                         ? distanceBetweenVec2(center.position, radiusPoint.position).toFixed(2)
                         : "无效";
                     })()}
+                    readOnly
+                  />
+                </label>
+                <button
+                  className="danger-button"
+                  onClick={deleteSelectedPlane2DEntities}
+                  type="button"
+                >
+                  删除对象
+                </button>
+              </section>
+            ) : selectedPlane2DEntity?.type === "plane2d-polygon" ? (
+              <section className="property-group">
+                <h3>
+                  {selectedPlane2DEntity.polygonKind === "regular"
+                    ? `正 ${selectedPlane2DEntity.vertexPointIds.length} 边形`
+                    : "多边形"}
+                </h3>
+                <label>
+                  边数
+                  <input value={selectedPlane2DEntity.vertexPointIds.length} readOnly />
+                </label>
+                <label>
+                  构造方式
+                  <input
+                    value={
+                      selectedPlane2DEntity.polygonKind === "regular"
+                        ? "正多边形"
+                        : "自由多边形"
+                    }
+                    readOnly
+                  />
+                </label>
+                {selectedPlane2DEntity.construction?.kind === "regularPolygon" ? (
+                  <>
+                    <label>
+                      中心点 / 半径点
+                      <input
+                        value={`${selectedPlane2DEntity.construction.centerPointId} / ${selectedPlane2DEntity.construction.radiusPointId}`}
+                        readOnly
+                      />
+                    </label>
+                    <label>
+                      半径
+                      <input
+                        value={(() => {
+                          const center =
+                            planeCanvasDocument?.entities[
+                              selectedPlane2DEntity.construction.centerPointId
+                            ];
+                          const radiusPoint =
+                            planeCanvasDocument?.entities[
+                              selectedPlane2DEntity.construction.radiusPointId
+                            ];
+
+                          return center?.type === "plane2d-point" &&
+                            radiusPoint?.type === "plane2d-point"
+                            ? distanceBetweenVec2(
+                                center.position,
+                                radiusPoint.position,
+                              ).toFixed(2)
+                            : "无效";
+                        })()}
+                        readOnly
+                      />
+                    </label>
+                  </>
+                ) : null}
+                <label>
+                  顶点
+                  <input value={selectedPlane2DEntity.vertexPointIds.join(" / ")} readOnly />
+                </label>
+                <label>
+                  状态
+                  <input
+                    value={
+                      planeCanvasDocument &&
+                      getPlane2DPolygonPoints(
+                        planeCanvasDocument,
+                        selectedPlane2DEntity,
+                      )
+                        ? "有效"
+                        : "无效"
+                    }
                     readOnly
                   />
                 </label>
@@ -9311,7 +9451,7 @@ function App() {
                 <label>
                   对象
                   <input
-                    value={`点 ${plane2DPoints.length} / 线段 ${plane2DSegments.length} / 延长 ${plane2DExtensions.length} / 圆 ${plane2DCircles.length} / 测量 ${plane2DMeasurements.length}`}
+                    value={`点 ${plane2DPoints.length} / 线段 ${plane2DSegments.length} / 延长 ${plane2DExtensions.length} / 圆 ${plane2DCircles.length} / 多边形 ${plane2DPolygons.length} / 测量 ${plane2DMeasurements.length}`}
                     readOnly
                   />
                 </label>
@@ -9326,6 +9466,7 @@ function App() {
             <span>点：{plane2DPoints.length}</span>
             <span>线段：{plane2DSegments.length}</span>
             <span>延长：{plane2DExtensions.length}</span>
+            <span>多边形：{plane2DPolygons.length}</span>
             <span>测量：{plane2DMeasurements.length}</span>
           </footer>
         </>

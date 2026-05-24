@@ -1097,6 +1097,67 @@ input {
   width: 100%;
 }
 
+.plane2d-tool-with-menu {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 28px;
+  gap: 4px;
+}
+
+.plane2d-tool-with-menu .tool-button {
+  min-width: 0;
+}
+
+.plane2d-tool-menu-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  border: 1px solid #d8dde6;
+  border-radius: 6px;
+  color: #475569;
+  background: #ffffff;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.plane2d-tool-menu-toggle:hover {
+  border-color: #9db3d8;
+  color: #1d4ed8;
+  background: #eff6ff;
+}
+
+.plane2d-tool-flyout {
+  position: absolute;
+  left: calc(100% + 8px);
+  top: 0;
+  z-index: 10;
+  display: grid;
+  min-width: 104px;
+  gap: 4px;
+  padding: 6px;
+  border: 1px solid #d8dde6;
+  border-radius: 8px;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.16);
+  background: #ffffff;
+}
+
+.plane2d-tool-flyout button {
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 6px;
+  color: #1f2937;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.plane2d-tool-flyout button:hover {
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
 .plane2d-tool-icon {
   display: inline-flex;
   align-items: center;
@@ -1202,6 +1263,27 @@ input {
 }
 
 .plane2d-circle.hovered {
+  stroke: #3b82f6;
+}
+
+.plane2d-polygon {
+  fill: rgba(59, 130, 246, 0.04);
+  stroke: #111827;
+  stroke-linejoin: round;
+}
+
+.plane2d-polygon.preview {
+  fill: rgba(37, 99, 235, 0.06);
+  stroke: #6b7280;
+  stroke-dasharray: 6 5;
+  pointer-events: none;
+}
+
+.plane2d-polygon.selected {
+  stroke: #2563eb;
+}
+
+.plane2d-polygon.hovered {
   stroke: #3b82f6;
 }
 

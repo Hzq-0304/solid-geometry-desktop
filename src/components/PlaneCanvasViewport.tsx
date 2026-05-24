@@ -4,6 +4,7 @@ import type {
   Plane2DExtensionEntity,
   Plane2DMeasurementEntity,
   Plane2DPointEntity,
+  Plane2DPolygonEntity,
   Plane2DSegmentEntity,
   Plane2DToolName,
   PlaneCanvasDocument,
@@ -14,6 +15,7 @@ import {
   createPlane2DExtension,
   createPlane2DMeasurement,
   createPlane2DPoint,
+  createPlane2DPolygon,
   createPlane2DSegment,
   distanceBetweenVec2,
   getClosestPointOnSegment2D,
@@ -22,7 +24,9 @@ import {
   getPlane2DCircleGeometry,
   getPlane2DMeasurementInfo,
   getPlane2DPointPosition,
+  getPlane2DPolygonPoints,
   getPlane2DSegmentPositions,
+  getRegularPolygonVertices,
   getSignedPerpendicularSide2D,
   midpointVec2,
   plane2DMidpointId,
@@ -72,6 +76,7 @@ type Plane2DPickResult =
       readonly closestWorld: Vec2;
     }
   | { readonly kind: "circle"; readonly circleId: string; readonly distancePx: number }
+  | { readonly kind: "polygon"; readonly polygonId: string; readonly distancePx: number }
   | {
       readonly kind: "measurement";
       readonly measurementId: string;
@@ -130,6 +135,16 @@ type AngleFirstTarget =
   | { readonly kind: "point"; readonly pointId: string }
   | { readonly kind: "segment"; readonly segmentId: string };
 
+type Plane2DPolygonVariant =
+  | { readonly kind: "triangle"; readonly sides: 3 }
+  | { readonly kind: "quadrilateral"; readonly sides: 4 }
+  | { readonly kind: "polygon"; readonly sides: number };
+
+type PolygonSidesDialogState = {
+  readonly value: string;
+  readonly error: string | null;
+};
+
 const POINT_EPSILON = 1e-5;
 const WORLD_UNIT_TO_CSS_PX = 37.7952755906;
 const MIN_ZOOM = 0.2;
@@ -147,6 +162,8 @@ const planeToolLabels: Record<Plane2DToolName, string> = {
   point: "点",
   segment: "线段",
   circle: "圆",
+  copyCircle: "复制圆",
+  polygon: "多边形",
   midpoint: "中点",
   perpendicular: "垂直",
   extend: "延长",
@@ -159,6 +176,8 @@ const planeToolIcons: Record<Plane2DToolName, string> = {
   point: "•",
   segment: "╱",
   circle: "○",
+  copyCircle: "",
+  polygon: "",
   midpoint: "◉",
   perpendicular: "⊥",
   extend: "",
@@ -179,12 +198,38 @@ const Plane2DExtendIcon = () => (
   </svg>
 );
 
+const Plane2DCopyCircleIcon = () => (
+  <svg
+    aria-hidden="true"
+    className="plane2d-tool-svg-icon"
+    focusable="false"
+    viewBox="0 0 24 24"
+  >
+    <circle className="plane2d-tool-icon-solid" cx="9" cy="14" r="5" />
+    <circle className="plane2d-tool-icon-dash" cx="15" cy="9" r="5" />
+  </svg>
+);
+
+const Plane2DPolygonIcon = () => (
+  <svg
+    aria-hidden="true"
+    className="plane2d-tool-svg-icon"
+    focusable="false"
+    viewBox="0 0 24 24"
+  >
+    <polygon
+      className="plane2d-tool-icon-solid"
+      points="12 3 21 10 18 21 6 21 3 10"
+    />
+  </svg>
+);
+
 const planeToolGroups: ReadonlyArray<{
   readonly title: string;
   readonly tools: readonly Plane2DToolName[];
 }> = [
   { title: "基础", tools: ["select"] },
-  { title: "构造", tools: ["point", "segment", "circle", "midpoint", "perpendicular", "extend"] },
+  { title: "构造", tools: ["point", "segment", "circle", "copyCircle", "polygon", "midpoint", "perpendicular", "extend"] },
   { title: "测量", tools: ["length", "angle"] },
 ];
 
@@ -196,6 +241,10 @@ const getBaseToolHint = (tool: Plane2DToolName): string => {
       return "请选择线段端点，也可按 Ctrl+K 输入坐标建点。";
     case "circle":
       return "请选择圆心或半径点，也可按 Ctrl+K 输入坐标建点。";
+    case "copyCircle":
+      return "请选择要复制的圆，或点击圆心选择圆。";
+    case "polygon":
+      return "请选择顶点，或按 Ctrl+K 输入坐标点。按住 Ctrl 可创建正多边形。";
     case "midpoint":
       return "请选择两个点，也可按 Ctrl+K 输入坐标建点。";
     case "perpendicular":
@@ -215,6 +264,7 @@ const getEntityDisplayName = (
     | Plane2DPointEntity
     | Plane2DSegmentEntity
     | Plane2DCircleEntity
+    | Plane2DPolygonEntity
     | Plane2DMeasurementEntity
     | Plane2DExtensionEntity
     | undefined,
@@ -253,6 +303,17 @@ export default function PlaneCanvasViewport({
     zoom: 1,
   });
   const [circleCenterPointId, setCircleCenterPointId] = useState<string | null>(null);
+  const [copyCircleSourceId, setCopyCircleSourceId] = useState<string | null>(null);
+  const [polygonVariant, setPolygonVariant] = useState<Plane2DPolygonVariant>({
+    kind: "triangle",
+    sides: 3,
+  });
+  const [isPolygonMenuOpen, setIsPolygonMenuOpen] = useState(false);
+  const [polygonSidesDialog, setPolygonSidesDialog] =
+    useState<PolygonSidesDialogState | null>(null);
+  const [polygonVertexPointIds, setPolygonVertexPointIds] = useState<string[]>([]);
+  const [regularPolygonCenterPointId, setRegularPolygonCenterPointId] =
+    useState<string | null>(null);
   const [midpointFirstPointId, setMidpointFirstPointId] = useState<string | null>(null);
   const [perpendicularFirstTarget, setPerpendicularFirstTarget] =
     useState<PerpendicularFirstTarget | null>(null);
@@ -295,6 +356,14 @@ export default function PlaneCanvasViewport({
       ),
     [document.entities],
   );
+  const polygons = useMemo(
+    () =>
+      Object.values(document.entities).filter(
+        (entity): entity is Plane2DPolygonEntity =>
+          entity.type === "plane2d-polygon",
+      ),
+    [document.entities],
+  );
   const measurements = useMemo(
     () =>
       Object.values(document.entities).filter(
@@ -318,6 +387,11 @@ export default function PlaneCanvasViewport({
 
   useEffect(() => {
     setCircleCenterPointId(null);
+    setCopyCircleSourceId(null);
+    setIsPolygonMenuOpen(false);
+    setPolygonSidesDialog(null);
+    setPolygonVertexPointIds([]);
+    setRegularPolygonCenterPointId(null);
     setMidpointFirstPointId(null);
     setPerpendicularFirstTarget(null);
     setPerpendicularDirectionPick(null);
@@ -627,6 +701,45 @@ export default function PlaneCanvasViewport({
 
     if (circleCandidate) {
       return circleCandidate;
+    }
+
+    const polygonCandidate = polygons
+      .map((polygon) => {
+        const polygonPoints = getPlane2DPolygonPoints(document, polygon);
+
+        if (!polygonPoints || polygonPoints.length < 3) {
+          return null;
+        }
+
+        let bestDistance = Number.POSITIVE_INFINITY;
+
+        for (let index = 0; index < polygonPoints.length; index += 1) {
+          const start = worldToScreen(polygonPoints[index]);
+          const end = worldToScreen(
+            polygonPoints[(index + 1) % polygonPoints.length],
+          );
+          const closest = getClosestPointOnSegment2D(screenPosition, start, end);
+
+          bestDistance = Math.min(bestDistance, closest.distance);
+        }
+
+        return {
+          kind: "polygon" as const,
+          polygonId: polygon.id,
+          distancePx: bestDistance,
+        };
+      })
+      .filter(
+        (
+          candidate,
+        ): candidate is Extract<Plane2DPickResult, { kind: "polygon" }> =>
+          candidate !== null,
+      )
+      .filter((candidate) => candidate.distancePx <= document.settings.snapDistancePx)
+      .sort((a, b) => a.distancePx - b.distancePx)[0];
+
+    if (polygonCandidate) {
+      return polygonCandidate;
     }
 
     const measurementCandidate = measurements
@@ -1024,6 +1137,267 @@ export default function PlaneCanvasViewport({
     onStatus("已创建圆。");
   };
 
+  const createCopiedCircleWithCenter = (
+    sourceCircleId: string,
+    snap: Plane2DSnapResult,
+  ) => {
+    const sourceCircle = document.entities[sourceCircleId];
+    const sourceGeometry =
+      sourceCircle?.type === "plane2d-circle"
+        ? getPlane2DCircleGeometry(document, sourceCircle)
+        : null;
+
+    if (!sourceGeometry || sourceGeometry.radius < POINT_EPSILON) {
+      onStatus("源圆半径过小，无法复制。");
+      onToast?.("源圆半径过小，无法复制。");
+      return;
+    }
+
+    const centerPoint = snap.type === "point" ? null : createPointEntityAt(snap.position);
+    const centerPointId = snap.type === "point" ? snap.entityId : centerPoint!.id;
+    const center =
+      snap.type === "point"
+        ? getPlane2DPointPosition(document, centerPointId)
+        : centerPoint!.position;
+
+    if (!center) {
+      return;
+    }
+
+    const radiusPointId = makePlane2DId("plane2d-copy-circle-radius");
+    const radiusPoint = createPlane2DPoint(
+      radiusPointId,
+      { x: center.x + sourceGeometry.radius, y: center.y },
+      {
+        pointKind: "constructed",
+        construction: {
+          kind: "copiedCircleRadiusPoint",
+          sourceCircleId,
+          centerPointId,
+        },
+      },
+    );
+    const circle = createPlane2DCircle(
+      makePlane2DId("plane2d-copy-circle"),
+      centerPointId,
+      radiusPointId,
+      {
+        circleKind: "constructed",
+        construction: {
+          kind: "copyCircle",
+          sourceCircleId,
+          centerPointId,
+        },
+      },
+    );
+
+    setDocument({
+      ...document,
+      entities: {
+        ...document.entities,
+        ...(centerPoint ? { [centerPoint.id]: centerPoint } : {}),
+        [radiusPoint.id]: radiusPoint,
+        [circle.id]: circle,
+      },
+      selectedEntityIds: [circle.id],
+    });
+    setCopyCircleSourceId(null);
+    onStatus("已复制圆。");
+  };
+
+  const selectCopyCircleSourceFromPoint = (pointId: string) => {
+    const sourceCircles = circles.filter((circle) => circle.centerPointId === pointId);
+
+    if (sourceCircles.length === 0) {
+      onStatus("请选择圆或圆心。");
+      onToast?.("请选择圆或圆心。");
+      return;
+    }
+
+    if (sourceCircles.length > 1) {
+      onStatus("该圆心对应多个圆，请直接选择圆周。");
+      onToast?.("该圆心对应多个圆，请直接选择圆周。");
+      return;
+    }
+
+    setCopyCircleSourceId(sourceCircles[0].id);
+    selectEntity(sourceCircles[0].id);
+    onStatus("请选择新圆心，或按 Ctrl+K 输入坐标建点。");
+  };
+
+  const getPolygonArea = (vertices: readonly Vec2[]): number => {
+    let area = 0;
+
+    for (let index = 0; index < vertices.length; index += 1) {
+      const current = vertices[index];
+      const next = vertices[(index + 1) % vertices.length];
+
+      area += current.x * next.y - next.x * current.y;
+    }
+
+    return Math.abs(area) / 2;
+  };
+
+  const createFreePolygonWithVertices = (vertexPointIds: readonly string[]) => {
+    const uniqueVertexIds = [...new Set(vertexPointIds)];
+
+    if (uniqueVertexIds.length !== vertexPointIds.length) {
+      onStatus("多边形顶点不能重复。");
+      onToast?.("多边形顶点不能重复。");
+      return;
+    }
+
+    const vertices = vertexPointIds
+      .map((pointId) => getPlane2DPointPosition(document, pointId))
+      .filter((point): point is Vec2 => Boolean(point));
+
+    if (vertices.length !== vertexPointIds.length || getPolygonArea(vertices) < POINT_EPSILON) {
+      onStatus("多边形退化，无法创建。");
+      onToast?.("多边形退化，无法创建。");
+      return;
+    }
+
+    const polygon = createPlane2DPolygon(
+      makePlane2DId("plane2d-polygon"),
+      vertexPointIds,
+      { polygonKind: "free" },
+    );
+
+    setDocument({
+      ...document,
+      entities: {
+        ...document.entities,
+        [polygon.id]: polygon,
+      },
+      selectedEntityIds: [polygon.id],
+    });
+    setPolygonVertexPointIds([]);
+    setRegularPolygonCenterPointId(null);
+    onStatus(`已创建 ${vertexPointIds.length} 边形。`);
+  };
+
+  const createRegularPolygonWithRadiusPoint = (
+    centerPointId: string,
+    snap: Plane2DSnapResult,
+  ) => {
+    const center = getPlane2DPointPosition(document, centerPointId);
+    const radiusPoint = snap.type === "point" ? null : createPointEntityAt(snap.position);
+    const radiusPointId = snap.type === "point" ? snap.entityId : radiusPoint!.id;
+    const radiusPosition =
+      snap.type === "point"
+        ? getPlane2DPointPosition(document, radiusPointId)
+        : radiusPoint!.position;
+
+    if (
+      !center ||
+      !radiusPosition ||
+      centerPointId === radiusPointId ||
+      distanceBetweenVec2(center, radiusPosition) < POINT_EPSILON
+    ) {
+      onStatus("半径过小，无法创建正多边形。");
+      onToast?.("半径过小，无法创建正多边形。");
+      return;
+    }
+
+    const polygonId = makePlane2DId("plane2d-regular-polygon");
+    const constructedVertices: Plane2DPointEntity[] = [];
+    const vertexPointIds = [radiusPointId];
+
+    for (let index = 1; index < polygonVariant.sides; index += 1) {
+      const position = getRegularPolygonVertices(
+        center,
+        radiusPosition,
+        polygonVariant.sides,
+      )?.[index];
+
+      if (!position) {
+        onStatus("半径过小，无法创建正多边形。");
+        onToast?.("半径过小，无法创建正多边形。");
+        return;
+      }
+
+      const vertex = createPlane2DPoint(
+        makePlane2DId("plane2d-regular-polygon-vertex"),
+        position,
+        {
+          pointKind: "constructed",
+          construction: {
+            kind: "regularPolygonVertex",
+            polygonId,
+            centerPointId,
+            radiusPointId,
+            vertexIndex: index,
+            sides: polygonVariant.sides,
+          },
+        },
+      );
+
+      constructedVertices.push(vertex);
+      vertexPointIds.push(vertex.id);
+    }
+
+    const polygon = createPlane2DPolygon(polygonId, vertexPointIds, {
+      polygonKind: "regular",
+      construction: {
+        kind: "regularPolygon",
+        centerPointId,
+        radiusPointId,
+        sides: polygonVariant.sides,
+      },
+    });
+
+    setDocument({
+      ...document,
+      entities: {
+        ...document.entities,
+        ...(radiusPoint ? { [radiusPoint.id]: radiusPoint } : {}),
+        ...Object.fromEntries(constructedVertices.map((vertex) => [vertex.id, vertex])),
+        [polygon.id]: polygon,
+      },
+      selectedEntityIds: [polygon.id],
+    });
+    setRegularPolygonCenterPointId(null);
+    setPolygonVertexPointIds([]);
+    onStatus(`已创建正 ${polygonVariant.sides} 边形。`);
+  };
+
+  const applyPolygonPointInput = (snap: Plane2DSnapResult, ctrlKey = false) => {
+    if (regularPolygonCenterPointId) {
+      createRegularPolygonWithRadiusPoint(regularPolygonCenterPointId, snap);
+      return;
+    }
+
+    const pointId = resolvePointInput(snap);
+
+    if (ctrlKey && polygonVertexPointIds.length === 0) {
+      setRegularPolygonCenterPointId(pointId);
+      if (snap.type === "point") {
+        selectEntity(pointId);
+      }
+      onStatus(`正 ${polygonVariant.sides} 边形：请选择半径点，或按 Ctrl+K 输入坐标点。`);
+      return;
+    }
+
+    if (polygonVertexPointIds.includes(pointId)) {
+      onStatus("多边形顶点不能重复。");
+      onToast?.("多边形顶点不能重复。");
+      return;
+    }
+
+    const nextVertexPointIds = [...polygonVertexPointIds, pointId];
+
+    if (nextVertexPointIds.length >= polygonVariant.sides) {
+      createFreePolygonWithVertices(nextVertexPointIds);
+      return;
+    }
+
+    setPolygonVertexPointIds(nextVertexPointIds);
+    if (snap.type === "point") {
+      selectEntity(pointId);
+    }
+    onStatus(`请选择第 ${nextVertexPointIds.length + 1}/${polygonVariant.sides} 个顶点，或按 Ctrl+K 输入坐标点。`);
+  };
+
   const createMidpointWithInput = (pointAId: string, snap: Plane2DSnapResult) => {
     const secondPoint = snap.type === "point" ? null : createPointEntityAt(snap.position);
     const pointBId = snap.type === "point" ? snap.entityId : secondPoint!.id;
@@ -1259,7 +1633,7 @@ export default function PlaneCanvasViewport({
     onStatus("已创建角度测量。");
   };
 
-  const applyPointInput = (snap: Plane2DSnapResult) => {
+  const applyPointInput = (snap: Plane2DSnapResult, ctrlKey = false) => {
     if (currentTool === "point" || currentTool === "select") {
       if (snap.type === "point") {
         selectEntity(snap.entityId);
@@ -1300,6 +1674,22 @@ export default function PlaneCanvasViewport({
       }
 
       createCircleWithInput(circleCenterPointId, snap);
+      return;
+    }
+
+    if (currentTool === "copyCircle") {
+      if (!copyCircleSourceId) {
+        onStatus("请先选择要复制的圆。");
+        onToast?.("请先选择要复制的圆。");
+        return;
+      }
+
+      createCopiedCircleWithCenter(copyCircleSourceId, snap);
+      return;
+    }
+
+    if (currentTool === "polygon") {
+      applyPolygonPointInput(snap, ctrlKey);
       return;
     }
 
@@ -1393,12 +1783,14 @@ export default function PlaneCanvasViewport({
       currentTool === "point" ||
       currentTool === "segment" ||
       currentTool === "circle" ||
+      currentTool === "copyCircle" ||
+      currentTool === "polygon" ||
       currentTool === "midpoint" ||
       currentTool === "perpendicular" ||
       currentTool === "length" ||
       currentTool === "angle"
     ) {
-      applyPointInput(snap);
+      applyPointInput(snap, ctrlKey);
       return;
     }
 
@@ -1629,6 +2021,23 @@ export default function PlaneCanvasViewport({
       return;
     }
 
+    if (currentTool === "copyCircle" && !copyCircleSourceId) {
+      if (pick?.kind === "circle") {
+        setCopyCircleSourceId(pick.circleId);
+        selectEntity(pick.circleId);
+        onStatus("请选择新圆心，或按 Ctrl+K 输入坐标建点。");
+        return;
+      }
+
+      if (pick?.kind === "point") {
+        selectCopyCircleSourceFromPoint(pick.pointId);
+        return;
+      }
+
+      startPendingPanOrClick(event);
+      return;
+    }
+
     if (currentTool === "perpendicular") {
       if (pick?.kind === "point") {
         handlePerpendicularTarget({ kind: "point", pointId: pick.pointId }, snap.position);
@@ -1758,26 +2167,35 @@ export default function PlaneCanvasViewport({
       if (pick?.kind === "point") {
         const pickedPoint = document.entities[pick.pointId];
 
-        applyPointInput({
-          type: "point",
-          position:
-            pickedPoint?.type === "plane2d-point" ? pickedPoint.position : snap.position,
-          entityId: pick.pointId,
-        });
+        applyPointInput(
+          {
+            type: "point",
+            position:
+              pickedPoint?.type === "plane2d-point" ? pickedPoint.position : snap.position,
+            entityId: pick.pointId,
+          },
+          event.ctrlKey,
+        );
         return;
       }
 
       if (pick?.kind === "segment") {
-        applyPointInput({ type: "segment", position: pick.closestWorld, entityId: pick.segmentId });
+        applyPointInput(
+          { type: "segment", position: pick.closestWorld, entityId: pick.segmentId },
+          event.ctrlKey,
+        );
         return;
       }
 
       if (pick?.kind === "extension") {
-        applyPointInput({
-          type: "extension",
-          position: pick.closestWorld,
-          entityId: pick.extensionId,
-        });
+        applyPointInput(
+          {
+            type: "extension",
+            position: pick.closestWorld,
+            entityId: pick.extensionId,
+          },
+          event.ctrlKey,
+        );
         return;
       }
 
@@ -1835,6 +2253,16 @@ export default function PlaneCanvasViewport({
       }
 
       selectEntity(pick.circleId);
+      return;
+    }
+
+    if (pick?.kind === "polygon") {
+      if (event.ctrlKey) {
+        onStatus("连续命名仅支持点。");
+        return;
+      }
+
+      selectEntity(pick.polygonId);
       return;
     }
 
@@ -1930,6 +2358,11 @@ export default function PlaneCanvasViewport({
   const cancelPendingToolState = () => {
     onPendingSegmentPointChange(null);
     setCircleCenterPointId(null);
+    setCopyCircleSourceId(null);
+    setPolygonVertexPointIds([]);
+    setRegularPolygonCenterPointId(null);
+    setIsPolygonMenuOpen(false);
+    setPolygonSidesDialog(null);
     setMidpointFirstPointId(null);
     setPerpendicularFirstTarget(null);
     setPerpendicularDirectionPick(null);
@@ -1948,6 +2381,12 @@ export default function PlaneCanvasViewport({
     ) {
       onStatus("当前需要选择线段。");
       onToast?.("当前需要选择线段。");
+      return;
+    }
+
+    if (currentTool === "copyCircle" && !copyCircleSourceId) {
+      onStatus("请先选择要复制的圆。");
+      onToast?.("请先选择要复制的圆。");
       return;
     }
 
@@ -1999,6 +2438,18 @@ export default function PlaneCanvasViewport({
 
     if (currentTool === "circle" && circleCenterPointId) {
       return "请选择半径点，也可按 Ctrl+K 输入坐标建点。";
+    }
+
+    if (currentTool === "copyCircle" && copyCircleSourceId) {
+      return "请选择新圆心，或按 Ctrl+K 输入坐标建点。";
+    }
+
+    if (currentTool === "polygon" && regularPolygonCenterPointId) {
+      return `正 ${polygonVariant.sides} 边形：请选择半径点，或按 Ctrl+K 输入坐标点。`;
+    }
+
+    if (currentTool === "polygon" && polygonVertexPointIds.length > 0) {
+      return `请选择第 ${polygonVertexPointIds.length + 1}/${polygonVariant.sides} 个顶点，或按 Ctrl+K 输入坐标点。`;
     }
 
     if (currentTool === "midpoint" && midpointFirstPointId) {
@@ -2055,6 +2506,11 @@ export default function PlaneCanvasViewport({
       }
 
       if (event.key === "Escape") {
+        if (polygonSidesDialog) {
+          setPolygonSidesDialog(null);
+          return;
+        }
+
         if (coordinateDialog) {
           setCoordinateDialog(null);
           return;
@@ -2074,6 +2530,14 @@ export default function PlaneCanvasViewport({
   const circleCenterPosition = circleCenterPointId
     ? getPlane2DPointPosition(document, circleCenterPointId)
     : null;
+  const copyCircleSource =
+    copyCircleSourceId && document.entities[copyCircleSourceId]?.type === "plane2d-circle"
+      ? document.entities[copyCircleSourceId]
+      : null;
+  const copyCircleSourceGeometry =
+    copyCircleSource?.type === "plane2d-circle"
+      ? getPlane2DCircleGeometry(document, copyCircleSource)
+      : null;
   const midpointFirstPosition = midpointFirstPointId
     ? getPlane2DPointPosition(document, midpointFirstPointId)
     : null;
@@ -2090,6 +2554,24 @@ export default function PlaneCanvasViewport({
   const circlePreviewRadius =
     circleCenterPosition && previewPosition
       ? distanceBetweenVec2(circleCenterPosition, previewPosition)
+      : null;
+  const copyCirclePreviewRadius =
+    copyCircleSourceGeometry && copyCircleSourceGeometry.radius >= POINT_EPSILON
+      ? copyCircleSourceGeometry.radius
+      : null;
+  const polygonVertexPositions = polygonVertexPointIds
+    .map((pointId) => getPlane2DPointPosition(document, pointId))
+    .filter((point): point is Vec2 => Boolean(point));
+  const regularPolygonCenterPosition = regularPolygonCenterPointId
+    ? getPlane2DPointPosition(document, regularPolygonCenterPointId)
+    : null;
+  const regularPolygonPreviewVertices =
+    regularPolygonCenterPosition && previewPosition
+      ? getRegularPolygonVertices(
+          regularPolygonCenterPosition,
+          previewPosition,
+          polygonVariant.sides,
+        )
       : null;
   const perpendicularPreview = getPerpendicularLivePreview(previewPosition);
   const anglePreviewValue =
@@ -2127,9 +2609,52 @@ export default function PlaneCanvasViewport({
         : hoverTarget?.kind === "segment" ||
             hoverTarget?.kind === "extension" ||
             hoverTarget?.kind === "circle" ||
+            hoverTarget?.kind === "polygon" ||
             hoverTarget?.kind === "measurement"
           ? "hover-segment"
           : "can-pan";
+
+  const resetToolPendingState = () => {
+    onPendingSegmentPointChange(null);
+    setCircleCenterPointId(null);
+    setCopyCircleSourceId(null);
+    setPolygonVertexPointIds([]);
+    setRegularPolygonCenterPointId(null);
+    setMidpointFirstPointId(null);
+    setPerpendicularFirstTarget(null);
+    setPerpendicularDirectionPick(null);
+    setLengthFirstPointId(null);
+    setAngleFirstTarget(null);
+    setAngleVertexPointId(null);
+    setInteraction({ kind: "idle" });
+  };
+
+  const selectPolygonVariant = (variant: Plane2DPolygonVariant) => {
+    setPolygonVariant(variant);
+    onToolChange("polygon");
+    resetToolPendingState();
+    setIsPolygonMenuOpen(false);
+    onStatus(`请选择 ${variant.sides} 个顶点。按住 Ctrl 可创建正 ${variant.sides} 边形。`);
+  };
+
+  const confirmPolygonSidesDialog = () => {
+    if (!polygonSidesDialog) {
+      return;
+    }
+
+    const sides = Number(polygonSidesDialog.value);
+
+    if (!Number.isInteger(sides) || sides < 3 || sides > 50) {
+      setPolygonSidesDialog({
+        ...polygonSidesDialog,
+        error: "请输入不小于 3 且不大于 50 的整数。",
+      });
+      return;
+    }
+
+    setPolygonSidesDialog(null);
+    selectPolygonVariant({ kind: "polygon", sides });
+  };
 
   return (
     <section className="plane-canvas-viewport" aria-label="平面画布">
@@ -2140,37 +2665,98 @@ export default function PlaneCanvasViewport({
             <section className="plane2d-tool-group" key={group.title}>
               <h2>{group.title}</h2>
               <div className="plane2d-tool-list">
-                {group.tools.map((tool) => (
-                  <button
-                    className={
-                      currentTool === tool ? "tool-button active" : "tool-button"
-                    }
-                    key={tool}
-                    onClick={() => {
-                      onToolChange(tool);
-                      onPendingSegmentPointChange(null);
-                      setCircleCenterPointId(null);
-                      setMidpointFirstPointId(null);
-                      setPerpendicularFirstTarget(null);
-                      setPerpendicularDirectionPick(null);
-                      setLengthFirstPointId(null);
-                      setAngleFirstTarget(null);
-                      setAngleVertexPointId(null);
-                      setInteraction({ kind: "idle" });
-                    }}
-                    title={planeToolLabels[tool]}
-                    type="button"
-                  >
-                    {tool === "extend" ? (
-                      <Plane2DExtendIcon />
-                    ) : (
-                      <span className="plane2d-tool-icon" aria-hidden="true">
-                        {planeToolIcons[tool]}
-                      </span>
-                    )}
-                    <span>{planeToolLabels[tool]}</span>
-                  </button>
-                ))}
+                {group.tools.map((tool) =>
+                  tool === "polygon" ? (
+                    <div className="plane2d-tool-with-menu" key={tool}>
+                      <button
+                        className={
+                          currentTool === tool ? "tool-button active" : "tool-button"
+                        }
+                        onClick={() => selectPolygonVariant(polygonVariant)}
+                        title={planeToolLabels[tool]}
+                        type="button"
+                      >
+                        <Plane2DPolygonIcon />
+                        <span>{planeToolLabels[tool]}</span>
+                      </button>
+                      <button
+                        aria-label="展开多边形选项"
+                        className="plane2d-tool-menu-toggle"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setIsPolygonMenuOpen((isOpen) => !isOpen);
+                        }}
+                        type="button"
+                      >
+                        ›
+                      </button>
+                      {isPolygonMenuOpen ? (
+                        <div className="plane2d-tool-flyout">
+                          <button
+                            onClick={() =>
+                              selectPolygonVariant({ kind: "triangle", sides: 3 })
+                            }
+                            type="button"
+                          >
+                            三角形
+                          </button>
+                          <button
+                            onClick={() =>
+                              selectPolygonVariant({
+                                kind: "quadrilateral",
+                                sides: 4,
+                              })
+                            }
+                            type="button"
+                          >
+                            四边形
+                          </button>
+                          <button
+                            onClick={() => {
+                              setIsPolygonMenuOpen(false);
+                              setPolygonSidesDialog({
+                                value: String(
+                                  polygonVariant.kind === "polygon"
+                                    ? polygonVariant.sides
+                                    : 5,
+                                ),
+                                error: null,
+                              });
+                            }}
+                            type="button"
+                          >
+                            多边形
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <button
+                      className={
+                        currentTool === tool ? "tool-button active" : "tool-button"
+                      }
+                      key={tool}
+                      onClick={() => {
+                        onToolChange(tool);
+                        resetToolPendingState();
+                        setIsPolygonMenuOpen(false);
+                      }}
+                      title={planeToolLabels[tool]}
+                      type="button"
+                    >
+                      {tool === "extend" ? (
+                        <Plane2DExtendIcon />
+                      ) : tool === "copyCircle" ? (
+                        <Plane2DCopyCircleIcon />
+                      ) : (
+                        <span className="plane2d-tool-icon" aria-hidden="true">
+                          {planeToolIcons[tool]}
+                        </span>
+                      )}
+                      <span>{planeToolLabels[tool]}</span>
+                    </button>
+                  ),
+                )}
               </div>
             </section>
           ))}
@@ -2206,6 +2792,48 @@ export default function PlaneCanvasViewport({
                 {circle.showName && circle.name?.trim() ? (
                   <text className="plane2d-label" x={centerScreen.x + radiusScreen + 8} y={centerScreen.y - 8}>
                     {circle.name.trim()}
+                  </text>
+                ) : null}
+              </g>
+            );
+          })}
+          {polygons.map((polygon) => {
+            const polygonPoints = getPlane2DPolygonPoints(document, polygon);
+            if (!polygonPoints || polygonPoints.length < 3) return null;
+            const isSelected = selectedEntityIdSet.has(polygon.id);
+            const isHovered =
+              hoverTarget?.kind === "polygon" && hoverTarget.polygonId === polygon.id;
+            const screenPoints = polygonPoints.map((point) => worldToScreen(point));
+            const pointsAttribute = screenPoints
+              .map((point) => `${point.x},${point.y}`)
+              .join(" ");
+            const centroid = {
+              x:
+                screenPoints.reduce((sum, point) => sum + point.x, 0) /
+                screenPoints.length,
+              y:
+                screenPoints.reduce((sum, point) => sum + point.y, 0) /
+                screenPoints.length,
+            };
+
+            return (
+              <g key={polygon.id}>
+                <polygon
+                  className={[
+                    "plane2d-polygon",
+                    isSelected ? "selected" : "",
+                    isHovered ? "hovered" : "",
+                  ].join(" ")}
+                  points={pointsAttribute}
+                  strokeWidth={
+                    isSelected || isHovered
+                      ? document.settings.lineWidthPx + 2
+                      : document.settings.lineWidthPx
+                  }
+                />
+                {polygon.showName && polygon.name?.trim() ? (
+                  <text className="plane2d-label" x={centroid.x + 8} y={centroid.y - 8}>
+                    {polygon.name.trim()}
                   </text>
                 ) : null}
               </g>
@@ -2389,6 +3017,53 @@ export default function PlaneCanvasViewport({
               />
             </g>
           ) : null}
+          {copyCircleSourceId && previewPosition && copyCirclePreviewRadius ? (
+            <circle
+              className="plane2d-circle preview"
+              cx={worldToScreen(previewPosition).x}
+              cy={worldToScreen(previewPosition).y}
+              r={distanceBetweenVec2(
+                worldToScreen(previewPosition),
+                worldToScreen({
+                  x: previewPosition.x + copyCirclePreviewRadius,
+                  y: previewPosition.y,
+                }),
+              )}
+              strokeWidth={document.settings.lineWidthPx}
+            />
+          ) : null}
+          {polygonVertexPositions.length > 0 && previewPosition ? (
+            <g>
+              <polyline
+                className="plane2d-polygon preview"
+                points={[...polygonVertexPositions, previewPosition]
+                  .map((point) => worldToScreen(point))
+                  .map((point) => `${point.x},${point.y}`)
+                  .join(" ")}
+                strokeWidth={document.settings.lineWidthPx}
+              />
+              {polygonVertexPositions.length >= 2 ? (
+                <line
+                  className="plane2d-polygon preview"
+                  strokeWidth={document.settings.lineWidthPx}
+                  x1={worldToScreen(previewPosition).x}
+                  x2={worldToScreen(polygonVertexPositions[0]).x}
+                  y1={worldToScreen(previewPosition).y}
+                  y2={worldToScreen(polygonVertexPositions[0]).y}
+                />
+              ) : null}
+            </g>
+          ) : null}
+          {regularPolygonPreviewVertices ? (
+            <polygon
+              className="plane2d-polygon preview"
+              points={regularPolygonPreviewVertices
+                .map((point) => worldToScreen(point))
+                .map((point) => `${point.x},${point.y}`)
+                .join(" ")}
+              strokeWidth={document.settings.lineWidthPx}
+            />
+          ) : null}
           {perpendicularPreview ? (
             <line
               className="plane2d-segment preview"
@@ -2433,6 +3108,10 @@ export default function PlaneCanvasViewport({
         工具：{planeToolLabels[currentTool]}
         {previewPosition ? ` / 坐标 (${formatVec2(previewPosition)})` : ""}
         {circlePreviewRadius ? ` / 半径 ${circlePreviewRadius.toFixed(2)}` : ""}
+        {copyCircleSourceId && copyCirclePreviewRadius ? ` / 复制半径 ${copyCirclePreviewRadius.toFixed(2)}` : ""}
+        {currentTool === "polygon" ? ` / ${polygonVariant.sides} 边形` : ""}
+        {regularPolygonCenterPointId ? " / 正多边形半径点" : ""}
+        {polygonVertexPointIds.length > 0 ? ` / 顶点 ${polygonVertexPointIds.length}/${polygonVariant.sides}` : ""}
         {perpendicularPreview?.kind === "direction" ? ` / 垂线长度 ${perpendicularPreview.length.toFixed(2)}` : ""}
         {lengthFirstPosition && previewPosition ? ` / 当前长度 ${distanceBetweenVec2(lengthFirstPosition, previewPosition).toFixed(2)}` : ""}
         {anglePreviewValue !== null ? ` / 当前角度 ${anglePreviewValue.toFixed(2)}°` : ""}
@@ -2471,6 +3150,44 @@ export default function PlaneCanvasViewport({
               <div className="modal-actions">
                 <button onClick={() => setCoordinateDialog(null)} type="button">取消</button>
                 <button onClick={confirmCoordinateDialog} type="button">确定</button>
+              </div>
+            </div>
+          </section>
+        </div>
+      ) : null}
+      {polygonSidesDialog ? (
+        <div className="modal-backdrop" role="presentation">
+          <section aria-label="输入多边形边数" className="coordinate-point-modal" role="dialog">
+            <header className="modal-header">
+              <h2>输入多边形边数</h2>
+              <button aria-label="关闭" onClick={() => setPolygonSidesDialog(null)} type="button">
+                x
+              </button>
+            </header>
+            <p className="plane2d-dialog-hint">请输入不小于 3 的整数。</p>
+            <div className="coordinate-point-form">
+              <label className="form-field">
+                <span>边数</span>
+                <input
+                  autoFocus
+                  value={polygonSidesDialog.value}
+                  onChange={(event) =>
+                    setPolygonSidesDialog({
+                      value: event.target.value,
+                      error: null,
+                    })
+                  }
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") confirmPolygonSidesDialog();
+                  }}
+                />
+              </label>
+              {polygonSidesDialog.error ? (
+                <span className="form-error">{polygonSidesDialog.error}</span>
+              ) : null}
+              <div className="modal-actions">
+                <button onClick={() => setPolygonSidesDialog(null)} type="button">取消</button>
+                <button onClick={confirmPolygonSidesDialog} type="button">确定</button>
               </div>
             </div>
           </section>

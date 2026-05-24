@@ -8,6 +8,8 @@ export type Plane2DToolName =
   | "point"
   | "segment"
   | "circle"
+  | "copyCircle"
+  | "polygon"
   | "midpoint"
   | "perpendicular"
   | "extend"
@@ -36,6 +38,20 @@ export type Plane2DPointConstruction =
       readonly segmentId: string;
       readonly side: 1 | -1;
       readonly length: number;
+    }
+  | {
+      readonly kind: "copiedCircleRadiusPoint";
+      readonly sourceCircleId: string;
+      readonly centerPointId: string;
+    }
+  | {
+      readonly kind: "regularPolygonVertex";
+      readonly polygonId: string;
+      readonly centerPointId: string;
+      readonly radiusPointId: string;
+      readonly vertexIndex: number;
+      readonly sides: number;
+      readonly rotationOffset?: number;
     };
 
 export interface Plane2DPointEntity {
@@ -84,6 +100,33 @@ export interface Plane2DCircleEntity {
   readonly type: "plane2d-circle";
   readonly centerPointId: string;
   readonly radiusPointId: string;
+  readonly circleKind?: "free" | "constructed";
+  readonly construction?: {
+    readonly kind: "copyCircle";
+    readonly sourceCircleId: string;
+    readonly centerPointId: string;
+  };
+  readonly name?: string;
+  readonly nameSource?: "auto" | "manual";
+  readonly showName?: boolean;
+  readonly createdAt?: string;
+  readonly updatedAt?: string;
+}
+
+export type Plane2DPolygonConstruction = {
+  readonly kind: "regularPolygon";
+  readonly centerPointId: string;
+  readonly radiusPointId: string;
+  readonly sides: number;
+  readonly rotationOffset?: number;
+};
+
+export interface Plane2DPolygonEntity {
+  readonly id: string;
+  readonly type: "plane2d-polygon";
+  readonly vertexPointIds: readonly string[];
+  readonly polygonKind?: "free" | "regular";
+  readonly construction?: Plane2DPolygonConstruction;
   readonly name?: string;
   readonly nameSource?: "auto" | "manual";
   readonly showName?: boolean;
@@ -148,6 +191,7 @@ export type Plane2DEntity =
   | Plane2DPointEntity
   | Plane2DSegmentEntity
   | Plane2DCircleEntity
+  | Plane2DPolygonEntity
   | Plane2DMeasurementEntity
   | Plane2DExtensionEntity;
 

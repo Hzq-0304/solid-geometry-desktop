@@ -4,6 +4,7 @@
   Plane2DExtensionEntity,
   Plane2DMeasurementEntity,
   Plane2DPointEntity,
+  Plane2DPolygonEntity,
   Plane2DSegmentEntity,
   PlaneCanvasDocument,
   Vec2,
@@ -91,6 +92,7 @@ export const createPlane2DCircle = (
     type: "plane2d-circle",
     centerPointId,
     radiusPointId,
+    circleKind: "free",
     nameSource: "auto",
     showName: false,
     createdAt: now,
@@ -117,6 +119,26 @@ export const createPlane2DMeasurement = (
   return {
     id,
     type: "plane2d-measurement",
+    nameSource: "auto",
+    showName: false,
+    createdAt: now,
+    updatedAt: now,
+    ...options,
+  };
+};
+
+export const createPlane2DPolygon = (
+  id: string,
+  vertexPointIds: readonly string[],
+  options: Partial<Plane2DPolygonEntity> = {},
+): Plane2DPolygonEntity => {
+  const now = new Date().toISOString();
+
+  return {
+    id,
+    type: "plane2d-polygon",
+    vertexPointIds,
+    polygonKind: "free",
     nameSource: "auto",
     showName: false,
     createdAt: now,
@@ -550,6 +572,76 @@ export type Plane2DExtensionPart = {
   readonly end: Vec2;
 };
 
+export const getRegularPolygonVertexPosition = (
+  center: Vec2,
+  radiusPoint: Vec2,
+  sides: number,
+  vertexIndex: number,
+  rotationOffset = 0,
+): Vec2 | null => {
+  if (!Number.isInteger(sides) || sides < 3) {
+    return null;
+  }
+
+  const radius = distanceBetweenVec2(center, radiusPoint);
+
+  if (radius < EPSILON) {
+    return null;
+  }
+
+  const baseAngle =
+    Math.atan2(radiusPoint.y - center.y, radiusPoint.x - center.x) +
+    rotationOffset;
+  const angle = baseAngle + (vertexIndex * 2 * Math.PI) / sides;
+
+  return {
+    x: center.x + radius * Math.cos(angle),
+    y: center.y + radius * Math.sin(angle),
+  };
+};
+
+export const getRegularPolygonVertices = (
+  center: Vec2,
+  radiusPoint: Vec2,
+  sides: number,
+  rotationOffset = 0,
+): readonly Vec2[] | null => {
+  if (!Number.isInteger(sides) || sides < 3) {
+    return null;
+  }
+
+  const vertices: Vec2[] = [];
+
+  for (let index = 0; index < sides; index += 1) {
+    const vertex = getRegularPolygonVertexPosition(
+      center,
+      radiusPoint,
+      sides,
+      index,
+      rotationOffset,
+    );
+
+    if (!vertex) {
+      return null;
+    }
+
+    vertices.push(vertex);
+  }
+
+  return vertices;
+};
+
+export const getPlane2DPolygonPoints = (
+  document: PlaneCanvasDocument,
+  polygon: Plane2DPolygonEntity,
+): readonly Vec2[] | null => {
+  const points = polygon.vertexPointIds.map((pointId) =>
+    getPlane2DPointPosition(document, pointId),
+  );
+
+  return points.every((point): point is Vec2 => Boolean(point)) ? points : null;
+};
+
 export const getPlane2DExtensionParts = (
   document: PlaneCanvasDocument,
   extension: Plane2DExtensionEntity,
@@ -630,6 +722,8 @@ export const syncPlane2DConstructions = (
   const midpointRequests: Plane2DPointEntity[] = [];
   const perpendicularFootRequests: Plane2DPointEntity[] = [];
   const perpendicularEndpointRequests: Plane2DPointEntity[] = [];
+  const copiedCircleRadiusPointRequests: Plane2DPointEntity[] = [];
+  const regularPolygonVertexRequests: Plane2DPointEntity[] = [];
 
   Object.values(document.entities).forEach((entity) => {
     if (
@@ -652,6 +746,16 @@ export const syncPlane2DConstructions = (
 
       if (entity.construction?.kind === "perpendicularEndpoint") {
         perpendicularEndpointRequests.push(entity);
+        return;
+      }
+
+      if (entity.construction?.kind === "copiedCircleRadiusPoint") {
+        copiedCircleRadiusPointRequests.push(entity);
+        return;
+      }
+
+      if (entity.construction?.kind === "regularPolygonVertex") {
+        regularPolygonVertexRequests.push(entity);
         return;
       }
     }
@@ -889,6 +993,73 @@ export const syncPlane2DConstructions = (
     }
   });
 
+  copiedCircleRadiusPointRequests.forEach((point) => {
+    if (point.construction?.kind !== "copiedCircleRadiusPoint") {
+      return;
+    }
+
+    const sourceCircle = nextEntities[point.construction.sourceCircleId];
+    const sourceGeometry =
+      sourceCircle?.type === "plane2d-circle"
+        ? getPlane2DCircleGeometry({ ...document, entities: nextEntities }, sourceCircle)
+        : null;
+    const center = getPlane2DPointPosition(
+      { ...document, entities: nextEntities },
+      point.construction.centerPointId,
+    );
+
+    if (!sourceGeometry || !center) {
+      return;
+    }
+
+    nextEntities[point.id] = createPlane2DPoint(
+      point.id,
+      { x: center.x + sourceGeometry.radius, y: center.y },
+      {
+        ...preservePointMetadata(point),
+        pointKind: "constructed",
+        construction: point.construction,
+      },
+    );
+  });
+
+  regularPolygonVertexRequests.forEach((point) => {
+    if (point.construction?.kind !== "regularPolygonVertex") {
+      return;
+    }
+
+    const center = getPlane2DPointPosition(
+      { ...document, entities: nextEntities },
+      point.construction.centerPointId,
+    );
+    const radiusPoint = getPlane2DPointPosition(
+      { ...document, entities: nextEntities },
+      point.construction.radiusPointId,
+    );
+
+    if (!center || !radiusPoint) {
+      return;
+    }
+
+    const vertex = getRegularPolygonVertexPosition(
+      center,
+      radiusPoint,
+      point.construction.sides,
+      point.construction.vertexIndex,
+      point.construction.rotationOffset,
+    );
+
+    if (!vertex) {
+      return;
+    }
+
+    nextEntities[point.id] = createPlane2DPoint(point.id, vertex, {
+      ...preservePointMetadata(point),
+      pointKind: "constructed",
+      construction: point.construction,
+    });
+  });
+
   for (let i = 0; i < segmentCandidates.length; i += 1) {
     for (let j = i + 1; j < segmentCandidates.length; j += 1) {
       const segmentA = segmentCandidates[i];
@@ -924,6 +1095,13 @@ export const syncPlane2DConstructions = (
   }
 
   Object.values(nextEntities).forEach((entity) => {
+    if (
+      entity.type === "plane2d-polygon" &&
+      !getPlane2DPolygonPoints({ ...document, entities: nextEntities }, entity)
+    ) {
+      delete nextEntities[entity.id];
+    }
+
     if (
       entity.type === "plane2d-measurement" &&
       !getPlane2DMeasurementInfo({ ...document, entities: nextEntities }, entity)
@@ -993,6 +1171,37 @@ export const deletePlane2DEntities = (
         changed = true;
       }
 
+      if (
+        entity.type === "plane2d-polygon" &&
+        entity.vertexPointIds.some((pointId) => toDelete.has(pointId)) &&
+        !toDelete.has(entity.id)
+      ) {
+        toDelete.add(entity.id);
+        changed = true;
+      }
+
+      if (
+        entity.type === "plane2d-polygon" &&
+        entity.construction?.kind === "regularPolygon" &&
+        (toDelete.has(entity.construction.centerPointId) ||
+          toDelete.has(entity.construction.radiusPointId)) &&
+        !toDelete.has(entity.id)
+      ) {
+        toDelete.add(entity.id);
+        changed = true;
+      }
+
+      if (
+        entity.type === "plane2d-point" &&
+        entity.pointKind === "constructed" &&
+        entity.construction?.kind === "regularPolygonVertex" &&
+        toDelete.has(entity.construction.polygonId) &&
+        !toDelete.has(entity.id)
+      ) {
+        toDelete.add(entity.id);
+        changed = true;
+      }
+
       if (entity.type === "plane2d-measurement" && !toDelete.has(entity.id)) {
         const definition = entity.definition;
         const dependsOnDeleted =
@@ -1045,6 +1254,40 @@ export const deletePlane2DEntities = (
         entity.construction?.kind === "perpendicularEndpoint" &&
         (toDelete.has(entity.construction.pointId) ||
           toDelete.has(entity.construction.segmentId)) &&
+        !toDelete.has(entity.id)
+      ) {
+        toDelete.add(entity.id);
+        changed = true;
+      }
+
+      if (
+        entity.type === "plane2d-point" &&
+        entity.pointKind === "constructed" &&
+        entity.construction?.kind === "copiedCircleRadiusPoint" &&
+        (toDelete.has(entity.construction.sourceCircleId) ||
+          toDelete.has(entity.construction.centerPointId)) &&
+        !toDelete.has(entity.id)
+      ) {
+        toDelete.add(entity.id);
+        changed = true;
+      }
+
+      if (
+        entity.type === "plane2d-point" &&
+        entity.pointKind === "constructed" &&
+        entity.construction?.kind === "regularPolygonVertex" &&
+        (toDelete.has(entity.construction.centerPointId) ||
+          toDelete.has(entity.construction.radiusPointId)) &&
+        !toDelete.has(entity.id)
+      ) {
+        toDelete.add(entity.id);
+        changed = true;
+      }
+
+      if (
+        entity.type === "plane2d-circle" &&
+        entity.construction?.kind === "copyCircle" &&
+        toDelete.has(entity.construction.sourceCircleId) &&
         !toDelete.has(entity.id)
       ) {
         toDelete.add(entity.id);
