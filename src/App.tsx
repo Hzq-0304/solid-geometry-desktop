@@ -1,4 +1,4 @@
-import {
+﻿import {
   useEffect,
   useMemo,
   useRef,
@@ -11,6 +11,8 @@ import {
   Ruler,
 } from "lucide-react";
 import GreekLetterKeyboard from "./components/GreekLetterKeyboard";
+import PlaneCanvasViewport from "./components/PlaneCanvasViewport";
+import TopMenuBar from "./components/TopMenuBar";
 import { AddExtensionCommand } from "./core/command/AddExtensionCommand";
 import { AddIntersectionPointCommand } from "./core/command/AddIntersectionPointCommand";
 import SceneViewport from "./components/SceneViewport";
@@ -108,8 +110,34 @@ import {
 import type { Vec3 } from "./core/geometry/Vec3";
 import { exportProject } from "./core/io/exportProject";
 import { importProject } from "./core/io/importProject";
+import {
+  PROJECT_APP_NAME,
+  PROJECT_APP_VERSION,
+  PROJECT_FILE_VERSION,
+} from "./core/io/projectFile";
 import { getSnapResult } from "./core/snap/SnapSystem";
 import type { SnapResult } from "./core/snap/SnapTypes";
+import type {
+  Plane2DEntity,
+  Plane2DCircleEntity,
+  Plane2DPointEntity,
+  Plane2DSegmentEntity,
+  Plane2DToolName,
+  PlaneCanvasDocument,
+  PlaneCanvasProjectFile,
+} from "./core/plane2d/PlaneCanvasTypes";
+import {
+  createPlaneCanvasDocument,
+  deletePlane2DEntities,
+  distanceBetweenVec2,
+  normalizePlaneCanvasDocument,
+  syncPlane2DIntersections,
+} from "./core/plane2d/planeCanvasUtils";
+import {
+  findDuplicatePlane2DNames,
+  findPlane2DNameOwner,
+  normalizePlane2DName,
+} from "./core/plane2d/plane2DNameUtils";
 import { MeasureAngleTool } from "./core/tool/MeasureAngleTool";
 import { MeasureLengthTool } from "./core/tool/MeasureLengthTool";
 import { PointTool } from "./core/tool/PointTool";
@@ -121,6 +149,7 @@ import type { PointerInfo, ToolName } from "./core/tool/ToolTypes";
 import { isTauriEnvironment } from "./platform/platform";
 
 type PointCreationMode = "free" | "coordinate";
+type WorkspaceMode = "none" | "geometry3d" | "plane2d";
 type AngleMeasureMode =
   | "threePoint"
   | "lineXYPlane"
@@ -143,6 +172,49 @@ type PreselectedEntityType =
   | "extension"
   | "plane"
   | "measurement";
+
+const incrementLetters = (startLetters: string, offset: number): string => {
+  const isLowerCase = startLetters === startLetters.toLowerCase();
+  const normalized = startLetters.toUpperCase();
+  let value = 0;
+
+  for (const char of normalized) {
+    value = value * 26 + (char.charCodeAt(0) - 64);
+  }
+
+  value += offset;
+
+  let result = "";
+  while (value > 0) {
+    value -= 1;
+    result = String.fromCharCode(65 + (value % 26)) + result;
+    value = Math.floor(value / 26);
+  }
+
+  return isLowerCase ? result.toLowerCase() : result;
+};
+
+const generateSequentialNames = (startName: string, count: number): string[] => {
+  const trimmed = startName.trim();
+
+  if (!trimmed || count <= 0) {
+    return [];
+  }
+
+  const alphaNumericMatch = trimmed.match(/^([A-Za-z]+)(\d+)$/);
+  if (alphaNumericMatch) {
+    const [, prefix, numericText] = alphaNumericMatch;
+    const startNumber = Number.parseInt(numericText, 10);
+
+    return Array.from({ length: count }, (_, index) => `${prefix}${startNumber + index}`);
+  }
+
+  if (/^[A-Za-z]+$/.test(trimmed)) {
+    return Array.from({ length: count }, (_, index) => incrementLetters(trimmed, index));
+  }
+
+  return Array.from({ length: count }, (_, index) => `${trimmed}${index + 1}`);
+};
 
 interface Preselection {
   readonly entityId: EntityId;
@@ -1484,8 +1556,8 @@ const getEntityDetail = (entity: BoardEntity, document: BoardDocument): string =
         : projection.isFootOnSegment
           ? "\u5782\u8db3\u5728\u7ebf\u6bb5\u4e0a"
           : projection.t < 0
-            ? "垂足在 A 端延长线上"
-            : "垂足在 B 端延长线上";
+            ? "Foot on A-side extension"
+            : "Foot on B-side extension";
 
       return `point: ${
         point?.kind === "point" ? getPointNameById(document, point.id) : "invalid"
@@ -2020,19 +2092,19 @@ const getMeasureAngleToolStatus = (
   }
 
   if (angleMeasureMode === "lineXYPlane") {
-    return "请选择一条线段，测量其与 X-Y 平面的夹角";
+    return "Select a segment to measure its angle with the X-Y plane";
   }
 
   if (angleMeasureMode === "linePlane") {
-    return linePlaneSegmentId ? "请选择一个平面" : "请选择一条线段";
+    return linePlaneSegmentId ? "Select a plane" : "Select a segment";
   }
 
   if (angleMeasureMode === "planeXYPlane") {
-    return "请选择一个平面，测量其与 X-Y 平面的夹角";
+    return "Select a plane to measure its angle with the X-Y plane";
   }
 
   if (angleMeasureMode === "planePlane") {
-    return planePlaneFirstPlaneId ? "请选择第二个平面" : "请选择第一个平面";
+    return planePlaneFirstPlaneId ? "Select the second plane" : "Select the first plane";
   }
 
   if (selectedPointIds.length === 0) {
@@ -2051,9 +2123,17 @@ const getMeasureAngleToolStatus = (
 };
 
 function App() {
-  const [document, setDocument] = useState(() =>
-    createEmptyDocument({ name: "Untitled Board" }),
-  );
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("none");
+  const [document, setDocument] = useState<BoardDocument | null>(null);
+  const [planeCanvasDocument, setPlaneCanvasDocument] =
+    useState<PlaneCanvasDocument | null>(null);
+  const [plane2DTool, setPlane2DTool] = useState<Plane2DToolName>("select");
+  const [plane2DPendingSegmentPointId, setPlane2DPendingSegmentPointId] =
+    useState<string | null>(null);
+  const [plane2DStatusMessage, setPlane2DStatusMessage] = useState<
+    string | null
+  >(null);
+  const [plane2DBatchNameStart, setPlane2DBatchNameStart] = useState("A");
   const [currentTool, setCurrentTool] = useState<ToolName>("select");
   const [focusRequestId, setFocusRequestId] = useState(0);
   const [lastPointerInfo, setLastPointerInfo] = useState<PointerInfo | null>(
@@ -2177,7 +2257,9 @@ function App() {
   const selectToolRef = useRef(new SelectTool());
 
   if (!commandManagerRef.current) {
-    commandManagerRef.current = new CommandManager(document);
+    commandManagerRef.current = new CommandManager(
+      document ?? createEmptyDocument({ name: "Untitled Board" }),
+    );
   }
 
   const commandManager = commandManagerRef.current;
@@ -2190,7 +2272,8 @@ function App() {
     preselectionRef.current = nextPreselection;
     setPreselection(nextPreselection);
   };
-  const displayDocument = dragPreviewDocument ?? document;
+  const displayDocument =
+    dragPreviewDocument ?? document ?? commandManager.getDocument();
   const entities = Object.values(displayDocument.entities);
   const selectedEntities = displayDocument.selectedEntityIds
     .map((entityId) => displayDocument.entities[entityId])
@@ -2238,8 +2321,8 @@ function App() {
           sourceEntityType: "extension",
           label:
             singleSelectedEntity.targetType === "segment"
-              ? "手动延长到坐标边界"
-              : "手动延展到坐标边界",
+              ? "Manual extension to coordinate boundary"
+              : "Manual plane extension to coordinate boundary",
           visible: isExtensionVisible(singleSelectedEntity),
           canSnap:
             isExtensionVisible(singleSelectedEntity) &&
@@ -2754,7 +2837,74 @@ function App() {
     setCurrentFilePath(nextFilePath);
     setIsDirty(false);
     setCurrentTool("select");
+    setPlaneCanvasDocument(null);
+    setWorkspaceMode("geometry3d");
     resetTransientToolState();
+  };
+
+  const resetPlaneCanvasDocument = (
+    nextDocument: PlaneCanvasDocument,
+    nextFilePath: string | null,
+  ) => {
+    const normalizedDocument = syncPlane2DIntersections(
+      normalizePlaneCanvasDocument(nextDocument),
+    );
+
+    resetTransientToolState();
+    setPlaneCanvasDocument(normalizedDocument);
+    setCurrentFilePath(nextFilePath);
+    setIsDirty(false);
+    setPlane2DTool("select");
+    setPlane2DPendingSegmentPointId(null);
+    setPlane2DStatusMessage(null);
+    setWorkspaceMode("plane2d");
+  };
+
+  const isPlaneCanvasDocumentLike = (
+    value: unknown,
+  ): value is PlaneCanvasDocument =>
+    Boolean(
+      value &&
+        typeof value === "object" &&
+        (value as { type?: unknown }).type === "plane2d",
+    );
+
+  const tryImportPlaneCanvasDocument = (
+    jsonText: string,
+  ): PlaneCanvasDocument | null => {
+    const parsed = JSON.parse(jsonText) as unknown;
+
+    if (isPlaneCanvasDocumentLike(parsed)) {
+      return normalizePlaneCanvasDocument(parsed);
+    }
+
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      isPlaneCanvasDocumentLike(
+        (parsed as { document?: unknown }).document,
+      )
+    ) {
+      return normalizePlaneCanvasDocument(
+        (parsed as { document: PlaneCanvasDocument }).document,
+      );
+    }
+
+    return null;
+  };
+
+  const exportPlaneCanvasProject = (
+    nextDocument: PlaneCanvasDocument,
+  ): string => {
+    const projectFile: PlaneCanvasProjectFile = {
+      fileVersion: PROJECT_FILE_VERSION,
+      appName: PROJECT_APP_NAME,
+      appVersion: PROJECT_APP_VERSION,
+      savedAt: new Date().toISOString(),
+      document: syncPlane2DIntersections(nextDocument),
+    };
+
+    return JSON.stringify(projectFile, null, 2);
   };
 
   const showFileError = async (title: string, error: unknown) => {
@@ -2778,7 +2928,12 @@ function App() {
   };
 
   const getDefaultProjectFileName = () => {
-    const safeDocumentName = (document.name || "Untitled Board")
+    if (workspaceMode === "plane2d") {
+      return `${planeCanvasDocument?.name ?? "未命名平面画布"}.sgb`;
+    }
+
+    const currentDocument = commandManager.getDocument();
+    const safeDocumentName = (currentDocument.name || "Untitled Board")
       .replace(/[<>:"\/\\|?*]+/g, "-")
       .trim();
 
@@ -2792,7 +2947,10 @@ function App() {
     ensureProjectFileExtension(currentFileName || getDefaultProjectFileName());
 
   const downloadProjectInBrowser = (fileName: string) => {
-    const projectJson = exportProject(commandManager.getDocument());
+    const projectJson =
+      workspaceMode === "plane2d" && planeCanvasDocument
+        ? exportPlaneCanvasProject(planeCanvasDocument)
+        : exportProject(commandManager.getDocument());
     const blob = new Blob([projectJson], { type: "application/json" });
     const objectUrl = URL.createObjectURL(blob);
     const link = window.document.createElement("a");
@@ -2852,7 +3010,12 @@ function App() {
 
     const { writeTextFile } = await import("@tauri-apps/plugin-fs");
 
-    await writeTextFile(filePath, exportProject(commandManager.getDocument()));
+    const fileContents =
+      workspaceMode === "plane2d" && planeCanvasDocument
+        ? exportPlaneCanvasProject(planeCanvasDocument)
+        : exportProject(commandManager.getDocument());
+
+    await writeTextFile(filePath, fileContents);
     setCurrentFilePath(filePath);
     setIsDirty(false);
     setFileStatusMessage("Save succeeded");
@@ -2863,12 +3026,66 @@ function App() {
     setFileStatusMessage("New project");
   };
 
+  const newPlaneCanvas = () => {
+    resetTransientToolState();
+    setPlaneCanvasDocument(createPlaneCanvasDocument());
+    setWorkspaceMode("plane2d");
+    setCurrentFilePath(null);
+    setIsDirty(false);
+    setCurrentTool("select");
+    setFileStatusMessage("平面画布已创建");
+  };
+
+  const closeWorkspace = () => {
+    resetTransientToolState();
+    setWorkspaceMode("none");
+    setPlaneCanvasDocument(null);
+    setCurrentFilePath(null);
+    setIsDirty(false);
+    setCurrentTool("select");
+    setFileStatusMessage("Closed workspace");
+  };
+
+  const updatePlaneCanvasDocument = (
+    nextDocument: PlaneCanvasDocument,
+    dirty = true,
+  ) => {
+    setPlaneCanvasDocument(nextDocument);
+    if (dirty) {
+      setIsDirty(true);
+    }
+  };
+
+  const deleteSelectedPlane2DEntities = () => {
+    if (!planeCanvasDocument || planeCanvasDocument.selectedEntityIds.length === 0) {
+      return;
+    }
+
+    updatePlaneCanvasDocument(
+      deletePlane2DEntities(
+        planeCanvasDocument,
+        planeCanvasDocument.selectedEntityIds,
+      ),
+    );
+    setPlane2DStatusMessage("已删除二维对象");
+  };
+
   const openProject = async () => {
     try {
       if (!isTauriEnvironment()) {
         const browserFile = await readProjectInBrowser();
 
         if (!browserFile) {
+          return;
+        }
+
+        const importedPlaneCanvas = tryImportPlaneCanvasDocument(
+          browserFile.jsonText,
+        );
+
+        if (importedPlaneCanvas) {
+          resetPlaneCanvasDocument(importedPlaneCanvas, browserFile.fileName);
+          setFileStatusMessage("已打开浏览器平面画布");
           return;
         }
 
@@ -2897,6 +3114,14 @@ function App() {
       }
 
       const jsonText = await readTextFile(selectedFilePath);
+      const importedPlaneCanvas = tryImportPlaneCanvasDocument(jsonText);
+
+      if (importedPlaneCanvas) {
+        resetPlaneCanvasDocument(importedPlaneCanvas, selectedFilePath);
+        setFileStatusMessage("已打开平面画布");
+        return;
+      }
+
       const importedDocument = importProject(jsonText);
 
       resetProjectDocument(importedDocument, selectedFilePath);
@@ -2908,6 +3133,14 @@ function App() {
   };
 
   const saveProjectAs = async () => {
+    if (
+      workspaceMode === "none" ||
+      (workspaceMode === "plane2d" && !planeCanvasDocument)
+    ) {
+      setFileStatusMessage("No canvas to save");
+      return;
+    }
+
     try {
       if (!isTauriEnvironment()) {
         downloadProjectInBrowser(getDefaultProjectFileName());
@@ -2944,6 +3177,14 @@ function App() {
   };
 
   const saveProject = async () => {
+    if (
+      workspaceMode === "none" ||
+      (workspaceMode === "plane2d" && !planeCanvasDocument)
+    ) {
+      setFileStatusMessage("No canvas to save");
+      return;
+    }
+
     if (!isTauriEnvironment()) {
       downloadProjectInBrowser(getDownloadFileName());
       return;
@@ -2963,6 +3204,10 @@ function App() {
   };
 
   const deleteSelectedEntities = () => {
+    if (workspaceMode !== "geometry3d") {
+      return;
+    }
+
     const selectedEntityIds = commandManager
       .getDocument()
       .selectedEntityIds.filter((entityId) =>
@@ -4493,7 +4738,7 @@ function App() {
         return `${getCompactPointNameById(
           currentDocument,
           startPointId,
-        )}${getCompactPointNameById(currentDocument, endPointId)} 与 XY 面`;
+        )}${getCompactPointNameById(currentDocument, endPointId)} and XY plane`;
       }
     }
 
@@ -4501,10 +4746,10 @@ function App() {
       return `${getCompactPointNameById(
         currentDocument,
         targetIds[0],
-      )}${getCompactPointNameById(currentDocument, targetIds[1])} 与 XY 面`;
+      )}${getCompactPointNameById(currentDocument, targetIds[1])} and XY plane`;
     }
 
-    return "线段与 XY 面";
+    return "Segment and XY plane";
   };
 
   const addLinePlaneAngleMeasurement = (targetIds: readonly EntityId[]) => {
@@ -4533,7 +4778,7 @@ function App() {
 
     executeCommand(new AddMeasurementCommand(measurement));
     setAngleStatusMessage(
-      `已测量 ${measurement.name}夹角：${formatAngleValue(value)}`,
+      `Measured ${measurement.name}: ${formatAngleValue(value)}`,
     );
   };
 
@@ -4553,7 +4798,7 @@ function App() {
         ? getPlaneDisplayName(currentDocument, plane)
         : planeId;
 
-    return `${segmentName} 与平面 ${planeName}`;
+    return `${segmentName} and plane ${planeName}`;
   };
 
   const addSegmentPlaneAngleMeasurement = (
@@ -4598,7 +4843,7 @@ function App() {
         : firstPlaneId;
 
     if (!secondPlaneId) {
-      return `平面 ${firstName} 与 X-Y 面`;
+      return `Plane ${firstName} and X-Y plane`;
     }
 
     const secondPlane = currentDocument.entities[secondPlaneId];
@@ -4607,7 +4852,7 @@ function App() {
         ? getPlaneDisplayName(currentDocument, secondPlane)
         : secondPlaneId;
 
-    return `平面 ${firstName} 与平面 ${secondName}`;
+    return `Plane ${firstName} and plane ${secondName}`;
   };
 
   const addPlaneXYPlaneAngleMeasurement = (planeId: EntityId) => {
@@ -4615,7 +4860,7 @@ function App() {
     const value = getPlaneXYPlaneAngleByPlaneId(currentDocument, planeId);
 
     if (value === null) {
-      setAngleStatusMessage("平面无效，无法测量");
+      setAngleStatusMessage("Invalid plane; cannot measure");
       return;
     }
 
@@ -4645,7 +4890,7 @@ function App() {
     );
 
     if (value === null) {
-      setAngleStatusMessage("平面无效，无法测量");
+      setAngleStatusMessage("Invalid planes; cannot measure");
       return;
     }
 
@@ -4661,7 +4906,7 @@ function App() {
 
     executeCommand(new AddMeasurementCommand(measurement));
     setAngleStatusMessage(
-      `已测量${measurement.name}的夹角：${formatAngleValue(value)}`,
+      `Measured ${measurement.name}: ${formatAngleValue(value)}`,
     );
   };
 
@@ -4785,6 +5030,10 @@ function App() {
   };
 
   const undo = () => {
+    if (workspaceMode !== "geometry3d") {
+      return;
+    }
+
     const previousDocument = commandManager.getDocument();
     const nextDocument = commandManager.undo();
 
@@ -4796,6 +5045,10 @@ function App() {
   };
 
   const redo = () => {
+    if (workspaceMode !== "geometry3d") {
+      return;
+    }
+
     const previousDocument = commandManager.getDocument();
     const nextDocument = commandManager.redo();
 
@@ -4807,7 +5060,7 @@ function App() {
   };
 
   const updateDocumentSettings = (
-    update: Partial<typeof document.settings>,
+    update: Partial<BoardDocument["settings"]>,
   ) => {
     executeCommand(new UpdateDocumentSettingsCommand(update));
   };
@@ -5177,7 +5430,7 @@ function App() {
         (value) => Math.abs(value) > COORDINATE_POINT_LIMIT,
       )
     ) {
-      setCoordinatePointError("坐标过大，请输入 -10000 到 10000 之间的值");
+      setCoordinatePointError("Coordinates are too large; enter values between -10000 and 10000");
       return;
     }
 
@@ -5204,7 +5457,7 @@ function App() {
     setCoordinatePointError(null);
     setShowCoordinatePointModal(false);
     setCoordinatePointStatus(
-      `已创建点 ${point.name ?? point.id} (${formatCoordinate(x)}, ${formatCoordinate(
+      `Created point ${point.name ?? point.id} (${formatCoordinate(x)}, ${formatCoordinate(
         y,
       )}, ${formatCoordinate(z)})`,
     );
@@ -5227,8 +5480,10 @@ function App() {
       | "drawingPlaneSolid"
       | "showBoundaryCube",
   ) => {
+    const currentSettings = commandManager.getDocument().settings;
+
     updateDocumentSettings({
-      [settingName]: !document.settings[settingName],
+      [settingName]: !currentSettings[settingName],
     });
   };
 
@@ -5244,9 +5499,11 @@ function App() {
   };
 
   const adjustPointSnapPixelRadius = (direction: -1 | 1) => {
+    const currentSettings = commandManager.getDocument().settings;
+
     updateDocumentSettings({
       pointSnapPixelRadius: clamp(
-        document.settings.pointSnapPixelRadius +
+        currentSettings.pointSnapPixelRadius +
           direction * SNAP_PIXEL_RADIUS_STEP,
         MIN_POINT_SNAP_PIXEL_RADIUS,
         MAX_POINT_SNAP_PIXEL_RADIUS,
@@ -5255,9 +5512,11 @@ function App() {
   };
 
   const adjustSegmentSnapPixelRadius = (direction: -1 | 1) => {
+    const currentSettings = commandManager.getDocument().settings;
+
     updateDocumentSettings({
       segmentSnapPixelRadius: clamp(
-        document.settings.segmentSnapPixelRadius +
+        currentSettings.segmentSnapPixelRadius +
           direction * SNAP_PIXEL_RADIUS_STEP,
         MIN_SEGMENT_SNAP_PIXEL_RADIUS,
         MAX_SEGMENT_SNAP_PIXEL_RADIUS,
@@ -5266,9 +5525,11 @@ function App() {
   };
 
   const adjustAxisSnapPixelRadius = (direction: -1 | 1) => {
+    const currentSettings = commandManager.getDocument().settings;
+
     updateDocumentSettings({
       axisSnapPixelRadius: clamp(
-        document.settings.axisSnapPixelRadius + direction * SNAP_PIXEL_RADIUS_STEP,
+        currentSettings.axisSnapPixelRadius + direction * SNAP_PIXEL_RADIUS_STEP,
         MIN_AXIS_SNAP_PIXEL_RADIUS,
         MAX_AXIS_SNAP_PIXEL_RADIUS,
       ),
@@ -5276,9 +5537,11 @@ function App() {
   };
 
   const adjustDrawingPlaneOpacity = (direction: -1 | 1) => {
+    const currentSettings = commandManager.getDocument().settings;
+
     updateDocumentSettings({
       drawingPlaneOpacity: clamp(
-        document.settings.drawingPlaneOpacity +
+        currentSettings.drawingPlaneOpacity +
           direction * DRAWING_PLANE_OPACITY_STEP,
         MIN_DRAWING_PLANE_OPACITY,
         MAX_DRAWING_PLANE_OPACITY,
@@ -6337,7 +6600,7 @@ function App() {
       planeToolRef.current.cancel();
       setPlaneSelectedPointIds([]);
       setPlaneStatusMessage(
-        `\u5df2\u521b\u5efa\u5e73\u9762 ${getPlaneName(
+        `Created plane ${getPlaneName(
           pointAId,
           pointBId,
           pointInput.pointId,
@@ -6385,7 +6648,7 @@ function App() {
         ) {
           addLinePlaneAngleMeasurement([segmentId]);
         } else {
-          setAngleStatusMessage("请选择一条线段，测量其与 X-Y 平面的夹角");
+          setAngleStatusMessage("Select a segment to measure its angle with the X-Y plane");
         }
 
         return;
@@ -6406,9 +6669,9 @@ function App() {
             commandManager.getDocument().entities[segmentId]?.kind === "segment"
           ) {
             setLinePlaneAngleSegmentId(segmentId);
-            setAngleStatusMessage("请选择一个平面");
+            setAngleStatusMessage("Select a plane");
           } else {
-            setAngleStatusMessage("请选择一条线段");
+            setAngleStatusMessage("Select a segment");
           }
 
           return;
@@ -6426,7 +6689,7 @@ function App() {
           );
           setLinePlaneAngleSegmentId(null);
         } else {
-          setAngleStatusMessage("请选择一个平面");
+          setAngleStatusMessage("Select a plane");
         }
 
         return;
@@ -6445,7 +6708,7 @@ function App() {
         ) {
           addPlaneXYPlaneAngleMeasurement(planeId);
         } else {
-          setAngleStatusMessage("请选择一个平面，测量其与 X-Y 平面的夹角");
+          setAngleStatusMessage("Select a plane to measure its angle with the X-Y plane");
         }
 
         return;
@@ -6464,20 +6727,20 @@ function App() {
         ) {
           setAngleStatusMessage(
             planePlaneAngleFirstPlaneId
-              ? "请选择第二个平面"
-              : "请选择第一个平面",
+              ? "Select the second plane"
+              : "Select the first plane",
           );
           return;
         }
 
         if (!planePlaneAngleFirstPlaneId) {
           setPlanePlaneAngleFirstPlaneId(planeId);
-          setAngleStatusMessage("请选择第二个平面");
+          setAngleStatusMessage("Select the second plane");
           return;
         }
 
         if (planeId === planePlaneAngleFirstPlaneId) {
-          setAngleStatusMessage("请选择不同的平面");
+          setAngleStatusMessage("Select a different plane");
           return;
         }
 
@@ -6642,7 +6905,42 @@ function App() {
     };
 
     const handleKeyDown = (event: KeyboardEvent) => {
+      const isPrimaryShortcut = event.ctrlKey || event.metaKey;
+
+      if (isPrimaryShortcut && !isEditingText(event.target)) {
+        const key = event.key.toLowerCase();
+
+        if (key === "o") {
+          event.preventDefault();
+          void openProject();
+          return;
+        }
+
+        if (key === "s") {
+          event.preventDefault();
+          if (event.shiftKey) {
+            void saveProjectAs();
+          } else {
+            void saveProject();
+          }
+          return;
+        }
+
+        if (workspaceMode === "geometry3d" && key === "z") {
+          event.preventDefault();
+          undo();
+          return;
+        }
+
+        if (workspaceMode === "geometry3d" && key === "y") {
+          event.preventDefault();
+          redo();
+          return;
+        }
+      }
+
       if (
+        workspaceMode === "geometry3d" &&
         currentTool === "parallel" &&
         parallelDraft &&
         event.ctrlKey &&
@@ -6658,7 +6956,19 @@ function App() {
         (event.key === "Delete" || event.key === "Backspace") &&
         !isEditingText(event.target)
       ) {
-        if (commandManager.getDocument().selectedEntityIds.length > 0) {
+        if (
+          workspaceMode === "plane2d" &&
+          planeCanvasDocument?.selectedEntityIds.length
+        ) {
+          event.preventDefault();
+          deleteSelectedPlane2DEntities();
+          return;
+        }
+
+        if (
+          workspaceMode === "geometry3d" &&
+          commandManager.getDocument().selectedEntityIds.length > 0
+        ) {
           event.preventDefault();
           deleteSelectedEntities();
         }
@@ -6667,6 +6977,23 @@ function App() {
       }
 
       if (event.key !== "Escape") {
+        return;
+      }
+
+      if (workspaceMode === "plane2d") {
+        if (plane2DPendingSegmentPointId) {
+          setPlane2DPendingSegmentPointId(null);
+          setPlane2DStatusMessage(null);
+          return;
+        }
+
+        if (planeCanvasDocument?.selectedEntityIds.length) {
+          updatePlaneCanvasDocument(
+            { ...planeCanvasDocument, selectedEntityIds: [] },
+            false,
+          );
+        }
+
         return;
       }
 
@@ -6807,7 +7134,10 @@ function App() {
         return;
       }
 
-      if (commandManager.getDocument().selectedEntityIds.length > 0) {
+      if (
+        workspaceMode === "geometry3d" &&
+        commandManager.getDocument().selectedEntityIds.length > 0
+      ) {
         clearSelection();
       }
     };
@@ -6854,8 +7184,158 @@ function App() {
     };
   });
 
+  const plane2DEntities = planeCanvasDocument
+    ? Object.values(planeCanvasDocument.entities)
+    : [];
+  const plane2DPoints = plane2DEntities.filter(
+    (entity): entity is Plane2DPointEntity => entity.type === "plane2d-point",
+  );
+  const plane2DSegments = plane2DEntities.filter(
+    (entity): entity is Plane2DSegmentEntity =>
+      entity.type === "plane2d-segment",
+  );
+  const plane2DCircles = plane2DEntities.filter(
+    (entity): entity is Plane2DCircleEntity =>
+      entity.type === "plane2d-circle",
+  );
+  const selectedPlane2DEntity =
+    planeCanvasDocument?.selectedEntityIds[0]
+      ? planeCanvasDocument.entities[planeCanvasDocument.selectedEntityIds[0]]
+      : null;
+  const selectedPlane2DPointEntities = planeCanvasDocument
+    ? planeCanvasDocument.selectedEntityIds
+        .map((entityId) => planeCanvasDocument.entities[entityId])
+        .filter(
+          (entity): entity is Plane2DPointEntity =>
+            entity?.type === "plane2d-point",
+        )
+    : [];
+  const hasMultipleSelectedPlane2DPoints =
+    planeCanvasDocument !== null &&
+    planeCanvasDocument.selectedEntityIds.length > 1 &&
+    selectedPlane2DPointEntities.length ===
+      planeCanvasDocument.selectedEntityIds.length;
+  const updateSelectedPlane2DName = (name: string) => {
+    if (!planeCanvasDocument || !selectedPlane2DEntity) {
+      return;
+    }
+
+    const trimmedName = normalizePlane2DName(name);
+
+    if (
+      trimmedName &&
+      findPlane2DNameOwner(planeCanvasDocument, trimmedName, [
+        selectedPlane2DEntity.id,
+      ])
+    ) {
+      showToast(`名称“${trimmedName}”已被使用，请换一个名称。`);
+      setPlane2DStatusMessage(`名称“${trimmedName}”已被使用`);
+      return;
+    }
+
+    updatePlaneCanvasDocument({
+      ...planeCanvasDocument,
+      entities: {
+        ...planeCanvasDocument.entities,
+        [selectedPlane2DEntity.id]: {
+          ...selectedPlane2DEntity,
+          name: trimmedName,
+          nameSource: trimmedName ? "manual" : "auto",
+          showName: Boolean(trimmedName),
+          updatedAt: new Date().toISOString(),
+        },
+      },
+    });
+  };
+  const applyPlane2DBatchNames = () => {
+    if (!planeCanvasDocument || !hasMultipleSelectedPlane2DPoints) {
+      return;
+    }
+
+    const names = generateSequentialNames(
+      plane2DBatchNameStart,
+      selectedPlane2DPointEntities.length,
+    );
+
+    if (names.length !== selectedPlane2DPointEntities.length) {
+      showToast("请输入起始名称，例如 A 或 P1。");
+      return;
+    }
+
+    const duplicateNames = findDuplicatePlane2DNames(
+      planeCanvasDocument,
+      names,
+      selectedPlane2DPointEntities.map((point) => point.id),
+    );
+
+    if (duplicateNames.length > 0) {
+      const duplicateNameText = duplicateNames.join(", ");
+      showToast(`名称“${duplicateNameText}”已被使用，请换一个起始名称。`);
+      setPlane2DStatusMessage(`名称“${duplicateNameText}”已被使用`);
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const entities = { ...planeCanvasDocument.entities };
+
+    selectedPlane2DPointEntities.forEach((point, index) => {
+      entities[point.id] = {
+        ...point,
+        name: names[index],
+        nameSource: "manual",
+        showName: true,
+        updatedAt: now,
+      };
+    });
+
+    updatePlaneCanvasDocument({
+      ...planeCanvasDocument,
+      entities,
+    });
+    setPlane2DStatusMessage(`已连续命名 ${selectedPlane2DPointEntities.length} 个点。`);
+  };
+
   return (
-    <main className="app-shell">
+    <main className={`app-shell workspace-${workspaceMode}`}>
+      <TopMenuBar
+        activeDrawingPlane={displayDocument.settings.activeDrawingPlane}
+        canDelete={
+          workspaceMode === "geometry3d"
+            ? commandManager.getDocument().selectedEntityIds.length > 0
+            : workspaceMode === "plane2d"
+              ? Boolean(planeCanvasDocument?.selectedEntityIds.length)
+              : false
+        }
+        canRedo={workspaceMode === "geometry3d" && commandManager.canRedo()}
+        canSave={
+          workspaceMode === "geometry3d" ||
+          (workspaceMode === "plane2d" && Boolean(planeCanvasDocument))
+        }
+        canUndo={workspaceMode === "geometry3d" && commandManager.canUndo()}
+        canUse3dCommands={workspaceMode === "geometry3d"}
+        hasWorkspace={workspaceMode !== "none"}
+        onAbout={() =>
+          showToast("Solid Geometry Studio - construction workspace")
+        }
+        onCloseWorkspace={closeWorkspace}
+        onDelete={
+          workspaceMode === "plane2d"
+            ? deleteSelectedPlane2DEntities
+            : deleteSelectedEntities
+        }
+        onNew3d={newProject}
+        onNewPlane={newPlaneCanvas}
+        onOpen={() => void openProject()}
+        onRedo={redo}
+        onResetView={focusCurrentDrawingPlane}
+        onSave={() => void saveProject()}
+        onSaveAs={() => void saveProjectAs()}
+        onSetDrawingPlane={setDrawingPlane}
+        onToggleBoundaryCube={() => toggleSetting("showBoundaryCube")}
+        onUndo={undo}
+      />
+      {workspaceMode === "geometry3d" ? (
+        <>
       <aside className="toolbar" aria-label="Geometry tools">
         <div className="toolbar-brand">
           <Grid3X3 size={22} aria-hidden="true" />
@@ -6884,7 +7364,7 @@ function App() {
                   </button>
                   <button
                     aria-label={
-                      showPointToolPanel ? "收回点工具方式" : "展开点工具方式"
+                      showPointToolPanel ? "Collapse point tool mode" : "Expand point tool mode"
                     }
                     className={
                       showPointToolPanel
@@ -6895,7 +7375,7 @@ function App() {
                       event.stopPropagation();
                       openPointToolPanel();
                     }}
-                    title="点工具方式"
+                    title="Point tool mode"
                     type="button"
                   >
                     <span>{showPointToolPanel ? "<" : ">"}</span>
@@ -7204,20 +7684,20 @@ function App() {
       </aside>
 
       {showPointToolPanel ? (
-        <div className="point-tool-flyout" role="menu" aria-label="点工具方式">
+        <div className="point-tool-flyout" role="menu" aria-label="Point tool mode">
           <button
             className={pointCreationMode === "free" ? "active" : ""}
             onClick={activatePointFreeMode}
             type="button"
           >
-            自由画点
+            鑷敱鐢荤偣
           </button>
           <button
             className={pointCreationMode === "coordinate" ? "active" : ""}
             onClick={activateCoordinatePointMode}
             type="button"
           >
-            坐标画点
+            鍧愭爣鐢荤偣
           </button>
         </div>
       ) : null}
@@ -7361,11 +7841,11 @@ function App() {
               onClick={toggleLinePlaneAnglePanel}
               type="button"
             >
-              线面角
+              Line-plane angle
             </button>
             <button
               aria-label={
-                showLinePlaneAnglePanel ? "收回线面角方式" : "展开线面角方式"
+                showLinePlaneAnglePanel ? "Collapse line-plane angle mode" : "Expand line-plane angle mode"
               }
               className={showLinePlaneAnglePanel ? "active" : ""}
               onClick={toggleLinePlaneAnglePanel}
@@ -7385,11 +7865,11 @@ function App() {
               onClick={togglePlanePlaneAnglePanel}
               type="button"
             >
-              面面角
+              Plane-plane angle
             </button>
             <button
               aria-label={
-                showPlanePlaneAnglePanel ? "收回面面角方式" : "展开面面角方式"
+                showPlanePlaneAnglePanel ? "Collapse plane-plane angle mode" : "Expand plane-plane angle mode"
               }
               className={showPlanePlaneAnglePanel ? "active" : ""}
               onClick={togglePlanePlaneAnglePanel}
@@ -7405,21 +7885,21 @@ function App() {
         <div
           className="point-tool-flyout angle-line-plane-flyout"
           role="menu"
-          aria-label="线面角方式"
+          aria-label="Line-plane angle mode"
         >
           <button
             className={angleMeasureMode === "lineXYPlane" ? "active" : ""}
             onClick={activateLineXYPlaneAngleMode}
             type="button"
           >
-            与 X-Y 面夹角
+            Segment with X-Y plane
           </button>
           <button
             className={angleMeasureMode === "linePlane" ? "active" : ""}
             onClick={activateLinePlaneAngleMode}
             type="button"
           >
-            与已有平面夹角
+            Segment with existing plane
           </button>
         </div>
       ) : null}
@@ -7428,21 +7908,21 @@ function App() {
         <div
           className="point-tool-flyout angle-plane-plane-flyout"
           role="menu"
-          aria-label="面面角方式"
+          aria-label="Plane-plane angle mode"
         >
           <button
             className={angleMeasureMode === "planeXYPlane" ? "active" : ""}
             onClick={activatePlaneXYPlaneAngleMode}
             type="button"
           >
-            平面与 X-Y 面夹角
+            Plane with X-Y plane
           </button>
           <button
             className={angleMeasureMode === "planePlane" ? "active" : ""}
             onClick={activatePlanePlaneAngleMode}
             type="button"
           >
-            平面与已有平面夹角
+            Plane with existing plane
           </button>
         </div>
       ) : null}
@@ -7456,49 +7936,10 @@ function App() {
             </span>
           </div>
           <div className="viewport-actions">
-            <div className="debug-actions" aria-label="Project file commands">
-              <button onClick={newProject} type="button">
-                新建
-              </button>
-              <button onClick={() => void openProject()} type="button">
-                打开
-              </button>
-              <button onClick={() => void saveProject()} type="button">
-                保存
-              </button>
-              <button onClick={() => void saveProjectAs()} type="button">
-                另存为
-              </button>
-            </div>
-            <div className="debug-actions" aria-label="Debug geometry commands">
-              <button disabled={hasPointA} onClick={addTestPointA} type="button">
-                {"\u6dfb\u52a0\u6d4b\u8bd5\u70b9 A"}
-              </button>
-              <button disabled={hasPointB} onClick={addTestPointB} type="button">
-                {"\u6dfb\u52a0\u6d4b\u8bd5\u70b9 B"}
-              </button>
-              <button
-                disabled={!hasPointA || !hasPointB || hasSegmentAB}
-                onClick={addTestSegmentAB}
-                type="button"
-              >
-                {"\u6dfb\u52a0\u6d4b\u8bd5\u7ebf\u6bb5 AB"}
-              </button>
-              <button
-                disabled={!commandManager.canUndo()}
-                onClick={undo}
-                type="button"
-              >
-                {"\u64a4\u9500"}
-              </button>
-              <button
-                disabled={!commandManager.canRedo()}
-                onClick={redo}
-                type="button"
-              >
-                {"\u91cd\u505a"}
-              </button>
-            </div>
+            <span className="viewport-file-name">
+              {currentFileName}
+              {isDirty ? " *" : ""}
+            </span>
           </div>
         </div>
         <SceneViewport
@@ -7695,10 +8136,9 @@ function App() {
             ) : null}
             {singleSelectedEntity?.kind === "plane" ? (
               <div className="batch-naming">
-                <span>类型：平面</span>
+                <span>Type: plane</span>
                 <span>
-                  名称：
-                  {getPlaneDisplayName(displayDocument, singleSelectedEntity)}
+                  Name: {getPlaneDisplayName(displayDocument, singleSelectedEntity)}
                 </span>
                 <span>
                   由三点确定：
@@ -7706,8 +8146,8 @@ function App() {
                     .map((pointId) => getPointNameById(displayDocument, pointId))
                     .join(", ")}
                 </span>
-                <span>状态：{getPlaneStatusText(singleSelectedEntity, displayDocument)}</span>
-                <span>可见：{singleSelectedEntity.visible ? "true" : "false"}</span>
+                <span>鐘舵€侊細{getPlaneStatusText(singleSelectedEntity, displayDocument)}</span>
+                <span>Visible: {singleSelectedEntity.visible ? "true" : "false"}</span>
               </div>
             ) : null}
             {singleSelectedEntity?.kind === "perpendicularLine" ? (
@@ -7892,8 +8332,7 @@ function App() {
               <div className="batch-naming">
                 <span>类型：面面角</span>
                 <span>
-                  平面 1：
-                  {displayDocument.entities[singleSelectedEntity.targetIds[0]]
+                  平面 1：{displayDocument.entities[singleSelectedEntity.targetIds[0]]
                     ?.kind === "plane"
                     ? `平面 ${getPlaneDisplayName(
                         displayDocument,
@@ -7904,8 +8343,7 @@ function App() {
                     : singleSelectedEntity.targetIds[0] ?? "invalid"}
                 </span>
                 <span>
-                  平面 2：
-                  {displayDocument.entities[singleSelectedEntity.targetIds[1]]
+                  平面 2：{displayDocument.entities[singleSelectedEntity.targetIds[1]]
                     ?.kind === "plane"
                     ? `平面 ${getPlaneDisplayName(
                         displayDocument,
@@ -8193,11 +8631,11 @@ function App() {
             <header className="modal-header">
               <h2>按坐标创建点</h2>
               <button
-                aria-label="关闭"
+                aria-label="鍏抽棴"
                 onClick={closeCoordinatePointModal}
                 type="button"
               >
-                ×
+                脳
               </button>
             </header>
             <div className="coordinate-point-form">
@@ -8222,7 +8660,7 @@ function App() {
                 </label>
               ))}
               <label className="form-field coordinate-point-name">
-                <span>Name，可选</span>
+                <span>Name (optional)</span>
                 <input
                   value={coordinatePointInput.name}
                   onChange={(event) =>
@@ -8253,20 +8691,14 @@ function App() {
         </div>
       ) : null}
 
-      {toastMessage ? (
-        <div className="toast-message" role="status">
-          {toastMessage.text}
-        </div>
-      ) : null}
-
       <footer className="status-bar">
         <span>
           File: {currentFileName}
           {isDirty ? " *" : ""}
         </span>
         {fileStatusMessage ? <span>{fileStatusMessage}</span> : null}
-        <span>Tool: {toolLabels[currentTool]}</span>
-        <span>Plane: {displayDocument.settings.activeDrawingPlane}</span>
+        <span>工具：{toolLabels[currentTool]}</span>
+        <span>绘图平面：{displayDocument.settings.activeDrawingPlane}</span>
         <span>Snap: {displayDocument.settings.snapEnabled ? "On" : "Off"}</span>
         <span>Entities: {entities.length}</span>
         {segmentToolStatus ? <span>{segmentToolStatus}</span> : null}
@@ -8287,8 +8719,314 @@ function App() {
         <span>Target: {getSnapDescription(lastSnapResult)}</span>
         <span>Point Radius: {displayDocument.settings.pointSnapPixelRadius}px</span>
       </footer>
+        </>
+      ) : workspaceMode === "plane2d" ? (
+        <>
+          <section className="plane-workspace">
+            {planeCanvasDocument ? (
+              <PlaneCanvasViewport
+                currentTool={plane2DTool}
+                document={planeCanvasDocument}
+                onChange={updatePlaneCanvasDocument}
+                onPendingSegmentPointChange={setPlane2DPendingSegmentPointId}
+                onStatus={setPlane2DStatusMessage}
+                onToolChange={setPlane2DTool}
+                onToast={showToast}
+                pendingSegmentPointId={plane2DPendingSegmentPointId}
+              />
+            ) : null}
+          </section>
+          <aside className="properties-panel plane-properties" aria-label="属性">
+            <div className="panel-header">
+              <h2>属性</h2>
+              <span>
+                {hasMultipleSelectedPlane2DPoints
+                  ? `已选择 ${selectedPlane2DPointEntities.length} 个点`
+                  : selectedPlane2DEntity
+                  ? selectedPlane2DEntity.type === "plane2d-point"
+                    ? "已选择点"
+                    : selectedPlane2DEntity.type === "plane2d-segment"
+                      ? "已选择线段"
+                      : "已选择圆"
+                  : "平面画布"}
+              </span>
+            </div>
+            {hasMultipleSelectedPlane2DPoints ? (
+              <section className="property-group batch-naming name-editor">
+                <h3>多点命名</h3>
+                <p>已选择 {selectedPlane2DPointEntities.length} 个点。</p>
+                <label>
+                  起始名称
+                  <input
+                    value={plane2DBatchNameStart}
+                    onChange={(event) =>
+                      setPlane2DBatchNameStart(event.target.value)
+                    }
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        applyPlane2DBatchNames();
+                      }
+                    }}
+                    placeholder="A 或 P1"
+                  />
+                </label>
+                <button onClick={applyPlane2DBatchNames} type="button">
+                  连续命名
+                </button>
+                <p className="property-hint">
+                  A 会生成 A、B、C；P1 会生成 P1、P2、P3。
+                </p>
+              </section>
+            ) : selectedPlane2DEntity ? (
+              <section className="property-group name-editor">
+                <h3>命名</h3>
+                <label>
+                  名称
+                  <input
+                    value={
+                      selectedPlane2DEntity.nameSource === "manual"
+                        ? selectedPlane2DEntity.name ?? ""
+                        : ""
+                    }
+                    onChange={(event) =>
+                      updateSelectedPlane2DName(event.target.value)
+                    }
+                    placeholder="输入名称后显示"
+                  />
+                </label>
+              </section>
+            ) : null}
+            {!hasMultipleSelectedPlane2DPoints &&
+            selectedPlane2DEntity?.type === "plane2d-point" ? (
+              <section className="property-group">
+                <h3>
+                  {selectedPlane2DEntity.construction?.kind === "segmentIntersection"
+                    ? "线段交点"
+                    : selectedPlane2DEntity.construction?.kind === "midpoint"
+                      ? "中点"
+                      : selectedPlane2DEntity.construction?.kind === "perpendicularFoot"
+                        ? "垂足"
+                        : selectedPlane2DEntity.construction?.kind === "perpendicularEndpoint"
+                          ? "垂线端点"
+                          : "二维点"}
+                </h3>
+                <label>
+                  坐标
+                  <input
+                    value={`(${selectedPlane2DEntity.position.x.toFixed(2)}, ${selectedPlane2DEntity.position.y.toFixed(2)})`}
+                    readOnly
+                  />
+                </label>
+                <label>
+                  构造方式
+                  <input
+                    value={
+                      selectedPlane2DEntity.construction?.kind === "segmentIntersection"
+                        ? "线段交点"
+                        : selectedPlane2DEntity.construction?.kind === "midpoint"
+                          ? "中点"
+                          : selectedPlane2DEntity.construction?.kind === "perpendicularFoot"
+                            ? "点到线段垂足"
+                            : selectedPlane2DEntity.construction?.kind === "perpendicularEndpoint"
+                              ? "点在线段上作垂线方向点"
+                              : "自由点"
+                    }
+                    readOnly
+                  />
+                </label>
+                {selectedPlane2DEntity.construction?.kind ===
+                "segmentIntersection" ? (
+                  <label>
+                    来源
+                    <input
+                      value={`${selectedPlane2DEntity.construction.segmentAId} / ${selectedPlane2DEntity.construction.segmentBId}`}
+                      readOnly
+                    />
+                  </label>
+                ) : null}
+                <button
+                  className="danger-button"
+                  onClick={deleteSelectedPlane2DEntities}
+                  type="button"
+                >
+                  删除对象
+                </button>
+              </section>
+            ) : selectedPlane2DEntity?.type === "plane2d-segment" ? (
+              <section className="property-group">
+                <h3>
+                  {selectedPlane2DEntity.segmentKind === "extension"
+                    ? "延长线段"
+                    : "二维线段"}
+                </h3>
+                {selectedPlane2DEntity.segmentKind === "extension" ? (
+                  <label>
+                    构造方式
+                    <input
+                      value={"垂足在线段外，自动延长目标线段"}
+                      readOnly
+                    />
+                  </label>
+                ) : null}
+                {selectedPlane2DEntity.construction?.kind ===
+                "perpendicularTargetExtension" ? (
+                  <>
+                    <label>
+                      依赖点
+                      <input
+                        value={selectedPlane2DEntity.construction.pointId}
+                        readOnly
+                      />
+                    </label>
+                    <label>
+                      依赖线段 / 垂足
+                      <input
+                        value={`${selectedPlane2DEntity.construction.targetSegmentId} / ${selectedPlane2DEntity.construction.footPointId}`}
+                        readOnly
+                      />
+                    </label>
+                  </>
+                ) : null}
+                <label>
+                  端点
+                  <input
+                    value={`${selectedPlane2DEntity.startPointId} / ${selectedPlane2DEntity.endPointId}`}
+                    readOnly
+                  />
+                </label>
+                <label>
+                  长度
+                  <input
+                    value={(() => {
+                      const start = planeCanvasDocument
+                        ? planeCanvasDocument.entities[
+                            selectedPlane2DEntity.startPointId
+                          ]
+                        : null;
+                      const end = planeCanvasDocument
+                        ? planeCanvasDocument.entities[
+                            selectedPlane2DEntity.endPointId
+                          ]
+                        : null;
+
+                      return start?.type === "plane2d-point" &&
+                        end?.type === "plane2d-point"
+                        ? distanceBetweenVec2(
+                            start.position,
+                            end.position,
+                          ).toFixed(2)
+                        : "无效";
+                    })()}
+                    readOnly
+                  />
+                </label>
+                <button
+                  className="danger-button"
+                  onClick={deleteSelectedPlane2DEntities}
+                  type="button"
+                >
+                  删除对象
+                </button>
+              </section>
+            ) : selectedPlane2DEntity?.type === "plane2d-circle" ? (
+              <section className="property-group">
+                <h3>二维圆</h3>
+                <label>
+                  圆心 / 半径点
+                  <input
+                    value={`${selectedPlane2DEntity.centerPointId} / ${selectedPlane2DEntity.radiusPointId}`}
+                    readOnly
+                  />
+                </label>
+                <label>
+                  半径
+                  <input
+                    value={(() => {
+                      const center = planeCanvasDocument?.entities[selectedPlane2DEntity.centerPointId];
+                      const radiusPoint = planeCanvasDocument?.entities[selectedPlane2DEntity.radiusPointId];
+
+                      return center?.type === "plane2d-point" &&
+                        radiusPoint?.type === "plane2d-point"
+                        ? distanceBetweenVec2(center.position, radiusPoint.position).toFixed(2)
+                        : "无效";
+                    })()}
+                    readOnly
+                  />
+                </label>
+                <button
+                  className="danger-button"
+                  onClick={deleteSelectedPlane2DEntities}
+                  type="button"
+                >
+                  删除对象
+                </button>
+              </section>
+            ) : hasMultipleSelectedPlane2DPoints ? null : (
+              <section className="property-group">
+                <h3>平面画布</h3>
+                <label>
+                  名称
+                  <input
+                    value={planeCanvasDocument?.name ?? "未命名平面画布"}
+                    readOnly
+                  />
+                </label>
+                <label>
+                  类型
+                  <input value="平面画布" readOnly />
+                </label>
+                <label>
+                  工具
+                  <input value={plane2DTool} readOnly />
+                </label>
+                <label>
+                  对象
+                  <input
+                    value={`点 ${plane2DPoints.length} / 线段 ${plane2DSegments.length} / 圆 ${plane2DCircles.length}`}
+                    readOnly
+                  />
+                </label>
+              </section>
+            )}
+          </aside>
+          <footer className="status-bar">
+            <span>工作区：平面画布</span>
+            {fileStatusMessage ? <span>{fileStatusMessage}</span> : null}
+            {plane2DStatusMessage ? <span>{plane2DStatusMessage}</span> : null}
+            <span>工具：{plane2DTool}</span>
+            <span>点：{plane2DPoints.length}</span>
+            <span>线段：{plane2DSegments.length}</span>
+          </footer>
+        </>
+      ) : (
+        <section className="start-screen" aria-label="起始页">
+          <div className="start-screen-content">
+            <h1>Solid Geometry Studio</h1>
+            <p>请选择一个画布开始。</p>
+            <div className="start-screen-actions">
+              <button onClick={newProject} type="button">
+                新建三维画布
+              </button>
+              <button onClick={newPlaneCanvas} type="button">
+                新建平面画布
+              </button>
+              <button onClick={() => void openProject()} type="button">
+                打开文件
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
+
+      {toastMessage ? (
+        <div className="toast-message" role="status">
+          {toastMessage.text}
+        </div>
+      ) : null}
     </main>
   );
 }
 
 export default App;
+
+

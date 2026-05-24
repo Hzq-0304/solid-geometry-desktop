@@ -29,7 +29,7 @@ input {
 .app-shell {
   display: grid;
   grid-template-columns: 168px minmax(0, 1fr) 300px;
-  grid-template-rows: minmax(0, 1fr) 30px;
+  grid-template-rows: 32px minmax(0, 1fr) 30px;
   width: 100%;
   height: 100%;
   min-width: 920px;
@@ -38,12 +38,100 @@ input {
   background: #eef1f5;
 }
 
+.top-menu-bar {
+  position: relative;
+  z-index: 60;
+  display: flex;
+  align-items: stretch;
+  grid-column: 1 / 4;
+  grid-row: 1;
+  min-width: 0;
+  border-bottom: 1px solid #d8dde6;
+  background: #ffffff;
+}
+
+.top-menu-title {
+  display: flex;
+  align-items: center;
+  min-width: 190px;
+  padding: 0 12px;
+  color: #425066;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.top-menu-nav {
+  display: flex;
+  align-items: stretch;
+}
+
+.top-menu-item {
+  position: relative;
+  display: flex;
+}
+
+.top-menu-item > button {
+  min-width: 52px;
+  padding: 0 12px;
+  border: 0;
+  color: #263244;
+  background: transparent;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.top-menu-item > button:hover,
+.top-menu-item > button.active {
+  background: #eef2f7;
+}
+
+.top-menu-dropdown {
+  position: absolute;
+  top: 32px;
+  left: 0;
+  z-index: 70;
+  display: grid;
+  min-width: 184px;
+  padding: 6px;
+  border: 1px solid #d8dde6;
+  border-radius: 6px;
+  background: #ffffff;
+  box-shadow: 0 14px 28px rgba(15, 23, 42, 0.18);
+}
+
+.top-menu-dropdown button {
+  min-height: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 4px;
+  color: #263244;
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  text-align: left;
+}
+
+.top-menu-dropdown button:hover:not(:disabled) {
+  background: #eef2f7;
+}
+
+.top-menu-dropdown button:disabled {
+  color: #9aa5b5;
+  cursor: not-allowed;
+}
+
+.top-menu-separator {
+  height: 1px;
+  margin: 5px 2px;
+  background: #e3e7ee;
+}
+
 .toolbar {
   display: flex;
   flex-direction: column;
   align-items: stretch;
   gap: 16px;
-  grid-row: 1 / 3;
+  grid-row: 2 / 4;
   padding: 12px;
   border-right: 1px solid #d8dde6;
   background: #fbfcfe;
@@ -156,7 +244,7 @@ input {
 .point-tool-flyout {
   position: fixed;
   left: 168px;
-  top: 92px;
+  top: 124px;
   z-index: 30;
   display: grid;
   gap: 6px;
@@ -169,18 +257,18 @@ input {
 }
 
 .angle-tool-flyout {
-  top: 186px;
+  top: 218px;
 }
 
 .angle-line-plane-flyout {
   left: 308px;
-  top: 228px;
+  top: 260px;
   width: 150px;
 }
 
 .angle-plane-plane-flyout {
   left: 308px;
-  top: 264px;
+  top: 296px;
   width: 160px;
 }
 
@@ -246,27 +334,28 @@ input {
 }
 
 .plane-tool-flyout {
-  top: 134px;
+  top: 166px;
   width: 144px;
 }
 
 .perpendicular-tool-flyout {
-  top: 176px;
+  top: 208px;
   width: 144px;
 }
 
 .extend-tool-flyout {
-  top: 260px;
+  top: 292px;
   width: 156px;
 }
 
 .parallel-tool-flyout {
-  top: 302px;
+  top: 334px;
   width: 156px;
 }
 
 .viewport-panel {
   display: grid;
+  grid-row: 2;
   grid-template-rows: auto minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
@@ -319,6 +408,11 @@ input {
 .viewport-actions {
   flex: 1;
   min-width: 320px;
+}
+
+.viewport-file-name {
+  color: #536071;
+  font-size: 12px;
 }
 
 .plane-actions {
@@ -496,6 +590,7 @@ input {
 .properties-panel {
   display: flex;
   flex-direction: column;
+  grid-row: 2;
   gap: 16px;
   min-width: 0;
   min-height: 0;
@@ -856,6 +951,7 @@ input {
   align-items: center;
   gap: 18px;
   grid-column: 2 / 4;
+  grid-row: 3;
   min-width: 0;
   padding: 0 12px;
   border-top: 1px solid #d8dde6;
@@ -867,6 +963,224 @@ input {
 
 .status-bar span:last-child {
   margin-left: auto;
+}
+
+.start-screen {
+  display: grid;
+  grid-column: 1 / 4;
+  grid-row: 2 / 4;
+  place-items: center;
+  min-width: 0;
+  min-height: 0;
+  padding: 32px;
+  background: #f6f8fb;
+}
+
+.start-screen-content {
+  display: grid;
+  gap: 16px;
+  width: min(480px, 100%);
+  text-align: center;
+}
+
+.start-screen-content h1 {
+  margin: 0;
+  color: #18212f;
+  font-size: 28px;
+}
+
+.start-screen-content p {
+  margin: 0;
+  color: #647083;
+}
+
+.start-screen-actions {
+  display: grid;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.start-screen-actions button {
+  min-height: 38px;
+  border: 1px solid #cfd6e2;
+  border-radius: 7px;
+  color: #1f2937;
+  background: #ffffff;
+  cursor: pointer;
+}
+
+.start-screen-actions button:hover {
+  border-color: #9db8ed;
+  color: #1f56b3;
+  background: #f3f7ff;
+}
+
+.plane-workspace {
+  grid-column: 1 / 3;
+  grid-row: 2;
+  min-width: 0;
+  min-height: 0;
+  border-right: 1px solid #d8dde6;
+  background: #f7f8fb;
+}
+
+.plane-properties {
+  grid-column: 3;
+}
+
+.plane-canvas-viewport {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #ffffff;
+}
+
+.plane2d-toolbar {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  width: 126px;
+  padding: 10px;
+  border: 1px solid #d8dde6;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.12);
+}
+
+.plane2d-toolbar-title {
+  padding: 0 4px 4px;
+  color: #647083;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.plane2d-toolbar .tool-button {
+  width: 100%;
+}
+
+.plane2d-svg {
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  cursor: grab;
+  background: #ffffff;
+}
+
+.plane2d-svg.panning {
+  cursor: grabbing;
+}
+
+.plane2d-svg.hover-point,
+.plane2d-svg.hover-segment {
+  cursor: pointer;
+}
+
+.plane2d-segment {
+  stroke: #111827;
+  stroke-linecap: round;
+}
+
+.plane2d-segment.preview {
+  stroke: #6b7280;
+  stroke-dasharray: 6 5;
+}
+
+.plane2d-segment.extension {
+  stroke: #6b7280;
+  stroke-dasharray: 7 5;
+}
+
+.plane2d-segment.selected {
+  stroke: #2563eb;
+}
+
+.plane2d-segment.hovered {
+  stroke: #3b82f6;
+}
+
+.plane2d-circle {
+  fill: none;
+  stroke: #111827;
+}
+
+.plane2d-circle.preview {
+  stroke: #6b7280;
+  stroke-dasharray: 6 5;
+  pointer-events: none;
+}
+
+.plane2d-circle.selected {
+  stroke: #2563eb;
+}
+
+.plane2d-circle.hovered {
+  stroke: #3b82f6;
+}
+
+.plane2d-point {
+  fill: #111827;
+  stroke: #ffffff;
+  stroke-width: 1.5px;
+}
+
+.plane2d-point.constructed {
+  fill: #374151;
+}
+
+.plane2d-point.selected {
+  fill: #2563eb;
+}
+
+.plane2d-point.hovered {
+  stroke: #3b82f6;
+  stroke-width: 2px;
+}
+
+.plane2d-point.preview {
+  fill: rgba(37, 99, 235, 0.34);
+  stroke: #2563eb;
+  pointer-events: none;
+}
+
+.plane2d-label {
+  fill: #1f2937;
+  paint-order: stroke;
+  stroke: #ffffff;
+  stroke-width: 3px;
+  stroke-linejoin: round;
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.plane2d-dialog-hint {
+  margin: 0;
+  color: #647083;
+  font-size: 13px;
+}
+
+.plane2d-readout {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 2;
+  padding: 6px 9px;
+  border: 1px solid #d8dde6;
+  border-radius: 7px;
+  color: #647083;
+  background: rgba(255, 255, 255, 0.94);
+  font-size: 13px;
+}
+
+.workspace-plane2d .status-bar,
+.workspace-none .status-bar {
+  grid-column: 1 / 4;
 }
 
 .toast-message {
