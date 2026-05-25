@@ -19,11 +19,29 @@ export type Plane2DToolName =
   | "angle"
   | "calculation";
 
+export type Plane2DIntersectionEdgeRef =
+  | {
+      readonly sourceType: "segment";
+      readonly sourceEntityId: string;
+    }
+  | {
+      readonly sourceType: "extension";
+      readonly sourceEntityId: string;
+      readonly edgeIndex: number;
+    }
+  | {
+      readonly sourceType: "polygon-edge" | "regular-polygon-edge";
+      readonly sourceEntityId: string;
+      readonly edgeIndex: number;
+    };
+
 export type Plane2DPointConstruction =
   | {
       readonly kind: "segmentIntersection";
-      readonly segmentAId: string;
-      readonly segmentBId: string;
+      readonly segmentAId?: string;
+      readonly segmentBId?: string;
+      readonly edgeA?: Plane2DIntersectionEdgeRef;
+      readonly edgeB?: Plane2DIntersectionEdgeRef;
     }
   | {
       readonly kind: "midpoint";
@@ -55,6 +73,15 @@ export type Plane2DPointConstruction =
       readonly vertexIndex: number;
       readonly sides: number;
       readonly rotationOffset?: number;
+    }
+  | {
+      readonly kind: "regularPolygonVertexBySide";
+      readonly polygonId: string;
+      readonly firstPointId: string;
+      readonly secondPointId: string;
+      readonly vertexIndex: number;
+      readonly sides: number;
+      readonly side: 1 | -1;
     };
 
 export interface Plane2DPointEntity {
@@ -119,13 +146,21 @@ export interface Plane2DCircleEntity {
   readonly updatedAt?: string;
 }
 
-export type Plane2DPolygonConstruction = {
-  readonly kind: "regularPolygon";
-  readonly centerPointId: string;
-  readonly radiusPointId: string;
-  readonly sides: number;
-  readonly rotationOffset?: number;
-};
+export type Plane2DPolygonConstruction =
+  | {
+      readonly kind: "regularPolygon";
+      readonly centerPointId: string;
+      readonly radiusPointId: string;
+      readonly sides: number;
+      readonly rotationOffset?: number;
+    }
+  | {
+      readonly kind: "regularPolygonBySide";
+      readonly firstPointId: string;
+      readonly secondPointId: string;
+      readonly sides: number;
+      readonly side: 1 | -1;
+    };
 
 export interface Plane2DPolygonEntity {
   readonly id: string;

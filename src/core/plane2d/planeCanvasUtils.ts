@@ -2,6 +2,7 @@
   Plane2DCircleEntity,
   Plane2DEntity,
   Plane2DExtensionEntity,
+  Plane2DIntersectionEdgeRef,
   Plane2DMeasurementEntity,
   Plane2DPointEntity,
   Plane2DPolygonEntity,
@@ -653,10 +654,10 @@ export const computeSegmentIntersection2D = (
 };
 
 export const plane2DIntersectionPointId = (
-  segmentAId: string,
-  segmentBId: string,
+  edgeAId: string,
+  edgeBId: string,
 ): string => {
-  const [first, second] = [segmentAId, segmentBId].sort();
+  const [first, second] = [edgeAId, edgeBId].sort();
 
   return `plane2d-intersection-${first}-${second}`;
 };
@@ -751,6 +752,55 @@ export const getRegularPolygonVertices = (
 
   return vertices;
 };
+
+const rotateVec2 = (v: Vec2, angle: number): Vec2 => ({
+  x: v.x * Math.cos(angle) - v.y * Math.sin(angle),
+  y: v.x * Math.sin(angle) + v.y * Math.cos(angle),
+});
+
+export const getRegularPolygonVerticesBySide = (
+  first: Vec2,
+  second: Vec2,
+  sides: number,
+  side: 1 | -1,
+): readonly Vec2[] | null => {
+  if (!Number.isInteger(sides) || sides < 3) {
+    return null;
+  }
+
+  const edgeLength = distanceBetweenVec2(first, second);
+  const direction = normalizeVec2(subtractVec2(second, first));
+
+  if (!direction || edgeLength < EPSILON) {
+    return null;
+  }
+
+  const vertices: Vec2[] = [first, second];
+  let nextDirection = direction;
+  const angle = side * (2 * Math.PI) / sides;
+
+  for (let index = 2; index < sides; index += 1) {
+    nextDirection = rotateVec2(nextDirection, angle);
+    const previous = vertices[index - 1];
+
+    vertices.push({
+      x: previous.x + nextDirection.x * edgeLength,
+      y: previous.y + nextDirection.y * edgeLength,
+    });
+  }
+
+  return vertices;
+};
+
+export const getRegularPolygonVertexBySidePosition = (
+  first: Vec2,
+  second: Vec2,
+  sides: number,
+  vertexIndex: number,
+  side: 1 | -1,
+): Vec2 | null =>
+  getRegularPolygonVerticesBySide(first, second, sides, side)?.[vertexIndex] ??
+  null;
 
 export const getPlane2DPolygonPoints = (
   document: PlaneCanvasDocument,
@@ -875,7 +925,10 @@ export const syncPlane2DConstructions = (
         return;
       }
 
-      if (entity.construction?.kind === "regularPolygonVertex") {
+      if (
+        entity.construction?.kind === "regularPolygonVertex" ||
+        entity.construction?.kind === "regularPolygonVertexBySide"
+      ) {
         regularPolygonVertexRequests.push(entity);
         return;
       }
@@ -1078,41 +1131,53 @@ export const syncPlane2DConstructions = (
 
   type IntersectionSegmentCandidate = {
     readonly id: string;
+    readonly sourceType: Plane2DIntersectionEdgeRef["sourceType"];
+    readonly sourceEntityId: string;
+    readonly edgeIndex?: number;
+    readonly pointAId: string;
+    readonly pointBId: string;
     readonly start: Vec2;
     readonly end: Vec2;
   };
 
+  const getIntersectionEdgeRef = (
+    edge: IntersectionSegmentCandidate,
+  ): Plane2DIntersectionEdgeRef => {
+    if (edge.sourceType === "segment") {
+      return { sourceType: "segment", sourceEntityId: edge.sourceEntityId };
+    }
+
+    return {
+      sourceType: edge.sourceType,
+      sourceEntityId: edge.sourceEntityId,
+      edgeIndex: edge.edgeIndex ?? 0,
+    };
+  };
+
+  const getIntersectionEdgeSortKey = (
+    edge: IntersectionSegmentCandidate,
+  ): string => `${edge.sourceType}:${edge.sourceEntityId}:${edge.edgeIndex ?? 0}`;
+
+  const areSameUndirectedPoints = (
+    edgeA: IntersectionSegmentCandidate,
+    edgeB: IntersectionSegmentCandidate,
+  ): boolean =>
+    (edgeA.pointAId === edgeB.pointAId && edgeA.pointBId === edgeB.pointBId) ||
+    (edgeA.pointAId === edgeB.pointBId && edgeA.pointBId === edgeB.pointAId);
+
+  const hasExistingIntersectionPointNear = (
+    position: Vec2,
+    candidateId: string,
+  ): boolean =>
+    Object.values(nextEntities).some(
+      (entity) =>
+        entity.id !== candidateId &&
+        entity.type === "plane2d-point" &&
+        entity.visible !== false &&
+        distanceBetweenVec2(entity.position, position) <= ENDPOINT_EPSILON,
+    );
+
   const segmentCandidates: IntersectionSegmentCandidate[] = [];
-
-  Object.values(nextEntities).forEach((entity) => {
-    if (entity.type === "plane2d-segment" && entity.visible !== false) {
-      const positions = getPlane2DSegmentPositions(
-        { ...document, entities: nextEntities },
-        entity,
-      );
-
-      if (positions) {
-        segmentCandidates.push({
-          id: entity.id,
-          start: positions[0],
-          end: positions[1],
-        });
-      }
-    }
-
-    if (entity.type === "plane2d-extension") {
-      getPlane2DExtensionParts(
-        { ...document, entities: nextEntities },
-        entity,
-      ).forEach((part) => {
-        segmentCandidates.push({
-          id: part.id,
-          start: part.start,
-          end: part.end,
-        });
-      });
-    }
-  });
 
   copiedCircleRadiusPointRequests.forEach((point) => {
     if (point.construction?.kind !== "copiedCircleRadiusPoint") {
@@ -1145,30 +1210,54 @@ export const syncPlane2DConstructions = (
   });
 
   regularPolygonVertexRequests.forEach((point) => {
-    if (point.construction?.kind !== "regularPolygonVertex") {
-      return;
-    }
+    const vertex =
+      point.construction?.kind === "regularPolygonVertex"
+        ? (() => {
+            const center = getPlane2DPointPosition(
+              { ...document, entities: nextEntities },
+              point.construction.centerPointId,
+            );
+            const radiusPoint = getPlane2DPointPosition(
+              { ...document, entities: nextEntities },
+              point.construction.radiusPointId,
+            );
 
-    const center = getPlane2DPointPosition(
-      { ...document, entities: nextEntities },
-      point.construction.centerPointId,
-    );
-    const radiusPoint = getPlane2DPointPosition(
-      { ...document, entities: nextEntities },
-      point.construction.radiusPointId,
-    );
+            if (!center || !radiusPoint) {
+              return null;
+            }
 
-    if (!center || !radiusPoint) {
-      return;
-    }
+            return getRegularPolygonVertexPosition(
+              center,
+              radiusPoint,
+              point.construction.sides,
+              point.construction.vertexIndex,
+              point.construction.rotationOffset,
+            );
+          })()
+        : point.construction?.kind === "regularPolygonVertexBySide"
+          ? (() => {
+              const first = getPlane2DPointPosition(
+                { ...document, entities: nextEntities },
+                point.construction.firstPointId,
+              );
+              const second = getPlane2DPointPosition(
+                { ...document, entities: nextEntities },
+                point.construction.secondPointId,
+              );
 
-    const vertex = getRegularPolygonVertexPosition(
-      center,
-      radiusPoint,
-      point.construction.sides,
-      point.construction.vertexIndex,
-      point.construction.rotationOffset,
-    );
+              if (!first || !second) {
+                return null;
+              }
+
+              return getRegularPolygonVertexBySidePosition(
+                first,
+                second,
+                point.construction.sides,
+                point.construction.vertexIndex,
+                point.construction.side,
+              );
+            })()
+          : null;
 
     if (!vertex) {
       return;
@@ -1181,10 +1270,103 @@ export const syncPlane2DConstructions = (
     });
   });
 
+  const pushIntersectionCandidate = (
+    candidate: IntersectionSegmentCandidate,
+  ) => {
+    if (distanceBetweenVec2(candidate.start, candidate.end) <= EPSILON) {
+      return;
+    }
+
+    segmentCandidates.push(candidate);
+  };
+
+  Object.values(nextEntities).forEach((entity) => {
+    if (entity.type === "plane2d-segment" && entity.visible !== false) {
+      const positions = getPlane2DSegmentPositions(
+        { ...document, entities: nextEntities },
+        entity,
+      );
+
+      if (positions) {
+        pushIntersectionCandidate({
+          id: entity.id,
+          sourceType: "segment",
+          sourceEntityId: entity.id,
+          pointAId: entity.startPointId,
+          pointBId: entity.endPointId,
+          start: positions[0],
+          end: positions[1],
+        });
+      }
+    }
+
+    if (entity.type === "plane2d-extension") {
+      getPlane2DExtensionParts(
+        { ...document, entities: nextEntities },
+        entity,
+      ).forEach((part) => {
+        pushIntersectionCandidate({
+          id: part.id,
+          sourceType: "extension",
+          sourceEntityId: entity.id,
+          edgeIndex: part.part === "start" ? 0 : 1,
+          pointAId: `${part.id}:a`,
+          pointBId: `${part.id}:b`,
+          start: part.start,
+          end: part.end,
+        });
+      });
+    }
+
+    if (
+      entity.type === "plane2d-polygon" &&
+      entity.visible !== false &&
+      entity.vertexPointIds.length >= 3
+    ) {
+      const sourceType =
+        entity.polygonKind === "regular"
+          ? "regular-polygon-edge"
+          : "polygon-edge";
+
+      entity.vertexPointIds.forEach((pointAId, index) => {
+        const pointBId =
+          entity.vertexPointIds[(index + 1) % entity.vertexPointIds.length];
+        const start = getPlane2DPointPosition(
+          { ...document, entities: nextEntities },
+          pointAId,
+        );
+        const end = getPlane2DPointPosition(
+          { ...document, entities: nextEntities },
+          pointBId,
+        );
+
+        if (!start || !end) {
+          return;
+        }
+
+        pushIntersectionCandidate({
+          id: `${sourceType}:${entity.id}:${index}`,
+          sourceType,
+          sourceEntityId: entity.id,
+          edgeIndex: index,
+          pointAId,
+          pointBId,
+          start,
+          end,
+        });
+      });
+    }
+  });
+
   for (let i = 0; i < segmentCandidates.length; i += 1) {
     for (let j = i + 1; j < segmentCandidates.length; j += 1) {
       const segmentA = segmentCandidates[i];
       const segmentB = segmentCandidates[j];
+
+      if (areSameUndirectedPoints(segmentA, segmentB)) {
+        continue;
+      }
+
       const intersection = computeSegmentIntersection2D(
         segmentA.start,
         segmentA.end,
@@ -1200,16 +1382,27 @@ export const syncPlane2DConstructions = (
       }
 
       const id = plane2DIntersectionPointId(segmentA.id, segmentB.id);
-      const [segmentAId, segmentBId] = [segmentA.id, segmentB.id].sort();
+      const edgeA = getIntersectionEdgeRef(segmentA);
+      const edgeB = getIntersectionEdgeRef(segmentB);
+      const [firstEdge, secondEdge] =
+        getIntersectionEdgeSortKey(segmentA) <= getIntersectionEdgeSortKey(segmentB)
+          ? [edgeA, edgeB]
+          : [edgeB, edgeA];
       const previous = document.entities[id];
+
+      if (hasExistingIntersectionPointNear(intersection.position, id)) {
+        continue;
+      }
 
       nextEntities[id] = createPlane2DPoint(id, intersection.position, {
         ...preservePointMetadata(previous),
         pointKind: "constructed",
         construction: {
           kind: "segmentIntersection",
-          segmentAId,
-          segmentBId,
+          segmentAId: segmentA.id,
+          segmentBId: segmentB.id,
+          edgeA: firstEdge,
+          edgeB: secondEdge,
         },
       });
     }
@@ -1313,9 +1506,21 @@ export const deletePlane2DEntities = (
       }
 
       if (
+        entity.type === "plane2d-polygon" &&
+        entity.construction?.kind === "regularPolygonBySide" &&
+        (toDelete.has(entity.construction.firstPointId) ||
+          toDelete.has(entity.construction.secondPointId)) &&
+        !toDelete.has(entity.id)
+      ) {
+        toDelete.add(entity.id);
+        changed = true;
+      }
+
+      if (
         entity.type === "plane2d-point" &&
         entity.pointKind === "constructed" &&
-        entity.construction?.kind === "regularPolygonVertex" &&
+        (entity.construction?.kind === "regularPolygonVertex" ||
+          entity.construction?.kind === "regularPolygonVertexBySide") &&
         toDelete.has(entity.construction.polygonId) &&
         !toDelete.has(entity.id)
       ) {
@@ -1399,6 +1604,18 @@ export const deletePlane2DEntities = (
         entity.construction?.kind === "regularPolygonVertex" &&
         (toDelete.has(entity.construction.centerPointId) ||
           toDelete.has(entity.construction.radiusPointId)) &&
+        !toDelete.has(entity.id)
+      ) {
+        toDelete.add(entity.id);
+        changed = true;
+      }
+
+      if (
+        entity.type === "plane2d-point" &&
+        entity.pointKind === "constructed" &&
+        entity.construction?.kind === "regularPolygonVertexBySide" &&
+        (toDelete.has(entity.construction.firstPointId) ||
+          toDelete.has(entity.construction.secondPointId)) &&
         !toDelete.has(entity.id)
       ) {
         toDelete.add(entity.id);

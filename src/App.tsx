@@ -138,6 +138,7 @@ import type {
   Plane2DCalculationEntity,
   Plane2DCircleEntity,
   Plane2DExtensionEntity,
+  Plane2DIntersectionEdgeRef,
   Plane2DMeasurementEntity,
   Plane2DPointEntity,
   Plane2DPolygonEntity,
@@ -1751,7 +1752,10 @@ const getPlane2DEntityTypeLabel = (entity: Plane2DEntity): string => {
       if (entity.construction?.kind === "copiedCircleRadiusPoint") {
         return "复制圆半径点";
       }
-      if (entity.construction?.kind === "regularPolygonVertex") {
+      if (
+        entity.construction?.kind === "regularPolygonVertex" ||
+        entity.construction?.kind === "regularPolygonVertexBySide"
+      ) {
         return "正多边形顶点";
       }
       return "点";
@@ -1772,6 +1776,28 @@ const getPlane2DEntityTypeLabel = (entity: Plane2DEntity): string => {
     default:
       return "对象";
   }
+};
+
+const formatPlane2DIntersectionEdgeRef = (
+  edge: Plane2DIntersectionEdgeRef | undefined,
+): string => {
+  if (!edge) {
+    return "未知边";
+  }
+
+  if (edge.sourceType === "segment") {
+    return `线段 ${edge.sourceEntityId}`;
+  }
+
+  if (edge.sourceType === "extension") {
+    return `延长 ${edge.sourceEntityId}:${edge.edgeIndex + 1}`;
+  }
+
+  if (edge.sourceType === "regular-polygon-edge") {
+    return `正多边形边 ${edge.sourceEntityId}:${edge.edgeIndex + 1}`;
+  }
+
+  return `多边形边 ${edge.sourceEntityId}:${edge.edgeIndex + 1}`;
 };
 
 const getPlane2DObjectGroupLabel = (entity: Plane2DEntity): string => {
@@ -10193,7 +10219,8 @@ function App() {
                           ? "垂线端点"
                           : selectedPlane2DEntity.construction?.kind === "copiedCircleRadiusPoint"
                             ? "复制圆半径点"
-                          : selectedPlane2DEntity.construction?.kind === "regularPolygonVertex"
+                          : selectedPlane2DEntity.construction?.kind === "regularPolygonVertex" ||
+                            selectedPlane2DEntity.construction?.kind === "regularPolygonVertexBySide"
                             ? "正多边形顶点"
                           : "二维点"}
                 </h3>
@@ -10218,7 +10245,8 @@ function App() {
                               ? "点在线段上作垂线方向点"
                               : selectedPlane2DEntity.construction?.kind === "copiedCircleRadiusPoint"
                                 ? "复制圆半径辅助点"
-                              : selectedPlane2DEntity.construction?.kind === "regularPolygonVertex"
+                              : selectedPlane2DEntity.construction?.kind === "regularPolygonVertex" ||
+                                selectedPlane2DEntity.construction?.kind === "regularPolygonVertexBySide"
                                 ? "正多边形顶点"
                               : "自由点"
                     }
@@ -10230,7 +10258,18 @@ function App() {
                   <label>
                     来源
                     <input
-                      value={`${selectedPlane2DEntity.construction.segmentAId} / ${selectedPlane2DEntity.construction.segmentBId}`}
+                      value={
+                        selectedPlane2DEntity.construction.edgeA &&
+                        selectedPlane2DEntity.construction.edgeB
+                          ? `${formatPlane2DIntersectionEdgeRef(
+                              selectedPlane2DEntity.construction.edgeA,
+                            )} / ${formatPlane2DIntersectionEdgeRef(
+                              selectedPlane2DEntity.construction.edgeB,
+                            )}`
+                          : `${selectedPlane2DEntity.construction.segmentAId ?? "未知"} / ${
+                              selectedPlane2DEntity.construction.segmentBId ?? "未知"
+                            }`
+                      }
                       readOnly
                     />
                   </label>
@@ -10246,7 +10285,9 @@ function App() {
                   </label>
                 ) : null}
                 {selectedPlane2DEntity.construction?.kind ===
-                "regularPolygonVertex" ? (
+                "regularPolygonVertex" ||
+                selectedPlane2DEntity.construction?.kind ===
+                "regularPolygonVertexBySide" ? (
                   <label>
                     多边形 / 序号
                     <input
@@ -10520,6 +10561,24 @@ function App() {
                               ).toFixed(2)
                             : "无效";
                         })()}
+                        readOnly
+                      />
+                    </label>
+                  </>
+                ) : null}
+                {selectedPlane2DEntity.construction?.kind === "regularPolygonBySide" ? (
+                  <>
+                    <label>
+                      首边端点
+                      <input
+                        value={`${selectedPlane2DEntity.construction.firstPointId} / ${selectedPlane2DEntity.construction.secondPointId}`}
+                        readOnly
+                      />
+                    </label>
+                    <label>
+                      方向
+                      <input
+                        value={selectedPlane2DEntity.construction.side === 1 ? "左侧" : "右侧"}
                         readOnly
                       />
                     </label>

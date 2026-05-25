@@ -20,6 +20,7 @@ import {
   createPlane2DPoint,
   createPlane2DPolygon,
   createPlane2DSegment,
+  computeSegmentIntersection2D,
   distanceBetweenVec2,
   getClosestPointOnSegment2D,
   getPerpendicularEndpointOnLine2D,
@@ -30,7 +31,7 @@ import {
   getPlane2DPointPosition,
   getPlane2DPolygonPoints,
   getPlane2DSegmentPositions,
-  getRegularPolygonVertices,
+  getRegularPolygonVerticesBySide,
   getSignedPerpendicularSide2D,
   midpointVec2,
   plane2DMidpointId,
@@ -168,6 +169,8 @@ type CalculationPointPickerState = {
 };
 
 const POINT_EPSILON = 1e-5;
+const POLYGON_DISTANCE_EPSILON = 1e-8;
+const POLYGON_AREA2_EPSILON = 1e-10;
 const WORLD_UNIT_TO_CSS_PX = 37.7952755906;
 const MIN_ZOOM = 0.2;
 const MAX_ZOOM = 8;
@@ -342,8 +345,8 @@ export default function PlaneCanvasViewport({
   const [polygonSidesDialog, setPolygonSidesDialog] =
     useState<PolygonSidesDialogState | null>(null);
   const [polygonVertexPointIds, setPolygonVertexPointIds] = useState<string[]>([]);
-  const [regularPolygonCenterPointId, setRegularPolygonCenterPointId] =
-    useState<string | null>(null);
+  const [regularPolygonSide, setRegularPolygonSide] = useState<1 | -1>(1);
+  const [isCtrlDown, setIsCtrlDown] = useState(false);
   const [midpointFirstPointId, setMidpointFirstPointId] = useState<string | null>(null);
   const [perpendicularFirstTarget, setPerpendicularFirstTarget] =
     useState<PerpendicularFirstTarget | null>(null);
@@ -462,6 +465,7 @@ export default function PlaneCanvasViewport({
       case "copiedCircleRadiusPoint":
         return "复制圆半径点";
       case "regularPolygonVertex":
+      case "regularPolygonVertexBySide":
         return "正多边形顶点";
       default:
         return "构造点";
@@ -566,7 +570,7 @@ export default function PlaneCanvasViewport({
     setIsPolygonMenuOpen(false);
     setPolygonSidesDialog(null);
     setPolygonVertexPointIds([]);
-    setRegularPolygonCenterPointId(null);
+    setRegularPolygonSide(1);
     setMidpointFirstPointId(null);
     setPerpendicularFirstTarget(null);
     setPerpendicularDirectionPick(null);
@@ -577,6 +581,7 @@ export default function PlaneCanvasViewport({
     setInteraction({ kind: "idle" });
     setHoverTarget(null);
     dragStartDocumentRef.current = null;
+    setIsCtrlDown(false);
     onPendingSegmentPointChange(null);
   }, [onPendingSegmentPointChange, resetSignal]);
 
@@ -761,6 +766,11 @@ export default function PlaneCanvasViewport({
 
   const selectEntity = (entityId: string | null) => {
     onChange({ ...document, selectedEntityIds: entityId ? [entityId] : [] }, false);
+  };
+
+  const clearPolygonPendingState = () => {
+    setPolygonVertexPointIds([]);
+    setRegularPolygonSide(1);
   };
 
   const togglePointSelection = (pointId: string) => {
@@ -1421,34 +1431,116 @@ export default function PlaneCanvasViewport({
   };
 
   const getPolygonArea = (vertices: readonly Vec2[]): number => {
-    let area = 0;
+    let area2 = 0;
 
     for (let index = 0; index < vertices.length; index += 1) {
       const current = vertices[index];
       const next = vertices[(index + 1) % vertices.length];
 
-      area += current.x * next.y - next.x * current.y;
+      area2 += current.x * next.y - next.x * current.y;
     }
 
-    return Math.abs(area) / 2;
+    return Math.abs(area2) / 2;
   };
 
-  const createFreePolygonWithVertices = (vertexPointIds: readonly string[]) => {
+  const arePolygonEdgesAdjacent = (
+    edgeAIndex: number,
+    edgeBIndex: number,
+    edgeCount: number,
+  ): boolean => {
+    const difference = Math.abs(edgeAIndex - edgeBIndex);
+
+    return difference === 1 || difference === edgeCount - 1;
+  };
+
+  const hasSelfIntersectingPolygonEdges = (vertices: readonly Vec2[]): boolean => {
+    for (let i = 0; i < vertices.length; i += 1) {
+      const edgeAStart = vertices[i];
+      const edgeAEnd = vertices[(i + 1) % vertices.length];
+
+      for (let j = i + 1; j < vertices.length; j += 1) {
+        if (arePolygonEdgesAdjacent(i, j, vertices.length)) {
+          continue;
+        }
+
+        const edgeBStart = vertices[j];
+        const edgeBEnd = vertices[(j + 1) % vertices.length];
+        const intersection = computeSegmentIntersection2D(
+          edgeAStart,
+          edgeAEnd,
+          edgeBStart,
+          edgeBEnd,
+        );
+
+        if (intersection.kind === "point" || intersection.kind === "collinearOverlap") {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  };
+
+  const validatePolygonCandidate = (
+    vertexPointIds: readonly string[],
+    vertices: readonly Vec2[],
+  ): boolean => {
+    if (vertexPointIds.length < 3 || vertices.length !== vertexPointIds.length) {
+      onStatus("多边形顶点无效，无法创建。");
+      onToast?.("多边形顶点无效，无法创建。");
+      return false;
+    }
+
     const uniqueVertexIds = [...new Set(vertexPointIds)];
 
     if (uniqueVertexIds.length !== vertexPointIds.length) {
       onStatus("多边形顶点不能重复。");
       onToast?.("多边形顶点不能重复。");
-      return;
+      return false;
     }
 
-    const vertices = vertexPointIds
-      .map((pointId) => getPlane2DPointPosition(document, pointId))
-      .filter((point): point is Vec2 => Boolean(point));
+    for (let i = 0; i < vertices.length; i += 1) {
+      for (let j = i + 1; j < vertices.length; j += 1) {
+        if (distanceBetweenVec2(vertices[i], vertices[j]) <= POLYGON_DISTANCE_EPSILON) {
+          onStatus("多边形顶点不能重复。");
+          onToast?.("多边形顶点不能重复。");
+          return false;
+        }
+      }
+    }
 
-    if (vertices.length !== vertexPointIds.length || getPolygonArea(vertices) < POINT_EPSILON) {
+    for (let index = 0; index < vertices.length; index += 1) {
+      const current = vertices[index];
+      const next = vertices[(index + 1) % vertices.length];
+
+      if (distanceBetweenVec2(current, next) <= POLYGON_DISTANCE_EPSILON) {
+        onStatus("多边形退化，无法创建。");
+        onToast?.("多边形退化，无法创建。");
+        return false;
+      }
+    }
+
+    if (getPolygonArea(vertices) * 2 <= POLYGON_AREA2_EPSILON) {
       onStatus("多边形退化，无法创建。");
       onToast?.("多边形退化，无法创建。");
+      return false;
+    }
+
+    if (hasSelfIntersectingPolygonEdges(vertices)) {
+      onStatus("多边形存在自交，无法创建。");
+      onToast?.("多边形存在自交，无法创建。");
+      return false;
+    }
+
+    return true;
+  };
+
+  const createFreePolygonWithVertices = (
+    vertexPointIds: readonly string[],
+    vertices: readonly Vec2[],
+    newVertexPoint?: Plane2DPointEntity,
+  ) => {
+    if (!validatePolygonCandidate(vertexPointIds, vertices)) {
       return;
     }
 
@@ -1462,67 +1554,69 @@ export default function PlaneCanvasViewport({
       ...document,
       entities: {
         ...document.entities,
+        ...(newVertexPoint ? { [newVertexPoint.id]: newVertexPoint } : {}),
         [polygon.id]: polygon,
       },
       selectedEntityIds: [polygon.id],
     });
-    setPolygonVertexPointIds([]);
-    setRegularPolygonCenterPointId(null);
+    clearPolygonPendingState();
     onStatus(`已创建 ${vertexPointIds.length} 边形。`);
   };
 
-  const createRegularPolygonWithRadiusPoint = (
-    centerPointId: string,
+  const createRegularPolygonBySideWithSecondPoint = (
+    firstPointId: string,
     snap: Plane2DSnapResult,
   ) => {
-    const center = getPlane2DPointPosition(document, centerPointId);
-    const radiusPoint = snap.type === "point" ? null : createPointEntityAt(snap.position);
-    const radiusPointId = snap.type === "point" ? snap.entityId : radiusPoint!.id;
-    const radiusPosition =
+    const first = getPlane2DPointPosition(document, firstPointId);
+    const secondPoint = snap.type === "point" ? null : createPointEntityAt(snap.position);
+    const secondPointId = snap.type === "point" ? snap.entityId : secondPoint!.id;
+    const second =
       snap.type === "point"
-        ? getPlane2DPointPosition(document, radiusPointId)
-        : radiusPoint!.position;
+        ? getPlane2DPointPosition(document, secondPointId)
+        : secondPoint!.position;
 
     if (
-      !center ||
-      !radiusPosition ||
-      centerPointId === radiusPointId ||
-      distanceBetweenVec2(center, radiusPosition) < POINT_EPSILON
+      !first ||
+      !second ||
+      firstPointId === secondPointId ||
+      distanceBetweenVec2(first, second) < POINT_EPSILON
     ) {
-      onStatus("半径过小，无法创建正多边形。");
-      onToast?.("半径过小，无法创建正多边形。");
+      onStatus("边长过小，无法创建正多边形。");
+      onToast?.("边长过小，无法创建正多边形。");
+      return;
+    }
+
+    const vertices = getRegularPolygonVerticesBySide(
+      first,
+      second,
+      polygonVariant.sides,
+      regularPolygonSide,
+    );
+
+    if (!vertices) {
+      onStatus("边长过小，无法创建正多边形。");
+      onToast?.("边长过小，无法创建正多边形。");
       return;
     }
 
     const polygonId = makePlane2DId("plane2d-regular-polygon");
     const constructedVertices: Plane2DPointEntity[] = [];
-    const vertexPointIds = [radiusPointId];
+    const vertexPointIds = [firstPointId, secondPointId];
 
-    for (let index = 1; index < polygonVariant.sides; index += 1) {
-      const position = getRegularPolygonVertices(
-        center,
-        radiusPosition,
-        polygonVariant.sides,
-      )?.[index];
-
-      if (!position) {
-        onStatus("半径过小，无法创建正多边形。");
-        onToast?.("半径过小，无法创建正多边形。");
-        return;
-      }
-
+    for (let index = 2; index < polygonVariant.sides; index += 1) {
       const vertex = createPlane2DPoint(
         makePlane2DId("plane2d-regular-polygon-vertex"),
-        position,
+        vertices[index],
         {
           pointKind: "constructed",
           construction: {
-            kind: "regularPolygonVertex",
+            kind: "regularPolygonVertexBySide",
             polygonId,
-            centerPointId,
-            radiusPointId,
+            firstPointId,
+            secondPointId,
             vertexIndex: index,
             sides: polygonVariant.sides,
+            side: regularPolygonSide,
           },
         },
       );
@@ -1534,44 +1628,71 @@ export default function PlaneCanvasViewport({
     const polygon = createPlane2DPolygon(polygonId, vertexPointIds, {
       polygonKind: "regular",
       construction: {
-        kind: "regularPolygon",
-        centerPointId,
-        radiusPointId,
+        kind: "regularPolygonBySide",
+        firstPointId,
+        secondPointId,
         sides: polygonVariant.sides,
+        side: regularPolygonSide,
       },
     });
 
-    setDocument({
-      ...document,
-      entities: {
-        ...document.entities,
-        ...(radiusPoint ? { [radiusPoint.id]: radiusPoint } : {}),
-        ...Object.fromEntries(constructedVertices.map((vertex) => [vertex.id, vertex])),
-        [polygon.id]: polygon,
+    setDocument(
+      {
+        ...document,
+        entities: {
+          ...document.entities,
+          ...(secondPoint ? { [secondPoint.id]: secondPoint } : {}),
+          ...Object.fromEntries(constructedVertices.map((vertex) => [vertex.id, vertex])),
+          [polygon.id]: polygon,
+        },
+        selectedEntityIds: [polygon.id],
       },
-      selectedEntityIds: [polygon.id],
-    });
-    setRegularPolygonCenterPointId(null);
-    setPolygonVertexPointIds([]);
+      true,
+      {
+        label: `创建正 ${polygonVariant.sides} 边形`,
+      },
+    );
+    clearPolygonPendingState();
     onStatus(`已创建正 ${polygonVariant.sides} 边形。`);
   };
 
+  const getPolygonPointCandidate = (
+    snap: Plane2DSnapResult,
+  ): {
+    readonly pointId: string;
+    readonly position: Vec2;
+    readonly newPoint?: Plane2DPointEntity;
+  } | null => {
+    if (snap.type === "point") {
+      const position = getPlane2DPointPosition(document, snap.entityId);
+
+      return position ? { pointId: snap.entityId, position } : null;
+    }
+
+    const point = createPointEntityAt(snap.position);
+
+    return {
+      pointId: point.id,
+      position: point.position,
+      newPoint: point,
+    };
+  };
+
   const applyPolygonPointInput = (snap: Plane2DSnapResult, ctrlKey = false) => {
-    if (regularPolygonCenterPointId) {
-      createRegularPolygonWithRadiusPoint(regularPolygonCenterPointId, snap);
+    if (ctrlKey && polygonVertexPointIds.length === 1) {
+      createRegularPolygonBySideWithSecondPoint(polygonVertexPointIds[0], snap);
       return;
     }
 
-    const pointId = resolvePointInput(snap);
+    const candidate = getPolygonPointCandidate(snap);
 
-    if (ctrlKey && polygonVertexPointIds.length === 0) {
-      setRegularPolygonCenterPointId(pointId);
-      if (snap.type === "point") {
-        selectEntity(pointId);
-      }
-      onStatus(`正 ${polygonVariant.sides} 边形：请选择半径点，或按 Ctrl+K 输入坐标点。`);
+    if (!candidate) {
+      onStatus("无法解析多边形顶点。");
+      onToast?.("无法解析多边形顶点。");
       return;
     }
+
+    const pointId = candidate.pointId;
 
     if (polygonVertexPointIds.includes(pointId)) {
       onStatus("多边形顶点不能重复。");
@@ -1580,10 +1701,29 @@ export default function PlaneCanvasViewport({
     }
 
     const nextVertexPointIds = [...polygonVertexPointIds, pointId];
+    const existingPositions = polygonVertexPointIds
+      .map((vertexPointId) => getPlane2DPointPosition(document, vertexPointId))
+      .filter((point): point is Vec2 => Boolean(point));
+    const nextVertexPositions = [...existingPositions, candidate.position];
 
     if (nextVertexPointIds.length >= polygonVariant.sides) {
-      createFreePolygonWithVertices(nextVertexPointIds);
+      createFreePolygonWithVertices(
+        nextVertexPointIds,
+        nextVertexPositions,
+        candidate.newPoint,
+      );
       return;
+    }
+
+    if (candidate.newPoint) {
+      setDocument({
+        ...document,
+        entities: {
+          ...document.entities,
+          [candidate.newPoint.id]: candidate.newPoint,
+        },
+        selectedEntityIds: [candidate.newPoint.id],
+      });
     }
 
     setPolygonVertexPointIds(nextVertexPointIds);
@@ -2161,6 +2301,10 @@ export default function PlaneCanvasViewport({
   };
 
   const handlePointerMove = (event: React.PointerEvent<SVGSVGElement>) => {
+    if (isCtrlDown !== event.ctrlKey) {
+      setIsCtrlDown(event.ctrlKey);
+    }
+
     const localPosition = getLocalPoint(event);
     latestPointerLocalRef.current = localPosition;
     const rawPosition = screenToWorld(localPosition);
@@ -2277,6 +2421,10 @@ export default function PlaneCanvasViewport({
   const handlePointerDown = (event: React.PointerEvent<SVGSVGElement>) => {
     if (event.button !== 0) {
       return;
+    }
+
+    if (isCtrlDown !== event.ctrlKey) {
+      setIsCtrlDown(event.ctrlKey);
     }
 
     const localPosition = getLocalPoint(event);
@@ -2587,6 +2735,10 @@ export default function PlaneCanvasViewport({
   };
 
   const handlePointerUp = (event: React.PointerEvent<SVGSVGElement>) => {
+    if (isCtrlDown !== event.ctrlKey) {
+      setIsCtrlDown(event.ctrlKey);
+    }
+
     const localPosition = getLocalPoint(event);
     latestPointerLocalRef.current = localPosition;
     const rawPosition = screenToWorld(localPosition);
@@ -2660,8 +2812,8 @@ export default function PlaneCanvasViewport({
     onPendingSegmentPointChange(null);
     setCircleCenterPointId(null);
     setCopyCircleSourceId(null);
-    setPolygonVertexPointIds([]);
-    setRegularPolygonCenterPointId(null);
+    clearPolygonPendingState();
+    setIsCtrlDown(false);
     setIsPolygonMenuOpen(false);
     setPolygonSidesDialog(null);
     setMidpointFirstPointId(null);
@@ -2748,8 +2900,8 @@ export default function PlaneCanvasViewport({
       return "请选择新圆心，或按 Ctrl+K 输入坐标建点。";
     }
 
-    if (currentTool === "polygon" && regularPolygonCenterPointId) {
-      return `正 ${polygonVariant.sides} 边形：请选择半径点，或按 Ctrl+K 输入坐标点。`;
+    if (currentTool === "polygon" && polygonVertexPointIds.length === 1 && isCtrlDown) {
+      return `正 ${polygonVariant.sides} 边形预览，Ctrl+K 切换方向。`;
     }
 
     if (currentTool === "polygon" && polygonVertexPointIds.length > 0) {
@@ -2807,8 +2959,20 @@ export default function PlaneCanvasViewport({
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Control") {
+        setIsCtrlDown(true);
+      }
+
       if (event.ctrlKey && event.key.toLowerCase() === "k") {
         event.preventDefault();
+
+        if (currentTool === "polygon" && polygonVertexPointIds.length === 1) {
+          setRegularPolygonSide((side) => (side === 1 ? -1 : 1));
+          onStatus("已切换正多边形方向。");
+          onToast?.("已切换正多边形方向。");
+          return;
+        }
+
         openCoordinateDialog();
         return;
       }
@@ -2828,8 +2992,24 @@ export default function PlaneCanvasViewport({
       }
     };
 
+    const handleKeyUp = (event: KeyboardEvent) => {
+      if (event.key === "Control") {
+        setIsCtrlDown(false);
+      }
+    };
+
+    const handleBlur = () => {
+      setIsCtrlDown(false);
+    };
+
     window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    window.addEventListener("keyup", handleKeyUp);
+    window.addEventListener("blur", handleBlur);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keyup", handleKeyUp);
+      window.removeEventListener("blur", handleBlur);
+    };
   });
 
   const pendingPosition = pendingSegmentPointId
@@ -2870,15 +3050,16 @@ export default function PlaneCanvasViewport({
   const polygonVertexPositions = polygonVertexPointIds
     .map((pointId) => getPlane2DPointPosition(document, pointId))
     .filter((point): point is Vec2 => Boolean(point));
-  const regularPolygonCenterPosition = regularPolygonCenterPointId
-    ? getPlane2DPointPosition(document, regularPolygonCenterPointId)
-    : null;
   const regularPolygonPreviewVertices =
-    regularPolygonCenterPosition && previewPosition
-      ? getRegularPolygonVertices(
-          regularPolygonCenterPosition,
+    currentTool === "polygon" &&
+    isCtrlDown &&
+    polygonVertexPositions.length === 1 &&
+    previewPosition
+      ? getRegularPolygonVerticesBySide(
+          polygonVertexPositions[0],
           previewPosition,
           polygonVariant.sides,
+          regularPolygonSide,
         )
       : null;
   const perpendicularPreview = getPerpendicularLivePreview(previewPosition);
@@ -2927,8 +3108,8 @@ export default function PlaneCanvasViewport({
     onPendingSegmentPointChange(null);
     setCircleCenterPointId(null);
     setCopyCircleSourceId(null);
-    setPolygonVertexPointIds([]);
-    setRegularPolygonCenterPointId(null);
+    clearPolygonPendingState();
+    setIsCtrlDown(false);
     setMidpointFirstPointId(null);
     setPerpendicularFirstTarget(null);
     setPerpendicularDirectionPick(null);
@@ -3388,7 +3569,7 @@ export default function PlaneCanvasViewport({
               strokeWidth={document.settings.lineWidthPx}
             />
           ) : null}
-          {polygonVertexPositions.length > 0 && previewPosition ? (
+          {polygonVertexPositions.length > 0 && previewPosition && !regularPolygonPreviewVertices ? (
             <g>
               <polyline
                 className="plane2d-polygon preview"
@@ -3410,15 +3591,25 @@ export default function PlaneCanvasViewport({
               ) : null}
             </g>
           ) : null}
-          {regularPolygonPreviewVertices ? (
-            <polygon
-              className="plane2d-polygon preview"
-              points={regularPolygonPreviewVertices
-                .map((point) => worldToScreen(point))
-                .map((point) => `${point.x},${point.y}`)
-                .join(" ")}
-              strokeWidth={document.settings.lineWidthPx}
-            />
+          {regularPolygonPreviewVertices && previewPosition ? (
+            <g>
+              <line
+                className="plane2d-segment preview"
+                strokeWidth={document.settings.lineWidthPx}
+                x1={worldToScreen(regularPolygonPreviewVertices[0]).x}
+                x2={worldToScreen(previewPosition).x}
+                y1={worldToScreen(regularPolygonPreviewVertices[0]).y}
+                y2={worldToScreen(previewPosition).y}
+              />
+              <polygon
+                className="plane2d-polygon preview"
+                points={regularPolygonPreviewVertices
+                  .map((point) => worldToScreen(point))
+                  .map((point) => `${point.x},${point.y}`)
+                  .join(" ")}
+                strokeWidth={document.settings.lineWidthPx}
+              />
+            </g>
           ) : null}
           {perpendicularPreview ? (
             <line
@@ -3611,8 +3802,11 @@ export default function PlaneCanvasViewport({
         {previewPosition ? ` / 坐标 (${formatVec2(previewPosition)})` : ""}
         {circlePreviewRadius ? ` / 半径 ${circlePreviewRadius.toFixed(2)}` : ""}
         {copyCircleSourceId && copyCirclePreviewRadius ? ` / 复制半径 ${copyCirclePreviewRadius.toFixed(2)}` : ""}
-        {currentTool === "polygon" ? ` / ${polygonVariant.sides} 边形` : ""}
-        {regularPolygonCenterPointId ? " / 正多边形半径点" : ""}
+        {currentTool === "polygon"
+          ? regularPolygonPreviewVertices
+            ? ` / 正 ${polygonVariant.sides} 边形预览 / Ctrl+K 切换方向`
+            : ` / ${polygonVariant.sides} 边形`
+          : ""}
         {polygonVertexPointIds.length > 0 ? ` / 顶点 ${polygonVertexPointIds.length}/${polygonVariant.sides}` : ""}
         {perpendicularPreview?.kind === "direction" ? ` / 垂线长度 ${perpendicularPreview.length.toFixed(2)}` : ""}
         {lengthFirstPosition && previewPosition ? ` / 当前长度 ${distanceBetweenVec2(lengthFirstPosition, previewPosition).toFixed(2)}` : ""}
