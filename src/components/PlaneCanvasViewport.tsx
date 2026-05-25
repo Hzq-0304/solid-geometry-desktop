@@ -1,4 +1,5 @@
 ﻿import { useEffect, useMemo, useRef, useState } from "react";
+import FloatingSubmenu from "./FloatingSubmenu";
 import type {
   Plane2DCircleEntity,
   Plane2DEntity,
@@ -50,11 +51,13 @@ interface PlaneCanvasViewportProps {
   readonly currentTool: Plane2DToolName;
   readonly pendingSegmentPointId: string | null;
   readonly resetSignal: number;
+  readonly initialViewport?: Plane2DViewportState;
   readonly onChange: (
     document: PlaneCanvasDocument,
     dirty?: boolean,
     options?: Plane2DDocumentChangeOptions,
   ) => void;
+  readonly onViewportChange?: (viewport: Plane2DViewportState) => void;
   readonly onToolChange: (tool: Plane2DToolName) => void;
   readonly onPendingSegmentPointChange: (pointId: string | null) => void;
   readonly onStatus: (message: string | null) => void;
@@ -304,7 +307,9 @@ export default function PlaneCanvasViewport({
   currentTool,
   pendingSegmentPointId,
   resetSignal,
+  initialViewport,
   onChange,
+  onViewportChange,
   onToolChange,
   onPendingSegmentPointChange,
   onStatus,
@@ -315,6 +320,7 @@ export default function PlaneCanvasViewport({
   const latestDocumentRef = useRef(document);
   const dragStartDocumentRef = useRef<PlaneCanvasDocument | null>(null);
   const lastHintRef = useRef<string | null>(null);
+  const polygonMenuToggleRef = useRef<HTMLButtonElement | null>(null);
   const [previewPosition, setPreviewPosition] = useState<Vec2 | null>(null);
   const [hoverTarget, setHoverTarget] = useState<Plane2DPickResult | null>(null);
   const [interaction, setInteraction] = useState<Plane2DInteractionState>({
@@ -322,9 +328,9 @@ export default function PlaneCanvasViewport({
   });
   const [viewportSize, setViewportSize] = useState({ width: 1, height: 1 });
   const [viewport, setViewport] = useState<Plane2DViewportState>({
-    panX: 0,
-    panY: 0,
-    zoom: 1,
+    panX: initialViewport?.panX ?? 0,
+    panY: initialViewport?.panY ?? 0,
+    zoom: initialViewport?.zoom ?? 1,
   });
   const [circleCenterPointId, setCircleCenterPointId] = useState<string | null>(null);
   const [copyCircleSourceId, setCopyCircleSourceId] = useState<string | null>(null);
@@ -535,6 +541,24 @@ export default function PlaneCanvasViewport({
   useEffect(() => {
     latestDocumentRef.current = document;
   }, [document]);
+
+  useEffect(() => {
+    if (!initialViewport) {
+      return;
+    }
+
+    setViewport((current) =>
+      current.panX === initialViewport.panX &&
+      current.panY === initialViewport.panY &&
+      current.zoom === initialViewport.zoom
+        ? current
+        : initialViewport,
+    );
+  }, [initialViewport]);
+
+  useEffect(() => {
+    onViewportChange?.(viewport);
+  }, [onViewportChange, viewport]);
 
   useEffect(() => {
     setCircleCenterPointId(null);
@@ -2974,12 +2998,19 @@ export default function PlaneCanvasViewport({
                           event.stopPropagation();
                           setIsPolygonMenuOpen((isOpen) => !isOpen);
                         }}
+                        ref={polygonMenuToggleRef}
                         type="button"
                       >
                         ›
                       </button>
                       {isPolygonMenuOpen ? (
-                        <div className="plane2d-tool-flyout">
+                        <FloatingSubmenu
+                          anchorElement={polygonMenuToggleRef.current}
+                          ariaLabel="多边形选项"
+                          className="plane2d-tool-flyout"
+                          onClose={() => setIsPolygonMenuOpen(false)}
+                          open={isPolygonMenuOpen}
+                        >
                           <button
                             onClick={() =>
                               selectPolygonVariant({ kind: "triangle", sides: 3 })
@@ -3015,7 +3046,7 @@ export default function PlaneCanvasViewport({
                           >
                             多边形
                           </button>
-                        </div>
+                        </FloatingSubmenu>
                       ) : null}
                     </div>
                   ) : (

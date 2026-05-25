@@ -56,6 +56,11 @@ import { updateLineMaterialResolution } from "../renderer/three/materials";
 
 const CLICK_MOVE_THRESHOLD = 3;
 
+export type SceneViewportViewState = {
+  readonly cameraPosition: Vec3;
+  readonly controlsTarget: Vec3;
+};
+
 interface SceneViewportProps {
   document: BoardDocument;
   currentTool: ToolName;
@@ -78,6 +83,8 @@ interface SceneViewportProps {
   onOverlayEntityPointerEnter(entityId: EntityId): void;
   onOverlayEntityPointerLeave(entityId: EntityId): void;
   isDraggingPoint: boolean;
+  initialViewState?: SceneViewportViewState | null;
+  onViewStateChange?(viewState: SceneViewportViewState): void;
 }
 
 const getPointLabelName = (point: PointEntity | null): string | null => {
@@ -173,6 +180,8 @@ function SceneViewport({
   onOverlayEntityPointerEnter,
   onOverlayEntityPointerLeave,
   isDraggingPoint,
+  initialViewState,
+  onViewStateChange,
 }: SceneViewportProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
@@ -189,6 +198,7 @@ function SceneViewport({
   const onSelectPointDragMoveRef = useRef(onSelectPointDragMove);
   const onSelectPointDragEndRef = useRef(onSelectPointDragEnd);
   const onSelectPointDragCancelRef = useRef(onSelectPointDragCancel);
+  const onViewStateChangeRef = useRef(onViewStateChange);
   const preselectedEntityIdRef = useRef(preselectedEntityId);
   const objectLabelsRef = useRef<readonly ProjectedObjectLabel[]>([]);
   const [objectLabels, setObjectLabels] = useState<
@@ -236,6 +246,44 @@ function SceneViewport({
   }, [onSelectPointDragCancel]);
 
   useEffect(() => {
+    onViewStateChangeRef.current = onViewStateChange;
+  }, [onViewStateChange]);
+
+  useEffect(() => {
+    const camera = cameraRef.current;
+    const controls = controlsRef.current;
+
+    if (!camera || !controls || !initialViewState) {
+      return;
+    }
+
+    const cameraMatches =
+      Math.abs(camera.position.x - initialViewState.cameraPosition.x) < 1e-6 &&
+      Math.abs(camera.position.y - initialViewState.cameraPosition.y) < 1e-6 &&
+      Math.abs(camera.position.z - initialViewState.cameraPosition.z) < 1e-6;
+    const targetMatches =
+      Math.abs(controls.target.x - initialViewState.controlsTarget.x) < 1e-6 &&
+      Math.abs(controls.target.y - initialViewState.controlsTarget.y) < 1e-6 &&
+      Math.abs(controls.target.z - initialViewState.controlsTarget.z) < 1e-6;
+
+    if (cameraMatches && targetMatches) {
+      return;
+    }
+
+    camera.position.set(
+      initialViewState.cameraPosition.x,
+      initialViewState.cameraPosition.y,
+      initialViewState.cameraPosition.z,
+    );
+    controls.target.set(
+      initialViewState.controlsTarget.x,
+      initialViewState.controlsTarget.y,
+      initialViewState.controlsTarget.z,
+    );
+    controls.update();
+  }, [initialViewState]);
+
+  useEffect(() => {
     const host = hostRef.current;
     if (!host) {
       return;
@@ -270,6 +318,37 @@ function SceneViewport({
       controls,
       documentRef.current.settings.activeDrawingPlane,
     );
+
+    if (initialViewState) {
+      camera.position.set(
+        initialViewState.cameraPosition.x,
+        initialViewState.cameraPosition.y,
+        initialViewState.cameraPosition.z,
+      );
+      controls.target.set(
+        initialViewState.controlsTarget.x,
+        initialViewState.controlsTarget.y,
+        initialViewState.controlsTarget.z,
+      );
+      controls.update();
+    }
+
+    const emitViewState = () => {
+      onViewStateChangeRef.current?.({
+        cameraPosition: {
+          x: camera.position.x,
+          y: camera.position.y,
+          z: camera.position.z,
+        },
+        controlsTarget: {
+          x: controls.target.x,
+          y: controls.target.y,
+          z: controls.target.z,
+        },
+      });
+    };
+
+    controls.addEventListener("change", emitViewState);
 
     const axes = createAxesWithLabels(documentRef.current.settings.coordinateHalfSize);
     scene.add(axes);
@@ -754,6 +833,7 @@ function SceneViewport({
       disposeAxesWithLabels(axes);
       clearEntityObjects(scene);
       resizeObserver.disconnect();
+      controls.removeEventListener("change", emitViewState);
       controls.dispose();
       renderer.dispose();
       host.removeChild(renderer.domElement);

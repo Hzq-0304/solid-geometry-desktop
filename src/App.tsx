@@ -15,16 +15,22 @@ import ObjectListPanel, {
   type ObjectListGroup,
   type ObjectListItem,
 } from "./components/ObjectListPanel";
+import FloatingSubmenu from "./components/FloatingSubmenu";
 import FormulaView from "./core/calculation/FormulaView";
 import type { CalculationExpression } from "./core/calculation/CalculationTypes";
 import { evaluateCalculationExpression } from "./core/calculation/calculationEvaluator";
 import { formatCalculationValue } from "./core/calculation/calculationUnits";
 import PlaneCanvasViewport from "./components/PlaneCanvasViewport";
 import TopMenuBar from "./components/TopMenuBar";
+import WorkspaceTabBar, {
+  type WorkspaceTabBarItem,
+} from "./components/WorkspaceTabBar";
 import { AddEntityCommand } from "./core/command/AddEntityCommand";
 import { AddExtensionCommand } from "./core/command/AddExtensionCommand";
 import { AddIntersectionPointCommand } from "./core/command/AddIntersectionPointCommand";
-import SceneViewport from "./components/SceneViewport";
+import SceneViewport, {
+  type SceneViewportViewState,
+} from "./components/SceneViewport";
 import { AddLinePlanePerpendicularCommand } from "./core/command/AddLinePlanePerpendicularCommand";
 import { AddMeasurementCommand } from "./core/command/AddMeasurementCommand";
 import { AddMidpointCommand } from "./core/command/AddMidpointCommand";
@@ -180,6 +186,32 @@ import { isTauriEnvironment } from "./platform/platform";
 
 type PointCreationMode = "free" | "coordinate";
 type WorkspaceMode = "none" | "geometry3d" | "plane2d";
+type WorkspaceTabKind = "geometry3d" | "plane2d";
+type WorkspaceTab = {
+  readonly id: string;
+  readonly kind: WorkspaceTabKind;
+  readonly title: string;
+  readonly filePath: string | null;
+  readonly document: BoardDocument | PlaneCanvasDocument;
+  readonly isDirty: boolean;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly plane2DState?: {
+    readonly history: Plane2DHistoryState;
+    readonly activeTool: Plane2DToolName;
+    readonly pendingSegmentPointId: string | null;
+    readonly viewport: {
+      readonly panX: number;
+      readonly panY: number;
+      readonly zoom: number;
+    };
+  };
+  readonly geometry3DState?: {
+    readonly commandManager: CommandManager;
+    readonly activeTool: ToolName;
+    readonly viewState: SceneViewportViewState | null;
+  };
+};
 type AngleMeasureMode =
   | "threePoint"
   | "lineXYPlane"
@@ -2315,6 +2347,8 @@ const getMeasureAngleToolStatus = (
 };
 
 function App() {
+  const [tabs, setTabs] = useState<WorkspaceTab[]>([]);
+  const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("none");
   const [document, setDocument] = useState<BoardDocument | null>(null);
   const [planeCanvasDocument, setPlaneCanvasDocument] =
@@ -2329,12 +2363,26 @@ function App() {
   const [plane2DHistory, setPlane2DHistory] = useState<Plane2DHistoryState>(
     createPlane2DHistoryState,
   );
+  const [plane2DViewportState, setPlane2DViewportState] = useState({
+    panX: 0,
+    panY: 0,
+    zoom: 1,
+  });
   const [plane2DResetSignal, setPlane2DResetSignal] = useState(0);
   const [propertiesTab, setPropertiesTab] = useState<"properties" | "objects">(
     "properties",
   );
   const [objectListSearchQuery, setObjectListSearchQuery] = useState("");
   const [currentTool, setCurrentTool] = useState<ToolName>("select");
+  const [geometry3DViewState, setGeometry3DViewState] =
+    useState<SceneViewportViewState | null>(null);
+  const pointToolToggleRef = useRef<HTMLButtonElement | null>(null);
+  const perpendicularToolToggleRef = useRef<HTMLButtonElement | null>(null);
+  const extendToolToggleRef = useRef<HTMLButtonElement | null>(null);
+  const parallelToolToggleRef = useRef<HTMLButtonElement | null>(null);
+  const angleToolToggleRef = useRef<HTMLButtonElement | null>(null);
+  const linePlaneAngleToggleRef = useRef<HTMLButtonElement | null>(null);
+  const planePlaneAngleToggleRef = useRef<HTMLButtonElement | null>(null);
   const [focusRequestId, setFocusRequestId] = useState(0);
   const [lastPointerInfo, setLastPointerInfo] = useState<PointerInfo | null>(
     null,
@@ -2453,6 +2501,8 @@ function App() {
   >(null);
   const [toastMessage, setToastMessage] = useState<ToastMessage | null>(null);
   const commandManagerRef = useRef<CommandManager | null>(null);
+  const nextGeometryTabNumberRef = useRef(1);
+  const nextPlaneTabNumberRef = useRef(1);
   const pointDragStateRef = useRef<PointDragState | null>(null);
   const preselectionRef = useRef<Preselection | null>(null);
   const latestPointToolResolvedResultRef =
@@ -2479,6 +2529,119 @@ function App() {
     nextToastIdRef.current += 1;
     setToastMessage({ id, text });
   };
+  const createWorkspaceTabId = () =>
+    `workspace-tab-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  const getFileNameFromPath = (filePath: string) =>
+    filePath.split(/[\\/]/).pop() ?? filePath;
+
+  const getTabTitleFromPath = (filePath: string | null, fallback: string) =>
+    filePath ? getFileNameFromPath(filePath) : fallback;
+
+  const captureActiveWorkspaceTab = (tab: WorkspaceTab): WorkspaceTab => {
+    const now = new Date().toISOString();
+
+    if (workspaceMode === "geometry3d" && tab.kind === "geometry3d") {
+      return {
+        ...tab,
+        document: commandManager.getDocument(),
+        filePath: currentFilePath,
+        title: getTabTitleFromPath(currentFilePath, tab.title),
+        isDirty,
+        updatedAt: now,
+        geometry3DState: {
+          commandManager,
+          activeTool: currentTool,
+          viewState: geometry3DViewState,
+        },
+      };
+    }
+
+    if (workspaceMode === "plane2d" && tab.kind === "plane2d" && planeCanvasDocument) {
+      return {
+        ...tab,
+        document: planeCanvasDocument,
+        filePath: currentFilePath,
+        title: getTabTitleFromPath(currentFilePath, tab.title),
+        isDirty,
+        updatedAt: now,
+        plane2DState: {
+          history: plane2DHistory,
+          activeTool: plane2DTool,
+          pendingSegmentPointId: plane2DPendingSegmentPointId,
+          viewport: plane2DViewportState,
+        },
+      };
+    }
+
+    return tab;
+  };
+
+  const syncActiveWorkspaceTab = () => {
+    if (!activeTabId) {
+      return;
+    }
+
+    setTabs((currentTabs) =>
+      currentTabs.map((tab) =>
+        tab.id === activeTabId ? captureActiveWorkspaceTab(tab) : tab,
+      ),
+    );
+  };
+
+  const loadWorkspaceTab = (tab: WorkspaceTab) => {
+    resetTransientToolState();
+    resetPlane2DTransientState();
+    setPropertiesTab("properties");
+    setObjectListSearchQuery("");
+    setCurrentFilePath(tab.filePath);
+    setIsDirty(tab.isDirty);
+
+    if (tab.kind === "geometry3d") {
+      const manager =
+        tab.geometry3DState?.commandManager ??
+        new CommandManager(tab.document as BoardDocument);
+
+      commandManagerRef.current = manager;
+      setDocument(manager.getDocument());
+      setPlaneCanvasDocument(null);
+      setPlane2DHistory(createPlane2DHistoryState());
+      setCurrentTool(tab.geometry3DState?.activeTool ?? "select");
+      setGeometry3DViewState(tab.geometry3DState?.viewState ?? null);
+      setWorkspaceMode("geometry3d");
+      return;
+    }
+
+    const planeDocument = syncPlane2DIntersections(
+      normalizePlaneCanvasDocument(tab.document as PlaneCanvasDocument),
+    );
+
+    setPlaneCanvasDocument(planeDocument);
+    setPlane2DHistory(tab.plane2DState?.history ?? createPlane2DHistoryState());
+    setPlane2DTool(tab.plane2DState?.activeTool ?? "select");
+    setPlane2DPendingSegmentPointId(
+      tab.plane2DState?.pendingSegmentPointId ?? null,
+    );
+    setPlane2DViewportState(
+      tab.plane2DState?.viewport ?? { panX: 0, panY: 0, zoom: 1 },
+    );
+    setGeometry3DViewState(null);
+    setDocument(null);
+    setWorkspaceMode("plane2d");
+  };
+
+  const activateWorkspaceTab = (tabId: string) => {
+    const nextTab = tabs.find((tab) => tab.id === tabId);
+
+    if (!nextTab || nextTab.id === activeTabId) {
+      return;
+    }
+
+    syncActiveWorkspaceTab();
+    setActiveTabId(nextTab.id);
+    loadWorkspaceTab(nextTab);
+  };
+
   const setCurrentPreselection = (nextPreselection: Preselection | null) => {
     preselectionRef.current = nextPreselection;
     setPreselection(nextPreselection);
@@ -2576,9 +2739,16 @@ function App() {
   const hasPointA = Boolean(displayDocument.entities[TEST_POINT_A_ID]);
   const hasPointB = Boolean(displayDocument.entities[TEST_POINT_B_ID]);
   const hasSegmentAB = Boolean(displayDocument.entities[TEST_SEGMENT_AB_ID]);
+  const activeWorkspaceTab = tabs.find((tab) => tab.id === activeTabId) ?? null;
   const currentFileName = currentFilePath
     ? currentFilePath.split(/[\\/]/).pop() ?? currentFilePath
-    : "Untitled.sgb";
+    : activeWorkspaceTab?.title ?? "Untitled.sgb";
+  const workspaceTabItems: readonly WorkspaceTabBarItem[] = tabs.map((tab) => ({
+    id: tab.id,
+    kind: tab.kind,
+    title: tab.title,
+    isDirty: tab.id === activeTabId ? isDirty : tab.isDirty,
+  }));
   const parallelAnchorPreviewPosition =
     currentTool === "parallel" && parallelDraft
       ? lastSnapResult?.position ?? lastPointerInfo?.worldPosition ?? null
@@ -3088,13 +3258,39 @@ function App() {
       ...nextDocument,
       selectedEntityIds: [],
     });
+    const now = new Date().toISOString();
+    const manager = new CommandManager(sanitizedDocument);
+    const title = getTabTitleFromPath(
+      nextFilePath,
+      `三维画布 ${nextGeometryTabNumberRef.current}`,
+    );
+    const tab: WorkspaceTab = {
+      id: createWorkspaceTabId(),
+      kind: "geometry3d",
+      title,
+      filePath: nextFilePath,
+      document: sanitizedDocument,
+      isDirty: false,
+      createdAt: now,
+      updatedAt: now,
+      geometry3DState: {
+        commandManager: manager,
+        activeTool: "select",
+        viewState: null,
+      },
+    };
 
-    commandManager.reset(sanitizedDocument);
+    nextGeometryTabNumberRef.current += 1;
+    syncActiveWorkspaceTab();
+    setTabs((currentTabs) => [...currentTabs, tab]);
+    setActiveTabId(tab.id);
+    commandManagerRef.current = manager;
     setDocument(sanitizedDocument);
     setCurrentFilePath(nextFilePath);
     setIsDirty(false);
     setCurrentTool("select");
     setPlaneCanvasDocument(null);
+    setGeometry3DViewState(null);
     setPlane2DHistory(createPlane2DHistoryState());
     resetPlane2DTransientState();
     setWorkspaceMode("geometry3d");
@@ -3108,16 +3304,67 @@ function App() {
     const normalizedDocument = syncPlane2DIntersections(
       normalizePlaneCanvasDocument(nextDocument),
     );
+    const now = new Date().toISOString();
+    const title = getTabTitleFromPath(
+      nextFilePath,
+      `平面画布 ${nextPlaneTabNumberRef.current}`,
+    );
+    const tab: WorkspaceTab = {
+      id: createWorkspaceTabId(),
+      kind: "plane2d",
+      title,
+      filePath: nextFilePath,
+      document: normalizedDocument,
+      isDirty: false,
+      createdAt: now,
+      updatedAt: now,
+      plane2DState: {
+        history: createPlane2DHistoryState(),
+        activeTool: "select",
+        pendingSegmentPointId: null,
+        viewport: { panX: 0, panY: 0, zoom: 1 },
+      },
+    };
 
+    nextPlaneTabNumberRef.current += 1;
+    syncActiveWorkspaceTab();
+    setTabs((currentTabs) => [...currentTabs, tab]);
+    setActiveTabId(tab.id);
     resetTransientToolState();
     setPlaneCanvasDocument(normalizedDocument);
     setPlane2DHistory(createPlane2DHistoryState());
+    setPlane2DViewportState({ panX: 0, panY: 0, zoom: 1 });
     setCurrentFilePath(nextFilePath);
     setIsDirty(false);
     setPlane2DTool("select");
     resetPlane2DTransientState();
     setWorkspaceMode("plane2d");
   };
+
+  useEffect(() => {
+    if (!activeTabId) {
+      return;
+    }
+
+    setTabs((currentTabs) =>
+      currentTabs.map((tab) =>
+        tab.id === activeTabId ? captureActiveWorkspaceTab(tab) : tab,
+      ),
+    );
+  }, [
+    activeTabId,
+    currentFilePath,
+    currentTool,
+    document,
+    geometry3DViewState,
+    isDirty,
+    plane2DHistory,
+    plane2DPendingSegmentPointId,
+    plane2DTool,
+    plane2DViewportState,
+    planeCanvasDocument,
+    workspaceMode,
+  ]);
 
   const isPlaneCanvasDocumentLike = (
     value: unknown,
@@ -3286,27 +3533,66 @@ function App() {
   };
 
   const newPlaneCanvas = () => {
-    resetTransientToolState();
-    setPlaneCanvasDocument(createPlaneCanvasDocument());
-    setPlane2DHistory(createPlane2DHistoryState());
-    resetPlane2DTransientState();
-    setWorkspaceMode("plane2d");
-    setCurrentFilePath(null);
-    setIsDirty(false);
-    setCurrentTool("select");
+    resetPlaneCanvasDocument(createPlaneCanvasDocument(), null);
     setFileStatusMessage("平面画布已创建");
   };
 
-  const closeWorkspace = () => {
+  const closeWorkspaceTab = (tabId: string) => {
+    const currentTabs = tabs.map((tab) =>
+      tab.id === activeTabId ? captureActiveWorkspaceTab(tab) : tab,
+    );
+    const closingTab = currentTabs.find((tab) => tab.id === tabId);
+
+    if (!closingTab) {
+      return;
+    }
+
+    if (
+      closingTab.isDirty &&
+      !window.confirm("文件尚未保存，确定关闭吗？")
+    ) {
+      return;
+    }
+
+    const closingIndex = currentTabs.findIndex((tab) => tab.id === tabId);
+    const nextTabs = currentTabs.filter((tab) => tab.id !== tabId);
+
+    setTabs(nextTabs);
+
+    if (tabId !== activeTabId) {
+      return;
+    }
+
+    const nextTab =
+      nextTabs[Math.min(closingIndex, nextTabs.length - 1)] ?? null;
+
+    if (nextTab) {
+      setActiveTabId(nextTab.id);
+      loadWorkspaceTab(nextTab);
+      setFileStatusMessage("Closed workspace");
+      return;
+    }
+
     resetTransientToolState();
+    setActiveTabId(null);
     setWorkspaceMode("none");
+    setDocument(null);
     setPlaneCanvasDocument(null);
     setPlane2DHistory(createPlane2DHistoryState());
+    setPlane2DViewportState({ panX: 0, panY: 0, zoom: 1 });
     resetPlane2DTransientState();
     setCurrentFilePath(null);
     setIsDirty(false);
     setCurrentTool("select");
     setFileStatusMessage("Closed workspace");
+  };
+
+  const closeWorkspace = () => {
+    if (!activeTabId) {
+      return;
+    }
+
+    closeWorkspaceTab(activeTabId);
   };
 
   const updatePlaneCanvasDocument = (
@@ -3428,6 +3714,14 @@ function App() {
           return;
         }
 
+        const existingTab = tabs.find((tab) => tab.filePath === browserFile.fileName);
+
+        if (existingTab) {
+          activateWorkspaceTab(existingTab.id);
+          setFileStatusMessage("文件已打开");
+          return;
+        }
+
         const importedPlaneCanvas = tryImportPlaneCanvasDocument(
           browserFile.jsonText,
         );
@@ -3459,6 +3753,14 @@ function App() {
       });
 
       if (!selectedFilePath || Array.isArray(selectedFilePath)) {
+        return;
+      }
+
+      const existingTab = tabs.find((tab) => tab.filePath === selectedFilePath);
+
+      if (existingTab) {
+        activateWorkspaceTab(existingTab.id);
+        setFileStatusMessage("文件已打开");
         return;
       }
 
@@ -8172,6 +8474,21 @@ function App() {
         onToggleBoundaryCube={() => toggleSetting("showBoundaryCube")}
         onUndo={undo}
       />
+      {tabs.length > 0 ? (
+        <WorkspaceTabBar
+          activeTabId={activeTabId}
+          onActivate={activateWorkspaceTab}
+          onClose={closeWorkspaceTab}
+          onReorder={(tabIds) =>
+            setTabs((currentTabs) =>
+              tabIds
+                .map((tabId) => currentTabs.find((tab) => tab.id === tabId))
+                .filter((tab): tab is WorkspaceTab => Boolean(tab)),
+            )
+          }
+          tabs={workspaceTabItems}
+        />
+      ) : null}
       {workspaceMode === "geometry3d" ? (
         <>
       <aside className="toolbar" aria-label="Geometry tools">
@@ -8202,7 +8519,7 @@ function App() {
                   </button>
                   <button
                     aria-label={
-                      showPointToolPanel ? "Collapse point tool mode" : "Expand point tool mode"
+                      showPointToolPanel ? "收回点工具方式" : "展开点工具方式"
                     }
                     className={
                       showPointToolPanel
@@ -8213,7 +8530,8 @@ function App() {
                       event.stopPropagation();
                       openPointToolPanel();
                     }}
-                    title="Point tool mode"
+                    ref={pointToolToggleRef}
+                    title="点工具方式"
                     type="button"
                   >
                     <span>{showPointToolPanel ? "<" : ">"}</span>
@@ -8287,6 +8605,7 @@ function App() {
                       event.stopPropagation();
                       openPerpendicularToolPanel();
                     }}
+                    ref={perpendicularToolToggleRef}
                     title="\u5782\u7ebf\u5de5\u5177\u65b9\u5f0f"
                     type="button"
                   >
@@ -8325,6 +8644,7 @@ function App() {
                       event.stopPropagation();
                       openExtendToolPanel();
                     }}
+                    ref={extendToolToggleRef}
                     title="\u5ef6\u957f\u5de5\u5177\u65b9\u5f0f"
                     type="button"
                   >
@@ -8363,6 +8683,7 @@ function App() {
                       event.stopPropagation();
                       openParallelToolPanel();
                     }}
+                    ref={parallelToolToggleRef}
                     title="\u5e73\u884c\u5de5\u5177\u65b9\u5f0f"
                     type="button"
                   >
@@ -8422,6 +8743,7 @@ function App() {
                       event.stopPropagation();
                       openAngleToolPanel();
                     }}
+                    ref={angleToolToggleRef}
                     title="角度工具方式"
                     type="button"
                   >
@@ -8626,16 +8948,16 @@ function App() {
               onClick={() => toggleSetting("snapEnabled")}
               type="button"
             >
-              <span>Snap Enabled</span>
+              <span>启用吸附</span>
             </button>
             <div className="tool-button-grid">
               {[
-                ["snapToGrid", "Grid"],
-                ["snapToPoints", "Points"],
-                ["snapToAxes", "Axes"],
-                ["snapToSegments", "Segments"],
-                ["snapToPlanes", "Planes"],
-                ["snapToOrigin", "Origin"],
+                ["snapToGrid", "网格"],
+                ["snapToPoints", "点"],
+                ["snapToAxes", "坐标轴"],
+                ["snapToSegments", "线段"],
+                ["snapToPlanes", "平面"],
+                ["snapToOrigin", "原点"],
               ].map(([settingName, label]) => (
                 <button
                   className={
@@ -8668,29 +8990,37 @@ function App() {
       </aside>
 
       {showPointToolPanel ? (
-        <div className="point-tool-flyout" role="menu" aria-label="Point tool mode">
+        <FloatingSubmenu
+          anchorElement={pointToolToggleRef.current}
+          ariaLabel="点工具方式"
+          className="point-tool-flyout"
+          onClose={() => setShowPointToolPanel(false)}
+          open={showPointToolPanel}
+        >
           <button
             className={pointCreationMode === "free" ? "active" : ""}
             onClick={activatePointFreeMode}
             type="button"
           >
-            鑷敱鐢荤偣
+            自由点
           </button>
           <button
             className={pointCreationMode === "coordinate" ? "active" : ""}
             onClick={activateCoordinatePointMode}
             type="button"
           >
-            鍧愭爣鐢荤偣
+            坐标建点
           </button>
-        </div>
+        </FloatingSubmenu>
       ) : null}
 
       {showPerpendicularToolPanel ? (
-        <div
+        <FloatingSubmenu
+          anchorElement={perpendicularToolToggleRef.current}
           className="point-tool-flyout perpendicular-tool-flyout"
-          role="menu"
-          aria-label="\u5782\u7ebf\u5de5\u5177\u65b9\u5f0f"
+          ariaLabel="\u5782\u7ebf\u5de5\u5177\u65b9\u5f0f"
+          onClose={() => setShowPerpendicularToolPanel(false)}
+          open={showPerpendicularToolPanel}
         >
           <button
             className={perpendicularMode === "pointLine" ? "active" : ""}
@@ -8706,14 +9036,16 @@ function App() {
           >
             {"\u70b9\u5230\u9762\u5782\u7ebf"}
           </button>
-        </div>
+        </FloatingSubmenu>
       ) : null}
 
       {showExtendToolPanel ? (
-        <div
+        <FloatingSubmenu
+          anchorElement={extendToolToggleRef.current}
           className="point-tool-flyout extend-tool-flyout"
-          role="menu"
-          aria-label="\u5ef6\u957f\u5de5\u5177\u65b9\u5f0f"
+          ariaLabel="\u5ef6\u957f\u5de5\u5177\u65b9\u5f0f"
+          onClose={() => setShowExtendToolPanel(false)}
+          open={showExtendToolPanel}
         >
           <button
             className={extendMode === "segmentToBoundary" ? "active" : ""}
@@ -8729,14 +9061,16 @@ function App() {
           >
             {"\u5ef6\u5c55\u5e73\u9762\u5230\u8fb9\u754c"}
           </button>
-        </div>
+        </FloatingSubmenu>
       ) : null}
 
       {showParallelToolPanel ? (
-        <div
+        <FloatingSubmenu
+          anchorElement={parallelToolToggleRef.current}
           className="point-tool-flyout parallel-tool-flyout"
-          role="menu"
-          aria-label="\u5e73\u884c\u5de5\u5177\u65b9\u5f0f"
+          ariaLabel="\u5e73\u884c\u5de5\u5177\u65b9\u5f0f"
+          onClose={() => setShowParallelToolPanel(false)}
+          open={showParallelToolPanel}
         >
           <button
             className={parallelMode === "segment" ? "active" : ""}
@@ -8752,7 +9086,7 @@ function App() {
           >
             {"\u5e73\u884c\u5e73\u9762"}
           </button>
-        </div>
+        </FloatingSubmenu>
       ) : null}
 
       {false ? (
@@ -8802,10 +9136,16 @@ function App() {
       ) : null}
 
       {showAngleToolPanel ? (
-        <div
+        <FloatingSubmenu
+          anchorElement={angleToolToggleRef.current}
           className="point-tool-flyout angle-tool-flyout"
-          role="menu"
-          aria-label="角度工具方式"
+          ariaLabel="角度工具方式"
+          onClose={() => {
+            setShowAngleToolPanel(false);
+            setShowLinePlaneAnglePanel(false);
+            setShowPlanePlaneAnglePanel(false);
+          }}
+          open={showAngleToolPanel}
         >
           <button
             className={angleMeasureMode === "threePoint" ? "active" : ""}
@@ -8825,13 +9165,14 @@ function App() {
               onClick={toggleLinePlaneAnglePanel}
               type="button"
             >
-              Line-plane angle
+              线面角
             </button>
             <button
               aria-label={
-                showLinePlaneAnglePanel ? "Collapse line-plane angle mode" : "Expand line-plane angle mode"
+                showLinePlaneAnglePanel ? "收回线面角方式" : "展开线面角方式"
               }
               className={showLinePlaneAnglePanel ? "active" : ""}
+              ref={linePlaneAngleToggleRef}
               onClick={toggleLinePlaneAnglePanel}
               type="button"
             >
@@ -8849,66 +9190,71 @@ function App() {
               onClick={togglePlanePlaneAnglePanel}
               type="button"
             >
-              Plane-plane angle
+              面面角
             </button>
             <button
               aria-label={
-                showPlanePlaneAnglePanel ? "Collapse plane-plane angle mode" : "Expand plane-plane angle mode"
+                showPlanePlaneAnglePanel ? "收回面面角方式" : "展开面面角方式"
               }
               className={showPlanePlaneAnglePanel ? "active" : ""}
+              ref={planePlaneAngleToggleRef}
               onClick={togglePlanePlaneAnglePanel}
               type="button"
             >
               {showPlanePlaneAnglePanel ? "<" : ">"}
             </button>
           </div>
-        </div>
+        </FloatingSubmenu>
       ) : null}
 
       {showAngleToolPanel && showLinePlaneAnglePanel ? (
-        <div
+        <FloatingSubmenu
+          anchorElement={linePlaneAngleToggleRef.current}
           className="point-tool-flyout angle-line-plane-flyout"
-          role="menu"
-          aria-label="Line-plane angle mode"
+          ariaLabel="线面角方式"
+          onClose={() => setShowLinePlaneAnglePanel(false)}
+          open={showAngleToolPanel && showLinePlaneAnglePanel}
         >
           <button
             className={angleMeasureMode === "lineXYPlane" ? "active" : ""}
             onClick={activateLineXYPlaneAngleMode}
             type="button"
           >
-            Segment with X-Y plane
+            与 XY 平面夹角
           </button>
           <button
             className={angleMeasureMode === "linePlane" ? "active" : ""}
             onClick={activateLinePlaneAngleMode}
             type="button"
           >
-            Segment with existing plane
+            与已有平面夹角
           </button>
-        </div>
+        </FloatingSubmenu>
       ) : null}
 
       {showAngleToolPanel && showPlanePlaneAnglePanel ? (
-        <div
+        <FloatingSubmenu
+          anchorElement={planePlaneAngleToggleRef.current}
           className="point-tool-flyout angle-plane-plane-flyout"
-          role="menu"
-          aria-label="Plane-plane angle mode"
+          ariaLabel="面面角方式"
+          onClose={() => setShowPlanePlaneAnglePanel(false)}
+          open={showAngleToolPanel && showPlanePlaneAnglePanel}
         >
           <button
             className={angleMeasureMode === "planeXYPlane" ? "active" : ""}
             onClick={activatePlaneXYPlaneAngleMode}
             type="button"
           >
-            Plane with X-Y plane
+            与 XY 平面夹角
           </button>
           <button
             className={angleMeasureMode === "planePlane" ? "active" : ""}
             onClick={activatePlanePlaneAngleMode}
             type="button"
           >
-            Plane with existing plane
+            与已有平面夹角
           </button>
-        </div>
+        </FloatingSubmenu>
       ) : null}
 
       <section className="viewport-panel" aria-label="3D viewport">
@@ -8939,6 +9285,8 @@ function App() {
           tertiaryPreviewPosition={tertiaryPreviewPosition}
           segmentPreviewStartPosition={segmentPreviewStartPosition}
           planePreviewPoints={parallelPreviewPlane}
+          initialViewState={geometry3DViewState}
+          onViewStateChange={setGeometry3DViewState}
           onCanvasPointerDown={handleCanvasPointerDown}
           onCanvasPointerMove={handleCanvasPointerMove}
           onSelectPointDragStart={handleSelectPointDragStart}
@@ -9627,11 +9975,11 @@ function App() {
             <header className="modal-header">
               <h2>按坐标创建点</h2>
               <button
-                aria-label="鍏抽棴"
+                aria-label="关闭"
                 onClick={closeCoordinatePointModal}
                 type="button"
               >
-                脳
+                ×
               </button>
             </header>
             <div className="coordinate-point-form">
@@ -9724,11 +10072,13 @@ function App() {
               <PlaneCanvasViewport
                 currentTool={plane2DTool}
                 document={planeCanvasDocument}
+                initialViewport={plane2DViewportState}
                 onChange={updatePlaneCanvasDocument}
                 onPendingSegmentPointChange={setPlane2DPendingSegmentPointId}
                 onStatus={setPlane2DStatusMessage}
                 onToolChange={setPlane2DTool}
                 onToast={showToast}
+                onViewportChange={setPlane2DViewportState}
                 pendingSegmentPointId={plane2DPendingSegmentPointId}
                 resetSignal={plane2DResetSignal}
               />
