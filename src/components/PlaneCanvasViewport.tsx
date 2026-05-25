@@ -1,6 +1,7 @@
 ﻿import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   Plane2DCircleEntity,
+  Plane2DEntity,
   Plane2DExtensionEntity,
   Plane2DMeasurementEntity,
   Plane2DPointEntity,
@@ -11,6 +12,7 @@ import type {
   Vec2,
 } from "../core/plane2d/PlaneCanvasTypes";
 import {
+  createPlane2DCalculation,
   createPlane2DCircle,
   createPlane2DExtension,
   createPlane2DMeasurement,
@@ -22,6 +24,7 @@ import {
   getPerpendicularEndpointOnLine2D,
   getPerpendicularFootOnLine2D,
   getPlane2DCircleGeometry,
+  getPlane2DCalculationInfo,
   getPlane2DMeasurementInfo,
   getPlane2DPointPosition,
   getPlane2DPolygonPoints,
@@ -34,8 +37,13 @@ import {
   plane2DPerpendicularFootId,
   plane2DExtensionId,
   syncPlane2DConstructions,
+  evaluatePlane2DCalculation,
 } from "../core/plane2d/planeCanvasUtils";
 import type { Plane2DDocumentChangeOptions } from "../core/plane2d/plane2DHistory";
+import FormulaView from "../core/calculation/FormulaView";
+import type { CalculationExpression } from "../core/calculation/CalculationTypes";
+import { formatCalculationValue } from "../core/calculation/calculationUnits";
+import type { Plane2DCalculationEntity } from "../core/plane2d/PlaneCanvasTypes";
 
 interface PlaneCanvasViewportProps {
   readonly document: PlaneCanvasDocument;
@@ -80,6 +88,11 @@ type Plane2DPickResult =
   | {
       readonly kind: "measurement";
       readonly measurementId: string;
+      readonly distancePx: number;
+    }
+  | {
+      readonly kind: "calculation";
+      readonly calculationId: string;
       readonly distancePx: number;
     };
 
@@ -145,6 +158,12 @@ type PolygonSidesDialogState = {
   readonly error: string | null;
 };
 
+type CalculationPointPickerState = {
+  readonly mode: "distance" | "angle";
+  readonly selectedPointIds: readonly string[];
+  readonly searchQuery: string;
+};
+
 const POINT_EPSILON = 1e-5;
 const WORLD_UNIT_TO_CSS_PX = 37.7952755906;
 const MIN_ZOOM = 0.2;
@@ -169,6 +188,7 @@ const planeToolLabels: Record<Plane2DToolName, string> = {
   extend: "延长",
   length: "长度",
   angle: "角度",
+  calculation: "计算",
 };
 
 const planeToolIcons: Record<Plane2DToolName, string> = {
@@ -183,6 +203,7 @@ const planeToolIcons: Record<Plane2DToolName, string> = {
   extend: "",
   length: "↔",
   angle: "∠",
+  calculation: "ƒ",
 };
 
 const Plane2DExtendIcon = () => (
@@ -230,7 +251,7 @@ const planeToolGroups: ReadonlyArray<{
 }> = [
   { title: "基础", tools: ["select"] },
   { title: "构造", tools: ["point", "segment", "circle", "copyCircle", "polygon", "midpoint", "perpendicular", "extend"] },
-  { title: "测量", tools: ["length", "angle"] },
+  { title: "测量", tools: ["length", "angle", "calculation"] },
 ];
 
 const getBaseToolHint = (tool: Plane2DToolName): string => {
@@ -255,6 +276,8 @@ const getBaseToolHint = (tool: Plane2DToolName): string => {
       return "请选择线段或两个点进行长度测量，也可按 Ctrl+K 输入坐标点。";
     case "angle":
       return "请选择两条线段或三个点进行角度测量，也可按 Ctrl+K 输入坐标点。";
+    case "calculation":
+      return "请选择线段或测量对象插入计算，确认后点击画布放置结果。";
     default:
       return "选择对象，拖动空白处可平移画布。";
   }
@@ -267,6 +290,7 @@ const getEntityDisplayName = (
     | Plane2DPolygonEntity
     | Plane2DMeasurementEntity
     | Plane2DExtensionEntity
+    | Plane2DCalculationEntity
     | undefined,
 ): string => {
   const manualName =
@@ -325,6 +349,14 @@ export default function PlaneCanvasViewport({
   const [angleVertexPointId, setAngleVertexPointId] = useState<string | null>(null);
   const [coordinateDialog, setCoordinateDialog] =
     useState<CoordinateDialogState | null>(null);
+  const [calculationExpression, setCalculationExpression] =
+    useState<CalculationExpression | null>(null);
+  const [calculationPendingOp, setCalculationPendingOp] = useState<
+    "add" | "sub" | "mul" | "div" | null
+  >(null);
+  const [isPlacingCalculation, setIsPlacingCalculation] = useState(false);
+  const [calculationPointPicker, setCalculationPointPicker] =
+    useState<CalculationPointPickerState | null>(null);
 
   const selectedEntityId = document.selectedEntityIds[0] ?? null;
   const selectedEntityIdSet = new Set(document.selectedEntityIds);
@@ -336,7 +368,7 @@ export default function PlaneCanvasViewport({
     () =>
       Object.values(document.entities).filter(
         (entity): entity is Plane2DPointEntity =>
-          entity.type === "plane2d-point",
+          entity.type === "plane2d-point" && entity.visible !== false,
       ),
     [document.entities],
   );
@@ -344,7 +376,7 @@ export default function PlaneCanvasViewport({
     () =>
       Object.values(document.entities).filter(
         (entity): entity is Plane2DSegmentEntity =>
-          entity.type === "plane2d-segment",
+          entity.type === "plane2d-segment" && entity.visible !== false,
       ),
     [document.entities],
   );
@@ -352,7 +384,7 @@ export default function PlaneCanvasViewport({
     () =>
       Object.values(document.entities).filter(
         (entity): entity is Plane2DCircleEntity =>
-          entity.type === "plane2d-circle",
+          entity.type === "plane2d-circle" && entity.visible !== false,
       ),
     [document.entities],
   );
@@ -360,7 +392,7 @@ export default function PlaneCanvasViewport({
     () =>
       Object.values(document.entities).filter(
         (entity): entity is Plane2DPolygonEntity =>
-          entity.type === "plane2d-polygon",
+          entity.type === "plane2d-polygon" && entity.visible !== false,
       ),
     [document.entities],
   );
@@ -368,7 +400,15 @@ export default function PlaneCanvasViewport({
     () =>
       Object.values(document.entities).filter(
         (entity): entity is Plane2DMeasurementEntity =>
-          entity.type === "plane2d-measurement",
+          entity.type === "plane2d-measurement" && entity.visible !== false,
+      ),
+    [document.entities],
+  );
+  const calculations = useMemo(
+    () =>
+      Object.values(document.entities).filter(
+        (entity): entity is Plane2DCalculationEntity =>
+          entity.type === "plane2d-calculation" && entity.visible !== false,
       ),
     [document.entities],
   );
@@ -380,6 +420,117 @@ export default function PlaneCanvasViewport({
       ),
     [document.entities],
   );
+
+  const getCalculationReferenceLabel = (targetId: string): string => {
+    const entity = document.entities[targetId];
+
+    if (!entity) {
+      return "引用失效";
+    }
+
+    if (entity.type === "plane2d-segment") {
+      return `|${getEntityDisplayName(entity)}|`;
+    }
+
+    if (entity.type === "plane2d-measurement") {
+      return getEntityDisplayName(entity);
+    }
+
+    return getEntityDisplayName(entity as Plane2DEntity);
+  };
+
+  const getPointTypeLabel = (point: Plane2DPointEntity): string => {
+    if (point.pointKind !== "constructed") {
+      return "自由点";
+    }
+
+    switch (point.construction?.kind) {
+      case "segmentIntersection":
+        return "交点";
+      case "midpoint":
+        return "中点";
+      case "perpendicularFoot":
+        return "垂足";
+      case "perpendicularEndpoint":
+        return "垂线端点";
+      case "copiedCircleRadiusPoint":
+        return "复制圆半径点";
+      case "regularPolygonVertex":
+        return "正多边形顶点";
+      default:
+        return "构造点";
+    }
+  };
+
+  const openCalculationPointPicker = (mode: "distance" | "angle") => {
+    const minimumPointCount = mode === "distance" ? 2 : 3;
+
+    if (points.length < minimumPointCount) {
+      onToast?.(
+        mode === "distance"
+          ? "当前画布中至少需要两个点"
+          : "当前画布中至少需要三个点",
+      );
+      return;
+    }
+
+    setCalculationPointPicker({ mode, selectedPointIds: [], searchQuery: "" });
+    setIsPlacingCalculation(false);
+    onStatus(mode === "distance" ? "请选择两个点作为边。" : "请选择三个点作为角，第二个点为顶点。");
+  };
+
+  const insertCalculationPointExpression = (
+    expression: CalculationExpression,
+    statusMessage: string,
+  ) => {
+    insertCalculationReference(expression);
+    setCalculationPointPicker(null);
+    onStatus(statusMessage);
+  };
+
+  const toggleCalculationPoint = (pointId: string) => {
+    if (!calculationPointPicker) {
+      return;
+    }
+
+    const selectedPointIds = calculationPointPicker.selectedPointIds.includes(pointId)
+      ? calculationPointPicker.selectedPointIds.filter((id) => id !== pointId)
+      : [...calculationPointPicker.selectedPointIds, pointId];
+
+    if (calculationPointPicker.mode === "distance" && selectedPointIds.length === 2) {
+      const [pointAId, pointBId] = selectedPointIds;
+
+      if (pointAId === pointBId) {
+        onToast?.("请选择两个不同的点");
+        setCalculationPointPicker({ ...calculationPointPicker, selectedPointIds });
+        return;
+      }
+
+      insertCalculationPointExpression(
+        { kind: "pointDistance", pointAId, pointBId },
+        "已插入两点距离引用。",
+      );
+      return;
+    }
+
+    if (calculationPointPicker.mode === "angle" && selectedPointIds.length === 3) {
+      const [pointAId, vertexPointId, pointCId] = selectedPointIds;
+
+      if (pointAId === vertexPointId || pointCId === vertexPointId) {
+        onToast?.("角度退化，无法加入角");
+        setCalculationPointPicker({ ...calculationPointPicker, selectedPointIds });
+        return;
+      }
+
+      insertCalculationPointExpression(
+        { kind: "threePointAngle", pointAId, vertexPointId, pointCId },
+        "已插入三点角引用。",
+      );
+      return;
+    }
+
+    setCalculationPointPicker({ ...calculationPointPicker, selectedPointIds });
+  };
 
   useEffect(() => {
     latestDocumentRef.current = document;
@@ -398,6 +549,7 @@ export default function PlaneCanvasViewport({
     setLengthFirstPointId(null);
     setAngleFirstTarget(null);
     setAngleVertexPointId(null);
+    setCalculationPointPicker(null);
     setInteraction({ kind: "idle" });
     setHoverTarget(null);
     dragStartDocumentRef.current = null;
@@ -486,7 +638,7 @@ export default function PlaneCanvasViewport({
 
     const target = document.entities[extension.targetSegmentId];
     const positions =
-      target?.type === "plane2d-segment"
+      target?.type === "plane2d-segment" && target.visible !== false
         ? getPlane2DSegmentPositions(document, target)
         : null;
 
@@ -768,7 +920,26 @@ export default function PlaneCanvasViewport({
       .filter((candidate) => candidate.distancePx <= MEASUREMENT_HIT_RADIUS_PX)
       .sort((a, b) => a.distancePx - b.distancePx)[0];
 
-    return measurementCandidate ?? null;
+    if (measurementCandidate) {
+      return measurementCandidate;
+    }
+
+    const calculationCandidate = calculations
+      .map((calculation) => {
+        const info = getPlane2DCalculationInfo(document, calculation);
+        const labelScreen = worldToScreen(info.position);
+        const distancePx = distanceBetweenVec2(labelScreen, screenPosition);
+
+        return {
+          kind: "calculation" as const,
+          calculationId: calculation.id,
+          distancePx,
+        };
+      })
+      .filter((candidate) => candidate.distancePx <= MEASUREMENT_HIT_RADIUS_PX)
+      .sort((a, b) => a.distancePx - b.distancePx)[0];
+
+    return calculationCandidate ?? null;
   };
 
   const resolveSnap = (
@@ -1446,6 +1617,72 @@ export default function PlaneCanvasViewport({
     onStatus("已创建中点。");
   };
 
+  const insertCalculationReference = (expression: CalculationExpression) => {
+    setCalculationExpression((current) => {
+      if (current && calculationPendingOp) {
+        return {
+          kind: "binary",
+          op: calculationPendingOp,
+          left: current,
+          right: expression,
+        };
+      }
+
+      return expression;
+    });
+    setCalculationPendingOp(null);
+    setIsPlacingCalculation(false);
+  };
+
+  const insertCalculationReferenceForPick = (pick: Plane2DPickResult | null) => {
+    if (pick?.kind === "segment") {
+      insertCalculationReference({
+        kind: "reference",
+        targetId: pick.segmentId,
+        valueKind: "length",
+      });
+      onStatus("已插入线段长度引用。");
+      return true;
+    }
+
+    if (pick?.kind === "measurement") {
+      insertCalculationReference({
+        kind: "reference",
+        targetId: pick.measurementId,
+        valueKind: "measurement",
+      });
+      onStatus("已插入测量引用。");
+      return true;
+    }
+
+    return false;
+  };
+
+  const createCalculationAt = (position: Vec2) => {
+    if (!calculationExpression) {
+      onStatus("请先插入计算表达式。");
+      return;
+    }
+
+    const calculation = createPlane2DCalculation(
+      makePlane2DId("plane2d-calculation"),
+      {
+        expression: calculationExpression,
+        labelPosition: position,
+      },
+    );
+
+    setDocument({
+      ...document,
+      entities: { ...document.entities, [calculation.id]: calculation },
+      selectedEntityIds: [calculation.id],
+    });
+    setIsPlacingCalculation(false);
+    setCalculationExpression(null);
+    setCalculationPendingOp(null);
+    onStatus("已创建计算结果。");
+  };
+
   const createLengthMeasurementForSegment = (segmentId: string) => {
     const segment = document.entities[segmentId];
 
@@ -1775,6 +2012,16 @@ export default function PlaneCanvasViewport({
         angleVertexPointId,
         snap,
       );
+      return;
+    }
+
+    if (currentTool === "calculation") {
+      if (isPlacingCalculation) {
+        createCalculationAt(snap.position);
+        return;
+      }
+
+      onStatus("请选择线段或测量对象插入计算。");
     }
   };
 
@@ -1788,7 +2035,8 @@ export default function PlaneCanvasViewport({
       currentTool === "midpoint" ||
       currentTool === "perpendicular" ||
       currentTool === "length" ||
-      currentTool === "angle"
+      currentTool === "angle" ||
+      currentTool === "calculation"
     ) {
       applyPointInput(snap, ctrlKey);
       return;
@@ -2069,6 +2317,25 @@ export default function PlaneCanvasViewport({
       return;
     }
 
+    if (currentTool === "calculation") {
+      if (isPlacingCalculation) {
+        createCalculationAt(snap.position);
+        return;
+      }
+
+      if (insertCalculationReferenceForPick(pick)) {
+        return;
+      }
+
+      if (pick?.kind === "calculation") {
+        selectEntity(pick.calculationId);
+        return;
+      }
+
+      startPendingPanOrClick(event);
+      return;
+    }
+
     if (currentTool === "length") {
       if (pick?.kind === "point") {
         const pickedPoint = document.entities[pick.pointId];
@@ -2276,6 +2543,16 @@ export default function PlaneCanvasViewport({
       return;
     }
 
+    if (pick?.kind === "calculation") {
+      if (event.ctrlKey) {
+        onStatus("连续命名仅支持点。");
+        return;
+      }
+
+      selectEntity(pick.calculationId);
+      return;
+    }
+
     startPendingPanOrClick(event);
   };
 
@@ -2369,6 +2646,9 @@ export default function PlaneCanvasViewport({
     setLengthFirstPointId(null);
     setAngleFirstTarget(null);
     setAngleVertexPointId(null);
+    setCalculationExpression(null);
+    setCalculationPendingOp(null);
+    setIsPlacingCalculation(false);
     setInteraction({ kind: "idle" });
     onStatus(getBaseToolHint(currentTool));
   };
@@ -2478,6 +2758,10 @@ export default function PlaneCanvasViewport({
 
     if (currentTool === "angle" && angleFirstTarget?.kind === "point" && angleVertexPointId) {
       return "请选择第三个点，也可按 Ctrl+K 输入坐标建点。";
+    }
+
+    if (currentTool === "calculation" && isPlacingCalculation) {
+      return "请在画布中点击放置计算结果。";
     }
 
     return getBaseToolHint(currentTool);
@@ -2610,7 +2894,8 @@ export default function PlaneCanvasViewport({
             hoverTarget?.kind === "extension" ||
             hoverTarget?.kind === "circle" ||
             hoverTarget?.kind === "polygon" ||
-            hoverTarget?.kind === "measurement"
+            hoverTarget?.kind === "measurement" ||
+            hoverTarget?.kind === "calculation"
           ? "hover-segment"
           : "can-pan";
 
@@ -2626,6 +2911,9 @@ export default function PlaneCanvasViewport({
     setLengthFirstPointId(null);
     setAngleFirstTarget(null);
     setAngleVertexPointId(null);
+    setCalculationExpression(null);
+    setCalculationPendingOp(null);
+    setIsPlacingCalculation(false);
     setInteraction({ kind: "idle" });
   };
 
@@ -2940,6 +3228,43 @@ export default function PlaneCanvasViewport({
               </text>
             );
           })}
+          {calculations.map((calculation) => {
+            const info = getPlane2DCalculationInfo(document, calculation);
+            const result = evaluatePlane2DCalculation(document, calculation.expression);
+            const position = worldToScreen(info.position);
+            const isSelected = selectedEntityIdSet.has(calculation.id);
+            const isHovered =
+              hoverTarget?.kind === "calculation" &&
+              hoverTarget.calculationId === calculation.id;
+
+            return (
+              <foreignObject
+                className={[
+                  "plane2d-calculation-label",
+                  isSelected ? "selected" : "",
+                  isHovered ? "hovered" : "",
+                ].join(" ")}
+                height={86}
+                key={calculation.id}
+                width={190}
+                x={position.x + 8}
+                y={position.y - 8}
+              >
+                <div className="plane2d-calculation-label-content">
+                  <FormulaView
+                    expression={calculation.expression}
+                    getReferenceLabel={getCalculationReferenceLabel}
+                  />
+                  <div>
+                    ={" "}
+                    {result.ok
+                      ? formatCalculationValue(result.value)
+                      : "引用失效"}
+                  </div>
+                </div>
+              </foreignObject>
+            );
+          })}
           {pendingPosition && previewPosition ? (
             <line
               className="plane2d-segment preview"
@@ -3104,6 +3429,152 @@ export default function PlaneCanvasViewport({
           ) : null}
         </g>
       </svg>
+      {currentTool === "calculation" ? (
+        <section className="plane2d-calculation-panel" aria-label="计算面板">
+          <h3>计算</h3>
+          <div className="formula-editor-preview">
+            {calculationExpression ? (
+              <FormulaView
+                expression={calculationExpression}
+                getReferenceLabel={getCalculationReferenceLabel}
+              />
+            ) : (
+              <span>点击线段或测量对象插入引用</span>
+            )}
+          </div>
+          <div className="calculation-button-grid">
+            {([
+              ["add", "+"],
+              ["sub", "-"],
+              ["mul", "×"],
+              ["div", "÷"],
+            ] as const).map(([op, label]) => (
+              <button
+                disabled={!calculationExpression}
+                key={op}
+                onClick={() => {
+                  setCalculationPendingOp(op);
+                  setIsPlacingCalculation(false);
+                }}
+                type="button"
+              >
+                {label}
+              </button>
+            ))}
+            {(["sin", "cos", "tan"] as const).map((op) => (
+              <button
+                disabled={!calculationExpression}
+                key={op}
+                onClick={() =>
+                  setCalculationExpression((current) =>
+                    current ? { kind: "unary", op, child: current } : current,
+                  )
+                }
+                type="button"
+              >
+                {op}
+              </button>
+            ))}
+            <button onClick={() => openCalculationPointPicker("distance")} type="button">
+              加入边
+            </button>
+            <button onClick={() => openCalculationPointPicker("angle")} type="button">
+              加入角
+            </button>
+            <button
+              onClick={() => {
+                setCalculationExpression(null);
+                setCalculationPendingOp(null);
+                setIsPlacingCalculation(false);
+                setCalculationPointPicker(null);
+              }}
+              type="button"
+            >
+              清空
+            </button>
+            <button
+              disabled={!calculationExpression || Boolean(calculationPendingOp)}
+              onClick={() => {
+                setIsPlacingCalculation(true);
+                onStatus("请在画布中点击放置计算结果。");
+              }}
+              type="button"
+            >
+              确定
+            </button>
+          </div>
+          {calculationPointPicker ? (
+            <div className="calculation-point-picker">
+              <h4>
+                {calculationPointPicker.mode === "distance"
+                  ? "选择两个点作为边"
+                  : "选择三个点作为角"}
+              </h4>
+              <input
+                className="calculation-point-search"
+                onChange={(event) =>
+                  setCalculationPointPicker((current) =>
+                    current
+                      ? { ...current, searchQuery: event.target.value }
+                      : current,
+                  )
+                }
+                placeholder="搜索点"
+                type="search"
+                value={calculationPointPicker.searchQuery}
+              />
+              <div className="calculation-point-order">
+                {calculationPointPicker.selectedPointIds.length > 0
+                  ? calculationPointPicker.selectedPointIds
+                      .map((pointId, index) => {
+                        const point = document.entities[pointId];
+                        const label =
+                          point?.type === "plane2d-point"
+                            ? getEntityDisplayName(point)
+                            : pointId;
+                        return `${index + 1}. ${label}`;
+                      })
+                      .join(" / ")
+                  : calculationPointPicker.mode === "distance"
+                    ? "请选择第 1 个点"
+                    : "请选择第 1 个点，第二个点为顶点"}
+              </div>
+              <div className="calculation-point-list">
+                {points
+                  .filter((point) => {
+                    const query = calculationPointPicker.searchQuery
+                      .trim()
+                      .toLowerCase();
+                    if (!query) {
+                      return true;
+                    }
+                    return (
+                      getEntityDisplayName(point).toLowerCase().includes(query) ||
+                      getPointTypeLabel(point).toLowerCase().includes(query)
+                    );
+                  })
+                  .map((point) => {
+                    const selected =
+                      calculationPointPicker.selectedPointIds.includes(point.id);
+
+                    return (
+                      <button
+                        className={selected ? "selected" : undefined}
+                        key={point.id}
+                        onClick={() => toggleCalculationPoint(point.id)}
+                        type="button"
+                      >
+                        <span>{getEntityDisplayName(point)}</span>
+                        <small>{getPointTypeLabel(point)}</small>
+                      </button>
+                    );
+                  })}
+              </div>
+            </div>
+          ) : null}
+          {calculationPendingOp ? <p>请选择下一个引用。</p> : null}
+        </section>
+      ) : null}
       <div className="plane2d-readout">
         工具：{planeToolLabels[currentTool]}
         {previewPosition ? ` / 坐标 (${formatVec2(previewPosition)})` : ""}
@@ -3115,6 +3586,7 @@ export default function PlaneCanvasViewport({
         {perpendicularPreview?.kind === "direction" ? ` / 垂线长度 ${perpendicularPreview.length.toFixed(2)}` : ""}
         {lengthFirstPosition && previewPosition ? ` / 当前长度 ${distanceBetweenVec2(lengthFirstPosition, previewPosition).toFixed(2)}` : ""}
         {anglePreviewValue !== null ? ` / 当前角度 ${anglePreviewValue.toFixed(2)}°` : ""}
+        {currentTool === "calculation" && isPlacingCalculation ? " / 放置计算结果" : ""}
         {` / 缩放 ${Math.round(viewport.zoom * 100)}%`}
         {interaction.kind === "pan" ? " / 正在平移" : ""}
         {hoverTarget ? ` / 悬停 ${hoverTarget.kind}` : " / 悬停 none"}

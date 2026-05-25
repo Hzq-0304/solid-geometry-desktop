@@ -1,3 +1,4 @@
+import type { CalculationExpression } from "../calculation/CalculationTypes";
 import type { Vec3 } from "../geometry/Vec3";
 
 export type EntityId = string;
@@ -12,7 +13,8 @@ export type EntityKind =
   | "polygon"
   | "solid"
   | "label"
-  | "measurement";
+  | "measurement"
+  | "calculation";
 
 export interface EntityStyle {
   readonly color?: string;
@@ -229,6 +231,19 @@ export interface MeasurementEntity extends BaseEntity {
   readonly unit?: string;
 }
 
+export interface CalculationEntity extends BaseEntity {
+  readonly kind: "calculation";
+  readonly type: "calculation";
+  readonly expression: CalculationExpression;
+  readonly labelPosition?: {
+    readonly mode: "screen" | "world";
+    readonly x: number;
+    readonly y: number;
+    readonly z?: number;
+  };
+  readonly nameSource?: "auto" | "manual";
+}
+
 export type BoardEntity =
   | PointEntity
   | SegmentEntity
@@ -239,4 +254,5 @@ export type BoardEntity =
   | PolygonEntity
   | SolidEntity
   | LabelEntity
-  | MeasurementEntity;
+  | MeasurementEntity
+  | CalculationEntity;

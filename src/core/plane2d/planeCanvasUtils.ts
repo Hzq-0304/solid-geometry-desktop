@@ -9,6 +9,15 @@
   PlaneCanvasDocument,
   Vec2,
 } from "./PlaneCanvasTypes";
+import type { Plane2DCalculationEntity } from "./PlaneCanvasTypes";
+
+import type {
+  CalculationExpression,
+  CalculationReferenceValueKind,
+  CalculationValue,
+} from "../calculation/CalculationTypes";
+import { evaluateCalculationExpression } from "../calculation/calculationEvaluator";
+import { formatCalculationValue } from "../calculation/calculationUnits";
 
 const EPSILON = 1e-6;
 const ENDPOINT_EPSILON = 1e-4;
@@ -119,6 +128,32 @@ export const createPlane2DMeasurement = (
   return {
     id,
     type: "plane2d-measurement",
+    nameSource: "auto",
+    showName: false,
+    createdAt: now,
+    updatedAt: now,
+    ...options,
+  };
+};
+
+export const createPlane2DCalculation = (
+  id: string,
+  options: Omit<
+    Plane2DCalculationEntity,
+    "id" | "type" | "nameSource" | "showName" | "createdAt" | "updatedAt"
+  > &
+    Partial<
+      Pick<
+        Plane2DCalculationEntity,
+        "name" | "nameSource" | "showName" | "createdAt" | "updatedAt"
+      >
+    >,
+): Plane2DCalculationEntity => {
+  const now = new Date().toISOString();
+
+  return {
+    id,
+    type: "plane2d-calculation",
     nameSource: "auto",
     showName: false,
     createdAt: now,
@@ -460,6 +495,92 @@ export const getPlane2DMeasurementInfo = (
   };
 };
 
+export const resolvePlane2DCalculationReference = (
+  document: PlaneCanvasDocument,
+  targetId: string,
+  valueKind: CalculationReferenceValueKind,
+): CalculationValue | null => {
+  const entity = document.entities[targetId];
+
+  if (entity?.type === "plane2d-segment" && valueKind === "length") {
+    const positions = getPlane2DSegmentPositions(document, entity);
+
+    return positions
+      ? {
+          value: distanceBetweenVec2(positions[0], positions[1]),
+          unit: "length",
+        }
+      : null;
+  }
+
+  if (entity?.type === "plane2d-measurement") {
+    const info = getPlane2DMeasurementInfo(document, entity);
+
+    if (!info) {
+      return null;
+    }
+
+    const unit = entity.measurementKind === "angle" ? "angle" : "length";
+
+    if (valueKind !== "measurement" && valueKind !== unit) {
+      return null;
+    }
+
+    return { value: info.value, unit };
+  }
+
+  return null;
+};
+
+export const evaluatePlane2DCalculation = (
+  document: PlaneCanvasDocument,
+  expression: CalculationExpression,
+) =>
+  evaluateCalculationExpression(
+    expression,
+    (targetId, valueKind) =>
+      resolvePlane2DCalculationReference(document, targetId, valueKind),
+    {
+      pointDistance: (pointAId, pointBId) => {
+        const pointA = getPlane2DPointPosition(document, pointAId);
+        const pointB = getPlane2DPointPosition(document, pointBId);
+
+        return pointA && pointB
+          ? { value: distanceBetweenVec2(pointA, pointB), unit: "length" }
+          : null;
+      },
+      threePointAngle: (pointAId, vertexPointId, pointCId) => {
+        const pointA = getPlane2DPointPosition(document, pointAId);
+        const vertex = getPlane2DPointPosition(document, vertexPointId);
+        const pointC = getPlane2DPointPosition(document, pointCId);
+
+        if (!pointA || !vertex || !pointC) {
+          return null;
+        }
+
+        const value = angleBetweenVec2(
+          subtractVec2(pointA, vertex),
+          subtractVec2(pointC, vertex),
+        );
+
+        return value === null ? null : { value, unit: "angle" };
+      },
+    },
+  );
+
+export const getPlane2DCalculationInfo = (
+  document: PlaneCanvasDocument,
+  calculation: Plane2DCalculationEntity,
+): { readonly label: string; readonly position: Vec2; readonly valid: boolean } => {
+  const result = evaluatePlane2DCalculation(document, calculation.expression);
+
+  return {
+    label: result.ok ? `= ${formatCalculationValue(result.value)}` : "引用失效",
+    position: calculation.labelPosition,
+    valid: result.ok,
+  };
+};
+
 export const getClosestPointOnSegment2D = (
   point: Vec2,
   start: Vec2,
@@ -653,7 +774,7 @@ export const getPlane2DExtensionParts = (
 
   const target = document.entities[extension.targetSegmentId];
   const positions =
-    target?.type === "plane2d-segment"
+    target?.type === "plane2d-segment" && target.visible !== false
       ? getPlane2DSegmentPositions(document, target)
       : null;
 
@@ -964,7 +1085,7 @@ export const syncPlane2DConstructions = (
   const segmentCandidates: IntersectionSegmentCandidate[] = [];
 
   Object.values(nextEntities).forEach((entity) => {
-    if (entity.type === "plane2d-segment") {
+    if (entity.type === "plane2d-segment" && entity.visible !== false) {
       const positions = getPlane2DSegmentPositions(
         { ...document, entities: nextEntities },
         entity,

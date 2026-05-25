@@ -583,6 +583,46 @@ input {
   font-weight: 650;
 }
 
+.formula-view {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  vertical-align: middle;
+}
+
+.formula-binary,
+.formula-unary {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.formula-reference {
+  font-weight: 650;
+}
+
+.formula-operator {
+  padding: 0 2px;
+}
+
+.formula-fraction {
+  display: inline-grid;
+  grid-template-rows: auto auto;
+  align-items: center;
+  min-width: 32px;
+  vertical-align: middle;
+  text-align: center;
+}
+
+.formula-numerator {
+  padding: 0 5px 2px;
+  border-bottom: 1px solid currentColor;
+}
+
+.formula-denominator {
+  padding: 2px 5px 0;
+}
+
 .segment-name-overline {
   text-decoration: overline;
 }
@@ -606,6 +646,37 @@ input {
 
 .panel-header h2 {
   font-size: 16px;
+}
+
+.panel-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid #d8dde6;
+  border-radius: 8px;
+  background: #f3f6fa;
+}
+
+.panel-tabs button {
+  min-height: 30px;
+  border: 0;
+  border-radius: 6px;
+  color: #536071;
+  background: transparent;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.panel-tabs button:hover {
+  color: #1f2937;
+  background: #e9eef6;
+}
+
+.panel-tabs button.active {
+  color: #1f56b3;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
 }
 
 .property-group {
@@ -690,6 +761,135 @@ input {
   border-color: #a9c3f6;
   color: #1f56b3;
   background: #e8f0ff;
+}
+
+.object-list-panel {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.object-list-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid #d8dde6;
+  border-radius: 8px;
+  color: #64748b;
+  background: #ffffff;
+}
+
+.object-list-search input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  color: #1f2937;
+  background: transparent;
+  font-size: 13px;
+}
+
+.object-list-scroll {
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-right: 2px;
+}
+
+.object-list-group {
+  display: grid;
+  gap: 6px;
+}
+
+.object-list-group h3 {
+  margin: 0;
+  color: #536071;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.object-list-group ul {
+  display: grid;
+  gap: 4px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.object-list-row {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) 28px;
+  align-items: center;
+  gap: 4px;
+  min-height: 38px;
+  padding: 3px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+}
+
+.object-list-row:hover {
+  background: #f2f5fa;
+}
+
+.object-list-row.selected {
+  border-color: #a9c3f6;
+  background: #e8f0ff;
+}
+
+.object-list-icon-button,
+.object-list-name-button {
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.object-list-icon-button {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  color: #536071;
+}
+
+.object-list-icon-button:hover {
+  color: #1f2937;
+  background: #e4e9f1;
+}
+
+.object-list-icon-button.danger:hover {
+  color: #b91c1c;
+  background: #fee2e2;
+}
+
+.object-list-name-button {
+  display: grid;
+  gap: 2px;
+  padding: 4px 6px;
+  text-align: left;
+}
+
+.object-list-name {
+  overflow: hidden;
+  color: #1f2937;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.object-list-detail {
+  overflow: hidden;
+  color: #7b8797;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .coordinate-point-form {
@@ -1258,6 +1458,11 @@ input {
   pointer-events: none;
 }
 
+.calculation-list {
+  top: auto;
+  bottom: 24px;
+}
+
 .plane2d-circle.selected {
   stroke: #2563eb;
 }
@@ -1339,6 +1544,133 @@ input {
 
 .plane2d-measurement-label.selected {
   fill: #dc2626;
+}
+
+.plane2d-calculation-label {
+  overflow: visible;
+  pointer-events: none;
+}
+
+.plane2d-calculation-label-content {
+  display: inline-grid;
+  gap: 2px;
+  max-width: 180px;
+  padding: 4px 6px;
+  border: 1px solid #c4b5fd;
+  border-radius: 6px;
+  color: #4c1d95;
+  background: rgba(255, 255, 255, 0.94);
+  font-size: 12px;
+  line-height: 1.2;
+  pointer-events: none;
+}
+
+.plane2d-calculation-label.hovered .plane2d-calculation-label-content,
+.plane2d-calculation-label.selected .plane2d-calculation-label-content {
+  border-color: #2563eb;
+  color: #111827;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.16);
+}
+
+.plane2d-calculation-panel {
+  position: absolute;
+  z-index: 8;
+  top: 14px;
+  right: 14px;
+  display: grid;
+  gap: 8px;
+  width: 260px;
+  padding: 12px;
+  border: 1px solid #d8dde6;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.12);
+}
+
+.plane2d-calculation-panel h3 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.formula-editor-preview,
+.property-formula-preview {
+  display: block;
+  min-height: 28px;
+  padding: 6px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: #f9fafb;
+  color: #111827;
+}
+
+.calculation-button-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.calculation-point-picker {
+  display: grid;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.calculation-point-picker h4 {
+  margin: 0;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.calculation-point-search {
+  width: 100%;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid #d8dde6;
+  border-radius: 6px;
+  background: #fff;
+  color: #111827;
+  font-size: 12px;
+}
+
+.calculation-point-order {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.calculation-point-list {
+  display: grid;
+  gap: 4px;
+  max-height: 150px;
+  overflow: auto;
+}
+
+.calculation-point-list button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: #fff;
+  color: #111827;
+  text-align: left;
+}
+
+.calculation-point-list button:hover,
+.calculation-point-list button.selected {
+  border-color: #93c5fd;
+  background: #eff6ff;
+}
+
+.calculation-point-list small {
+  flex: 0 0 auto;
+  color: #64748b;
+  font-size: 11px;
 }
 
 .property-subgroup {

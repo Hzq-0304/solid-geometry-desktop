@@ -11,8 +11,17 @@ import {
   Ruler,
 } from "lucide-react";
 import GreekLetterKeyboard from "./components/GreekLetterKeyboard";
+import ObjectListPanel, {
+  type ObjectListGroup,
+  type ObjectListItem,
+} from "./components/ObjectListPanel";
+import FormulaView from "./core/calculation/FormulaView";
+import type { CalculationExpression } from "./core/calculation/CalculationTypes";
+import { evaluateCalculationExpression } from "./core/calculation/calculationEvaluator";
+import { formatCalculationValue } from "./core/calculation/calculationUnits";
 import PlaneCanvasViewport from "./components/PlaneCanvasViewport";
 import TopMenuBar from "./components/TopMenuBar";
+import { AddEntityCommand } from "./core/command/AddEntityCommand";
 import { AddExtensionCommand } from "./core/command/AddExtensionCommand";
 import { AddIntersectionPointCommand } from "./core/command/AddIntersectionPointCommand";
 import SceneViewport from "./components/SceneViewport";
@@ -43,6 +52,7 @@ import type {
 import { createEmptyDocument } from "./core/document/createEmptyDocument";
 import type {
   BoardEntity,
+  CalculationEntity,
   EntityId,
   EntityStyle,
   ExtensionEntity,
@@ -119,6 +129,7 @@ import { getSnapResult } from "./core/snap/SnapSystem";
 import type { SnapResult } from "./core/snap/SnapTypes";
 import type {
   Plane2DEntity,
+  Plane2DCalculationEntity,
   Plane2DCircleEntity,
   Plane2DExtensionEntity,
   Plane2DMeasurementEntity,
@@ -134,6 +145,8 @@ import {
   createPlane2DExtension,
   deletePlane2DEntities,
   distanceBetweenVec2,
+  evaluatePlane2DCalculation,
+  getPlane2DCalculationInfo,
   getPlane2DMeasurementInfo,
   getPlane2DPolygonPoints,
   normalizePlaneCanvasDocument,
@@ -177,6 +190,11 @@ type PlaneCreationMode = "threePoint";
 type PerpendicularMode = "pointLine" | "linePlane";
 type ExtendMode = "auto" | "segmentToBoundary" | "planeToBoundary";
 type ParallelMode = "auto" | "segment" | "plane";
+type CalculationPointPickerState = {
+  readonly mode: "distance" | "angle";
+  readonly selectedPointIds: readonly EntityId[];
+  readonly searchQuery: string;
+};
 type IntersectionTarget = {
   readonly entityId: EntityId;
   readonly entityType: "segment" | "plane";
@@ -188,7 +206,8 @@ type PreselectedEntityType =
   | "linePlanePerpendicular"
   | "extension"
   | "plane"
-  | "measurement";
+  | "measurement"
+  | "calculation";
 
 const incrementLetters = (startLetters: string, offset: number): string => {
   const isLowerCase = startLetters === startLetters.toLowerCase();
@@ -299,6 +318,7 @@ const measureTools: Array<{
 }> = [
   { name: "measureLength", label: "\u957f\u5ea6", icon: Ruler },
   { name: "measureAngle", label: "\u89d2\u5ea6", icon: Ruler },
+  { name: "calculation", label: "计算", icon: Ruler },
 ];
 
 const toolLabels: Record<ToolName, string> = {
@@ -314,6 +334,7 @@ const toolLabels: Record<ToolName, string> = {
   move: "\u79fb\u52a8",
   measureLength: "\u957f\u5ea6",
   measureAngle: "\u89d2\u5ea6",
+  calculation: "计算",
 };
 
 const drawingPlanes: readonly ActiveDrawingPlane[] = ["XY", "XZ", "YZ"];
@@ -1656,13 +1677,15 @@ const isNameableEntity = (
   | PerpendicularLineEntity
   | LinePlanePerpendicularEntity
   | ExtensionEntity
-  | PlaneEntity =>
+  | PlaneEntity
+  | CalculationEntity =>
   entity?.kind === "point" ||
   entity?.kind === "segment" ||
   entity?.kind === "perpendicularLine" ||
   entity?.kind === "linePlanePerpendicular" ||
   entity?.kind === "extension" ||
-  entity?.kind === "plane";
+  entity?.kind === "plane" ||
+  entity?.kind === "calculation";
 
 const getManualNameDraft = (
   entity:
@@ -1671,11 +1694,163 @@ const getManualNameDraft = (
     | PerpendicularLineEntity
     | LinePlanePerpendicularEntity
     | ExtensionEntity
-    | PlaneEntity,
+    | PlaneEntity
+    | CalculationEntity,
 ): string => (entity.nameSource === "manual" ? entity.name?.trim() ?? "" : "");
 
 const isExtensionVisible = (extension: ExtensionEntity): boolean =>
   extension.visible !== false;
+
+const getShortEntityId = (id: string): string =>
+  id.length > 8 ? id.slice(0, 8) : id;
+
+const isPlane2DEntityVisible = (entity: Plane2DEntity): boolean =>
+  entity.visible !== false;
+
+const getPlane2DEntityTypeLabel = (entity: Plane2DEntity): string => {
+  switch (entity.type) {
+    case "plane2d-point":
+      if (entity.construction?.kind === "segmentIntersection") return "交点";
+      if (entity.construction?.kind === "midpoint") return "中点";
+      if (entity.construction?.kind === "perpendicularFoot") return "垂足";
+      if (entity.construction?.kind === "perpendicularEndpoint") {
+        return "垂线端点";
+      }
+      if (entity.construction?.kind === "copiedCircleRadiusPoint") {
+        return "复制圆半径点";
+      }
+      if (entity.construction?.kind === "regularPolygonVertex") {
+        return "正多边形顶点";
+      }
+      return "点";
+    case "plane2d-segment":
+      if (entity.segmentKind === "extension") return "延长线段";
+      if (entity.construction?.kind === "perpendicular") return "垂线段";
+      return "线段";
+    case "plane2d-circle":
+      return entity.construction?.kind === "copyCircle" ? "复制圆" : "圆";
+    case "plane2d-polygon":
+      return entity.polygonKind === "regular" ? "正多边形" : "多边形";
+    case "plane2d-measurement":
+      return entity.measurementKind === "length" ? "长度测量" : "角度测量";
+    case "plane2d-extension":
+      return "延长部分";
+    case "plane2d-calculation":
+      return "计算";
+    default:
+      return "对象";
+  }
+};
+
+const getPlane2DObjectGroupLabel = (entity: Plane2DEntity): string => {
+  switch (entity.type) {
+    case "plane2d-point":
+      return "点";
+    case "plane2d-segment":
+      return "线段";
+    case "plane2d-circle":
+      return "圆";
+    case "plane2d-polygon":
+      return "多边形";
+    case "plane2d-measurement":
+      return "测量";
+    case "plane2d-calculation":
+      return "计算";
+    case "plane2d-extension":
+      return "线段";
+    default:
+      return "对象";
+  }
+};
+
+const getPlane2DObjectListItem = (
+  entity: Plane2DEntity,
+  selectedEntityIds: readonly string[],
+): ObjectListItem => {
+  const typeLabel = getPlane2DEntityTypeLabel(entity);
+  const manualName =
+    entity.showName && entity.name?.trim() ? entity.name.trim() : "";
+  const name = manualName || `${typeLabel} ${getShortEntityId(entity.id)}`;
+
+  return {
+    id: entity.id,
+    name,
+    detail: getShortEntityId(entity.id),
+    searchText: `${name} ${typeLabel} ${entity.id}`,
+    visible: isPlane2DEntityVisible(entity),
+    selected: selectedEntityIds.includes(entity.id),
+  };
+};
+
+const getBoardEntityTypeLabel = (entity: BoardEntity): string => {
+  switch (entity.kind) {
+    case "point":
+      return entity.pointKind === "constructed" ? "构造点" : "点";
+    case "segment":
+      return "线段";
+    case "plane":
+      return "平面";
+    case "polygon":
+      return "多边形";
+    case "solid":
+      return "立体";
+    case "measurement":
+      return "测量";
+    case "calculation":
+      return "计算";
+    case "extension":
+      return entity.targetType === "plane" ? "平面延展" : "线段延长";
+    case "perpendicularLine":
+      return "垂线";
+    case "linePlanePerpendicular":
+      return "线面垂直";
+    case "label":
+      return "标签";
+    default:
+      return "对象";
+  }
+};
+
+const getBoardEntityGroupLabel = (entity: BoardEntity): string => {
+  switch (entity.kind) {
+    case "point":
+      return "点";
+    case "segment":
+      return "线段 / 直线类对象";
+    case "plane":
+    case "polygon":
+    case "solid":
+      return "平面 / 多边形 / 立体对象";
+    case "measurement":
+      return "测量";
+    case "calculation":
+      return "计算";
+    case "perpendicularLine":
+    case "linePlanePerpendicular":
+    case "extension":
+      return "构造对象";
+    default:
+      return "对象";
+  }
+};
+
+const getBoardObjectListItem = (
+  entity: BoardEntity,
+  selectedEntityIds: readonly EntityId[],
+): ObjectListItem => {
+  const typeLabel = getBoardEntityTypeLabel(entity);
+  const manualName = entity.name?.trim() ?? "";
+  const name = manualName || `${typeLabel} ${getShortEntityId(entity.id)}`;
+
+  return {
+    id: entity.id,
+    name,
+    detail: getShortEntityId(entity.id),
+    searchText: `${name} ${typeLabel} ${entity.kind} ${entity.id}`,
+    visible: entity.visible !== false,
+    selected: selectedEntityIds.includes(entity.id),
+  };
+};
 
 const getRelatedExtensionEntities = (
   document: BoardDocument,
@@ -2155,6 +2330,10 @@ function App() {
     createPlane2DHistoryState,
   );
   const [plane2DResetSignal, setPlane2DResetSignal] = useState(0);
+  const [propertiesTab, setPropertiesTab] = useState<"properties" | "objects">(
+    "properties",
+  );
+  const [objectListSearchQuery, setObjectListSearchQuery] = useState("");
   const [currentTool, setCurrentTool] = useState<ToolName>("select");
   const [focusRequestId, setFocusRequestId] = useState(0);
   const [lastPointerInfo, setLastPointerInfo] = useState<PointerInfo | null>(
@@ -2205,6 +2384,17 @@ function App() {
   const [angleStatusMessage, setAngleStatusMessage] = useState<string | null>(
     null,
   );
+  const [calculationExpression, setCalculationExpression] =
+    useState<CalculationExpression | null>(null);
+  const [calculationPendingOp, setCalculationPendingOp] = useState<
+    "add" | "sub" | "mul" | "div" | null
+  >(null);
+  const [isPlacingCalculation, setIsPlacingCalculation] = useState(false);
+  const [calculationPointPicker, setCalculationPointPicker] =
+    useState<CalculationPointPickerState | null>(null);
+  const [calculationStatusMessage, setCalculationStatusMessage] = useState<
+    string | null
+  >(null);
   const [deleteStatusMessage, setDeleteStatusMessage] = useState<string | null>(
     null,
   );
@@ -2355,6 +2545,34 @@ function App() {
     : selectedConstructionExtensionParts.length > 0
       ? selectedConstructionExtensionParts
       : selectedExtensionParts;
+  const geometryObjectListGroups = useMemo<readonly ObjectListGroup[]>(() => {
+    const groupOrder = [
+      "点",
+      "线段 / 直线类对象",
+      "平面 / 多边形 / 立体对象",
+      "构造对象",
+      "测量",
+      "计算",
+      "对象",
+    ];
+    const groups = new Map<string, ObjectListItem[]>();
+
+    Object.values(displayDocument.entities).forEach((entity) => {
+      const groupLabel = getBoardEntityGroupLabel(entity);
+      const items = groups.get(groupLabel) ?? [];
+
+      items.push(getBoardObjectListItem(entity, displayDocument.selectedEntityIds));
+      groups.set(groupLabel, items);
+    });
+
+    return groupOrder
+      .filter((label) => groups.has(label))
+      .map((label) => ({
+        id: label,
+        label,
+        items: groups.get(label) ?? [],
+      }));
+  }, [displayDocument.entities, displayDocument.selectedEntityIds]);
   const hasPointA = Boolean(displayDocument.entities[TEST_POINT_A_ID]);
   const hasPointB = Boolean(displayDocument.entities[TEST_POINT_B_ID]);
   const hasSegmentAB = Boolean(displayDocument.entities[TEST_SEGMENT_AB_ID]);
@@ -2520,6 +2738,13 @@ function App() {
     angleStatusMessage,
     displayDocument,
   );
+  const calculationToolStatus =
+    currentTool === "calculation"
+      ? calculationStatusMessage ??
+        (isPlacingCalculation
+          ? "计算：请点击画布放置结果"
+          : "计算：点击线段或测量对象插入引用")
+      : null;
   const pointDragStatus =
     draggedPointId && displayDocument.entities[draggedPointId]?.kind === "point"
       ? `Moving point ${getPointDisplayName(
@@ -2835,6 +3060,11 @@ function App() {
     setLinePlaneAngleSegmentId(null);
     setPlanePlaneAngleFirstPlaneId(null);
     setAngleStatusMessage(null);
+    setCalculationExpression(null);
+    setCalculationPendingOp(null);
+    setIsPlacingCalculation(false);
+    setCalculationPointPicker(null);
+    setCalculationStatusMessage(null);
     setIntersectionFirstTarget(null);
     setIntersectionStatusMessage(null);
     setShowLinePlaneAnglePanel(false);
@@ -3123,6 +3353,72 @@ function App() {
     setPlane2DStatusMessage("已删除二维对象");
   };
 
+  const selectPlane2DEntityFromList = (entityId: string) => {
+    if (!planeCanvasDocument || !planeCanvasDocument.entities[entityId]) {
+      return;
+    }
+
+    updatePlaneCanvasDocument(
+      {
+        ...planeCanvasDocument,
+        selectedEntityIds: [entityId],
+      },
+      false,
+    );
+  };
+
+  const setPlane2DEntityVisibility = (entityId: string, visible: boolean) => {
+    if (!planeCanvasDocument) {
+      return;
+    }
+
+    const entity = planeCanvasDocument.entities[entityId];
+
+    if (!entity || isPlane2DEntityVisible(entity) === visible) {
+      return;
+    }
+
+    const nextEntity =
+      entity.type === "plane2d-extension"
+        ? {
+            ...entity,
+            visible,
+            snapEnabled: visible,
+            updatedAt: new Date().toISOString(),
+          }
+        : {
+            ...entity,
+            visible,
+            updatedAt: new Date().toISOString(),
+          };
+
+    updatePlaneCanvasDocument(
+      {
+        ...planeCanvasDocument,
+        entities: {
+          ...planeCanvasDocument.entities,
+          [entity.id]: nextEntity,
+        },
+      },
+      true,
+      { label: visible ? "显示二维对象" : "隐藏二维对象" },
+    );
+    setPlane2DStatusMessage(visible ? "已显示对象" : "已隐藏对象");
+  };
+
+  const deletePlane2DEntityFromList = (entityId: string) => {
+    if (!planeCanvasDocument || !planeCanvasDocument.entities[entityId]) {
+      return;
+    }
+
+    updatePlaneCanvasDocument(
+      deletePlane2DEntities(planeCanvasDocument, [entityId]),
+      true,
+      { label: "删除二维对象" },
+    );
+    setPlane2DStatusMessage("已删除二维对象");
+  };
+
   const openProject = async () => {
     try {
       if (!isTauriEnvironment()) {
@@ -3291,6 +3587,32 @@ function App() {
 
   const updateEntity = (entityId: EntityId, patch: EntityUpdate) => {
     executeCommand(new UpdateEntityCommand(entityId, patch));
+  };
+
+  const setBoardEntityVisibility = (entityId: EntityId, visible: boolean) => {
+    const entity = commandManager.getDocument().entities[entityId];
+
+    if (!entity || entity.visible === visible) {
+      return;
+    }
+
+    executeCommand(new UpdateEntityCommand(entityId, { visible }));
+    showToast(visible ? "已显示对象" : "已隐藏对象");
+  };
+
+  const deleteBoardEntityFromList = (entityId: EntityId) => {
+    if (!commandManager.getDocument().entities[entityId]) {
+      return;
+    }
+
+    executeCommand(new DeleteEntityCommand(entityId));
+    syncDocumentState({
+      ...commandManager.getDocument(),
+      selectedEntityIds: commandManager
+        .getDocument()
+        .selectedEntityIds.filter((selectedEntityId) => selectedEntityId !== entityId),
+    });
+    setDeleteStatusMessage("Deleted selected entity");
   };
 
   const setExtensionPartVisibility = (
@@ -4963,6 +5285,245 @@ function App() {
     );
   };
 
+  const resolveBoardCalculationReference = (
+    document: BoardDocument,
+    targetId: EntityId,
+  ) => {
+    const entity = document.entities[targetId];
+
+    if (entity?.kind === "segment") {
+      const value = getSegmentLengthById(document, targetId);
+
+      return value === null ? null : { value, unit: "length" as const };
+    }
+
+    if (entity?.kind === "measurement") {
+      const value = calculateMeasurementValue(entity, document);
+
+      if (!value) {
+        return null;
+      }
+
+      return {
+        value: value.value,
+        unit: value.unit === "deg" ? ("angle" as const) : ("length" as const),
+      };
+    }
+
+    return null;
+  };
+
+  const resolveBoardCalculationGeometry = (document: BoardDocument) => ({
+    pointDistance: (pointAId: EntityId, pointBId: EntityId) => {
+      const pointA = getPointWorldPosition(document, pointAId);
+      const pointB = getPointWorldPosition(document, pointBId);
+
+      return pointA && pointB
+        ? { value: distanceBetweenVec3(pointA, pointB), unit: "length" as const }
+        : null;
+    },
+    threePointAngle: (
+      pointAId: EntityId,
+      vertexPointId: EntityId,
+      pointCId: EntityId,
+    ) => {
+      const pointA = getPointWorldPosition(document, pointAId);
+      const vertex = getPointWorldPosition(document, vertexPointId);
+      const pointC = getPointWorldPosition(document, pointCId);
+
+      if (!pointA || !vertex || !pointC) {
+        return null;
+      }
+
+      const vectorA = subtractVec3(pointA, vertex);
+      const vectorC = subtractVec3(pointC, vertex);
+      const lengthA = distanceBetweenVec3(pointA, vertex);
+      const lengthC = distanceBetweenVec3(pointC, vertex);
+
+      if (lengthA <= 1e-9 || lengthC <= 1e-9) {
+        return null;
+      }
+
+      const cosine = Math.min(
+        1,
+        Math.max(-1, dotVec3(vectorA, vectorC) / (lengthA * lengthC)),
+      );
+
+      return { value: (Math.acos(cosine) * 180) / Math.PI, unit: "angle" as const };
+    },
+  });
+
+  const getBoardCalculationReferenceLabel = (targetId: EntityId): string => {
+    const entity = displayDocument.entities[targetId];
+
+    if (!entity) {
+      return "引用失效";
+    }
+
+    if (entity.kind === "segment") {
+      return `|${entity.name?.trim() || entity.id}|`;
+    }
+
+    return entity.name?.trim() || entity.id;
+  };
+
+  const boardCalculationPoints = Object.values(displayDocument.entities).filter(
+    (entity): entity is PointEntity =>
+      entity.kind === "point" && entity.visible !== false,
+  );
+
+  const getBoardCalculationPointTypeLabel = (point: PointEntity): string => {
+    if (!point.construction) {
+      return "自由点";
+    }
+
+    switch (point.construction.kind) {
+      case "midpoint":
+        return "中点";
+      case "footToLine":
+      case "footToPlane":
+        return "垂足";
+      case "lineLineIntersection":
+      case "linePlaneIntersection":
+        return "交点";
+      case "parallelSegmentEndpoint":
+      case "parallelPlaneVertex":
+        return "平行构造点";
+      case "perpendicularDirectionToLine":
+      case "perpendicularDirectionToPlane":
+        return "垂线方向点";
+      default:
+        return "构造点";
+    }
+  };
+
+  const openBoardCalculationPointPicker = (mode: "distance" | "angle") => {
+    const minimumPointCount = mode === "distance" ? 2 : 3;
+
+    if (boardCalculationPoints.length < minimumPointCount) {
+      setCalculationStatusMessage(
+        mode === "distance"
+          ? "当前画布中至少需要两个点"
+          : "当前画布中至少需要三个点",
+      );
+      return;
+    }
+
+    setCalculationPointPicker({ mode, selectedPointIds: [], searchQuery: "" });
+    setIsPlacingCalculation(false);
+    setCalculationStatusMessage(
+      mode === "distance"
+        ? "请选择两个点作为边。"
+        : "请选择三个点作为角，第二个点为顶点。",
+    );
+  };
+
+  const insertBoardCalculationPointExpression = (
+    expression: CalculationExpression,
+    statusMessage: string,
+  ) => {
+    insertBoardCalculationReference(expression);
+    setCalculationPointPicker(null);
+    setCalculationStatusMessage(statusMessage);
+  };
+
+  const toggleBoardCalculationPoint = (pointId: EntityId) => {
+    if (!calculationPointPicker) {
+      return;
+    }
+
+    const selectedPointIds = calculationPointPicker.selectedPointIds.includes(pointId)
+      ? calculationPointPicker.selectedPointIds.filter((id) => id !== pointId)
+      : [...calculationPointPicker.selectedPointIds, pointId];
+
+    if (calculationPointPicker.mode === "distance" && selectedPointIds.length === 2) {
+      const [pointAId, pointBId] = selectedPointIds;
+
+      if (pointAId === pointBId) {
+        setCalculationStatusMessage("请选择两个不同的点。");
+        setCalculationPointPicker({ ...calculationPointPicker, selectedPointIds });
+        return;
+      }
+
+      insertBoardCalculationPointExpression(
+        { kind: "pointDistance", pointAId, pointBId },
+        "已插入两点距离引用。",
+      );
+      return;
+    }
+
+    if (calculationPointPicker.mode === "angle" && selectedPointIds.length === 3) {
+      const [pointAId, vertexPointId, pointCId] = selectedPointIds;
+
+      if (pointAId === vertexPointId || pointCId === vertexPointId) {
+        setCalculationStatusMessage("角度退化，无法加入角。");
+        setCalculationPointPicker({ ...calculationPointPicker, selectedPointIds });
+        return;
+      }
+
+      insertBoardCalculationPointExpression(
+        { kind: "threePointAngle", pointAId, vertexPointId, pointCId },
+        "已插入三点角引用。",
+      );
+      return;
+    }
+
+    setCalculationPointPicker({ ...calculationPointPicker, selectedPointIds });
+  };
+
+  const insertBoardCalculationReference = (expression: CalculationExpression) => {
+    setCalculationExpression((current) => {
+      if (current && calculationPendingOp) {
+        return {
+          kind: "binary",
+          op: calculationPendingOp,
+          left: current,
+          right: expression,
+        };
+      }
+
+      return expression;
+    });
+    setCalculationPendingOp(null);
+    setIsPlacingCalculation(false);
+    setCalculationPointPicker(null);
+  };
+
+  const createCalculationEntity = (
+    expression: CalculationExpression,
+  ): CalculationEntity => {
+    const now = new Date().toISOString();
+
+    return {
+      id: createEntityId("calculation"),
+      kind: "calculation",
+      type: "calculation",
+      expression,
+      labelPosition: getNextMeasurementDisplayPosition(),
+      nameSource: "auto",
+      visible: true,
+      locked: false,
+      createdAt: now,
+      updatedAt: now,
+    };
+  };
+
+  const addCalculation = () => {
+    if (!calculationExpression || calculationPendingOp) {
+      setCalculationStatusMessage("请先完成计算表达式。");
+      return;
+    }
+
+    const calculation = createCalculationEntity(calculationExpression);
+
+    executeCommand(new AddEntityCommand(calculation, "添加计算"));
+    setCalculationExpression(null);
+    setCalculationPendingOp(null);
+    setIsPlacingCalculation(false);
+    setCalculationPointPicker(null);
+    setCalculationStatusMessage("已创建计算结果。");
+  };
+
   const createToolContext = (): ToolContext => ({
     addPoint: (position, options) => {
       executeCommand(
@@ -5821,12 +6382,15 @@ function App() {
     sourceDocument: BoardDocument,
   ): Preselection | null => {
     const entity =
-      pointerInfo.hitEntityType === "measurement" && pointerInfo.hitEntityId
+      (pointerInfo.hitEntityType === "measurement" ||
+        pointerInfo.hitEntityType === "calculation") &&
+      pointerInfo.hitEntityId
         ? sourceDocument.entities[pointerInfo.hitEntityId]
         : null;
 
-    return entity?.kind === "measurement" && entity.visible
-      ? { entityId: entity.id, entityType: "measurement" }
+    return (entity?.kind === "measurement" || entity?.kind === "calculation") &&
+      entity.visible
+      ? { entityId: entity.id, entityType: entity.kind }
       : null;
   };
 
@@ -6692,6 +7256,29 @@ function App() {
       return;
     }
 
+    if (currentTool === "calculation") {
+      if (isPlacingCalculation) {
+        addCalculation();
+        return;
+      }
+
+      if (
+        nextPointerInfo.hitEntityType === "segment" &&
+        nextPointerInfo.hitEntityId
+      ) {
+        insertBoardCalculationReference({
+          kind: "reference",
+          targetId: nextPointerInfo.hitEntityId,
+          valueKind: "length",
+        });
+        setCalculationStatusMessage("已插入线段长度引用。");
+      } else {
+        setCalculationStatusMessage("请选择线段或测量对象插入计算。");
+      }
+
+      return;
+    }
+
     if (currentTool === "measureLength") {
       measureLengthToolRef.current.onPointerDown(
         nextPointerInfo,
@@ -6858,6 +7445,25 @@ function App() {
     entityId: EntityId,
     additive: boolean,
   ) => {
+    if (currentTool === "calculation") {
+      const entity = commandManager.getDocument().entities[entityId];
+
+      if (entity?.kind === "measurement") {
+        insertBoardCalculationReference({
+          kind: "reference",
+          targetId: entityId,
+          valueKind: "measurement",
+        });
+        setCalculationStatusMessage("已插入测量引用。");
+        return;
+      }
+
+      if (entity?.kind === "calculation") {
+        selectEntity(entityId);
+        return;
+      }
+    }
+
     if (additive) {
       toggleSelection(entityId);
       return;
@@ -6873,8 +7479,11 @@ function App() {
 
     const entity = commandManager.getDocument().entities[entityId];
 
-    if (entity?.kind === "measurement" && entity.visible) {
-      setCurrentPreselection({ entityId, entityType: "measurement" });
+    if (
+      (entity?.kind === "measurement" || entity?.kind === "calculation") &&
+      entity.visible
+    ) {
+      setCurrentPreselection({ entityId, entityType: entity.kind });
     }
   };
 
@@ -6917,6 +7526,14 @@ function App() {
       setShowAngleToolPanel(false);
       setShowLinePlaneAnglePanel(false);
       setShowPlanePlaneAnglePanel(false);
+    }
+
+    if (nextTool !== "calculation") {
+      setCalculationExpression(null);
+      setCalculationPendingOp(null);
+      setIsPlacingCalculation(false);
+      setCalculationPointPicker(null);
+      setCalculationStatusMessage(null);
     }
 
     if (currentTool === "segment" && nextTool !== "segment") {
@@ -6969,6 +7586,14 @@ function App() {
       setLinePlaneAngleSegmentId(null);
       setPlanePlaneAngleFirstPlaneId(null);
       setAngleStatusMessage(null);
+    }
+
+    if (currentTool === "calculation" && nextTool !== "calculation") {
+      setCalculationExpression(null);
+      setCalculationPendingOp(null);
+      setIsPlacingCalculation(false);
+      setCalculationPointPicker(null);
+      setCalculationStatusMessage(null);
     }
 
     setCurrentTool(nextTool);
@@ -7299,6 +7924,10 @@ function App() {
     (entity): entity is Plane2DMeasurementEntity =>
       entity.type === "plane2d-measurement",
   );
+  const plane2DCalculations = plane2DEntities.filter(
+    (entity): entity is Plane2DCalculationEntity =>
+      entity.type === "plane2d-calculation",
+  );
   const plane2DExtensions = plane2DEntities.filter(
     (entity): entity is Plane2DExtensionEntity =>
       entity.type === "plane2d-extension",
@@ -7320,6 +7949,32 @@ function App() {
     planeCanvasDocument.selectedEntityIds.length > 1 &&
     selectedPlane2DPointEntities.length ===
       planeCanvasDocument.selectedEntityIds.length;
+  const plane2DObjectListGroups = useMemo<readonly ObjectListGroup[]>(() => {
+    if (!planeCanvasDocument) {
+      return [];
+    }
+
+    const groupOrder = ["点", "线段", "圆", "多边形", "测量", "计算", "对象"];
+    const groups = new Map<string, ObjectListItem[]>();
+
+    Object.values(planeCanvasDocument.entities).forEach((entity) => {
+      const groupLabel = getPlane2DObjectGroupLabel(entity);
+      const items = groups.get(groupLabel) ?? [];
+
+      items.push(
+        getPlane2DObjectListItem(entity, planeCanvasDocument.selectedEntityIds),
+      );
+      groups.set(groupLabel, items);
+    });
+
+    return groupOrder
+      .filter((label) => groups.has(label))
+      .map((label) => ({
+        id: label,
+        label,
+        items: groups.get(label) ?? [],
+      }));
+  }, [planeCanvasDocument]);
   const updateSelectedPlane2DName = (name: string) => {
     if (!planeCanvasDocument || !selectedPlane2DEntity) {
       return;
@@ -7791,6 +8446,152 @@ function App() {
             )}
           </section>
 
+          {currentTool === "calculation" ? (
+            <section className="tool-group calculation-tool-panel">
+              <h2>计算</h2>
+              <div className="formula-editor-preview">
+                {calculationExpression ? (
+                  <FormulaView
+                    expression={calculationExpression}
+                    getReferenceLabel={getBoardCalculationReferenceLabel}
+                  />
+                ) : (
+                  <span>点击线段或测量对象插入引用</span>
+                )}
+              </div>
+              <div className="calculation-button-grid">
+                {([
+                  ["add", "+"],
+                  ["sub", "-"],
+                  ["mul", "×"],
+                  ["div", "÷"],
+                ] as const).map(([op, label]) => (
+                  <button
+                    disabled={!calculationExpression}
+                    key={op}
+                    onClick={() => {
+                      setCalculationPendingOp(op);
+                      setIsPlacingCalculation(false);
+                    }}
+                    type="button"
+                  >
+                    {label}
+                  </button>
+                ))}
+                {(["sin", "cos", "tan"] as const).map((op) => (
+                  <button
+                    disabled={!calculationExpression}
+                    key={op}
+                    onClick={() =>
+                  setCalculationExpression((current) =>
+                    current ? { kind: "unary", op, child: current } : current,
+                  )
+                }
+                type="button"
+              >
+                {op}
+              </button>
+            ))}
+            <button onClick={() => openBoardCalculationPointPicker("distance")} type="button">
+              加入边
+            </button>
+            <button onClick={() => openBoardCalculationPointPicker("angle")} type="button">
+              加入角
+            </button>
+            <button
+              onClick={() => {
+                setCalculationExpression(null);
+                setCalculationPendingOp(null);
+                setIsPlacingCalculation(false);
+                setCalculationPointPicker(null);
+              }}
+              type="button"
+            >
+              清空
+                </button>
+                <button
+                  disabled={!calculationExpression || Boolean(calculationPendingOp)}
+                  onClick={() => {
+                    setIsPlacingCalculation(true);
+                    setCalculationStatusMessage("请点击画布放置计算结果。");
+                  }}
+                  type="button"
+                >
+                  确定
+              </button>
+            </div>
+            {calculationPointPicker ? (
+              <div className="calculation-point-picker">
+                <h4>
+                  {calculationPointPicker.mode === "distance"
+                    ? "选择两个点作为边"
+                    : "选择三个点作为角"}
+                </h4>
+                <input
+                  className="calculation-point-search"
+                  onChange={(event) =>
+                    setCalculationPointPicker((current) =>
+                      current
+                        ? { ...current, searchQuery: event.target.value }
+                        : current,
+                    )
+                  }
+                  placeholder="搜索点"
+                  type="search"
+                  value={calculationPointPicker.searchQuery}
+                />
+                <div className="calculation-point-order">
+                  {calculationPointPicker.selectedPointIds.length > 0
+                    ? calculationPointPicker.selectedPointIds
+                        .map((pointId, index) =>
+                          `${index + 1}. ${getPointNameById(displayDocument, pointId)}`,
+                        )
+                        .join(" / ")
+                    : calculationPointPicker.mode === "distance"
+                      ? "请选择第 1 个点"
+                      : "请选择第 1 个点，第二个点为顶点"}
+                </div>
+                <div className="calculation-point-list">
+                  {boardCalculationPoints
+                    .filter((point) => {
+                      const query = calculationPointPicker.searchQuery
+                        .trim()
+                        .toLowerCase();
+                      if (!query) {
+                        return true;
+                      }
+                      return (
+                        getPointNameById(displayDocument, point.id)
+                          .toLowerCase()
+                          .includes(query) ||
+                        getBoardCalculationPointTypeLabel(point)
+                          .toLowerCase()
+                          .includes(query)
+                      );
+                    })
+                    .map((point) => {
+                      const selected =
+                        calculationPointPicker.selectedPointIds.includes(point.id);
+
+                      return (
+                        <button
+                          className={selected ? "selected" : undefined}
+                          key={point.id}
+                          onClick={() => toggleBoardCalculationPoint(point.id)}
+                          type="button"
+                        >
+                          <span>{getPointNameById(displayDocument, point.id)}</span>
+                          <small>{getBoardCalculationPointTypeLabel(point)}</small>
+                        </button>
+                      );
+                    })}
+                </div>
+              </div>
+            ) : null}
+            {calculationPendingOp ? <span>请选择下一个引用。</span> : null}
+          </section>
+        ) : null}
+
           <section className="tool-group" aria-label="View tools">
             <h2>{"\u89c6\u56fe"}</h2>
             <div className="tool-button-grid">
@@ -8159,7 +8960,34 @@ function App() {
               : `${selectedEntityCount} selected`}
           </span>
         </div>
+        <div className="panel-tabs" role="tablist" aria-label="右侧面板">
+          <button
+            className={propertiesTab === "properties" ? "active" : ""}
+            onClick={() => setPropertiesTab("properties")}
+            type="button"
+          >
+            属性
+          </button>
+          <button
+            className={propertiesTab === "objects" ? "active" : ""}
+            onClick={() => setPropertiesTab("objects")}
+            type="button"
+          >
+            对象
+          </button>
+        </div>
 
+        {propertiesTab === "objects" ? (
+          <ObjectListPanel
+            groups={geometryObjectListGroups}
+            onDelete={deleteBoardEntityFromList}
+            onSearchQueryChange={setObjectListSearchQuery}
+            onSelect={selectEntity}
+            onToggleVisible={setBoardEntityVisibility}
+            searchQuery={objectListSearchQuery}
+          />
+        ) : (
+          <>
         {selectedEntityCount > 0 ? (
           <section className="property-group selection-actions">
             <h3>Selection</h3>
@@ -8546,6 +9374,32 @@ function App() {
                 </span>
               </div>
             ) : null}
+            {singleSelectedEntity?.kind === "calculation" ? (
+              <div className="batch-naming">
+                <span>类型：计算</span>
+                <span className="property-formula-preview">
+                  <FormulaView
+                    expression={singleSelectedEntity.expression}
+                    getReferenceLabel={getBoardCalculationReferenceLabel}
+                  />
+                </span>
+                <span>
+                  当前值：
+                  {(() => {
+                    const result = evaluateCalculationExpression(
+                      singleSelectedEntity.expression,
+                      (targetId) =>
+                        resolveBoardCalculationReference(displayDocument, targetId),
+                      resolveBoardCalculationGeometry(displayDocument),
+                    );
+
+                    return result.ok
+                      ? formatCalculationValue(result.value)
+                      : result.error;
+                  })()}
+                </span>
+              </div>
+            ) : null}
             <button
               className="danger-button"
               onClick={deleteSelectedEntities}
@@ -8759,49 +9613,8 @@ function App() {
           </label>
         </section>
 
-        <section className="property-group">
-          <h3>Objects</h3>
-          {entities.length > 0 ? (
-            <ul className="entity-list">
-              {entities.map((entity: BoardEntity) => (
-                <li
-                  className={
-                    displayDocument.selectedEntityIds.includes(entity.id)
-                      ? "entity-list-item selected"
-                      : "entity-list-item"
-                  }
-                  key={entity.id}
-                  onClick={(event) => {
-                    if (event.ctrlKey) {
-                      toggleSelection(entity.id);
-                      return;
-                    }
-
-                    selectEntity(entity.id);
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" || event.key === " ") {
-                      event.preventDefault();
-                      selectEntity(entity.id);
-                    }
-                  }}
-                  role="button"
-                  tabIndex={0}
-                >
-                  <span className="entity-list-main">
-                    <span className="entity-name">{entity.name ?? entity.id}</span>
-                    <span className="entity-detail">
-                      {getEntityDetail(entity, displayDocument)}
-                    </span>
-                  </span>
-                  <span className="entity-kind-pill">{entity.kind}</span>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <div className="empty-state">No geometry entities in the document.</div>
-          )}
-        </section>
+          </>
+        )}
       </aside>
 
       {showCoordinatePointModal ? (
@@ -8894,6 +9707,7 @@ function App() {
         {pointDragStatus ? <span>{pointDragStatus}</span> : null}
         {measureLengthToolStatus ? <span>{measureLengthToolStatus}</span> : null}
         {measureAngleToolStatus ? <span>{measureAngleToolStatus}</span> : null}
+        {calculationToolStatus ? <span>{calculationToolStatus}</span> : null}
         {deleteStatusMessage ? <span>{deleteStatusMessage}</span> : null}
         {coordinatePointStatus ? <span>{coordinatePointStatus}</span> : null}
         {preselectionStatus ? <span>Preselect: {preselectionStatus}</span> : null}
@@ -8935,12 +9749,41 @@ function App() {
                       ? "已选择圆"
                     : selectedPlane2DEntity.type === "plane2d-polygon"
                       ? "已选择多边形"
-                      : selectedPlane2DEntity.type === "plane2d-extension"
+                    : selectedPlane2DEntity.type === "plane2d-extension"
                         ? "已选择延长线"
-                        : "已选择测量"
+                    : selectedPlane2DEntity.type === "plane2d-calculation"
+                      ? "已选择计算"
+                      : "已选择测量"
                   : "平面画布"}
               </span>
             </div>
+            <div className="panel-tabs" role="tablist" aria-label="右侧面板">
+              <button
+                className={propertiesTab === "properties" ? "active" : ""}
+                onClick={() => setPropertiesTab("properties")}
+                type="button"
+              >
+                属性
+              </button>
+              <button
+                className={propertiesTab === "objects" ? "active" : ""}
+                onClick={() => setPropertiesTab("objects")}
+                type="button"
+              >
+                对象
+              </button>
+            </div>
+            {propertiesTab === "objects" ? (
+              <ObjectListPanel
+                groups={plane2DObjectListGroups}
+                onDelete={deletePlane2DEntityFromList}
+                onSearchQueryChange={setObjectListSearchQuery}
+                onSelect={selectPlane2DEntityFromList}
+                onToggleVisible={setPlane2DEntityVisibility}
+                searchQuery={objectListSearchQuery}
+              />
+            ) : (
+              <>
             {hasMultipleSelectedPlane2DPoints ? (
               <section className="property-group batch-naming name-editor">
                 <h3>多点命名</h3>
@@ -9430,6 +10273,65 @@ function App() {
                   删除对象
                 </button>
               </section>
+            ) : selectedPlane2DEntity?.type === "plane2d-calculation" ? (
+              <section className="property-group">
+                <h3>计算</h3>
+                <label>
+                  公式
+                  <span className="property-formula-preview">
+                    <FormulaView
+                      expression={selectedPlane2DEntity.expression}
+                      getReferenceLabel={(targetId) => {
+                        const entity = planeCanvasDocument?.entities[targetId];
+
+                        if (!entity) {
+                          return "引用失效";
+                        }
+
+                        if (entity.type === "plane2d-segment") {
+                          return `|${entity.name?.trim() || entity.id}|`;
+                        }
+
+                        return entity.name?.trim() || entity.id;
+                      }}
+                    />
+                  </span>
+                </label>
+                <label>
+                  当前值
+                  <input
+                    value={(() => {
+                      if (!planeCanvasDocument) {
+                        return "引用失效";
+                      }
+
+                      const result = evaluatePlane2DCalculation(
+                        planeCanvasDocument,
+                        selectedPlane2DEntity.expression,
+                      );
+
+                      return result.ok
+                        ? formatCalculationValue(result.value)
+                        : result.error;
+                    })()}
+                    readOnly
+                  />
+                </label>
+                <label>
+                  标签位置
+                  <input
+                    value={`(${selectedPlane2DEntity.labelPosition.x.toFixed(2)}, ${selectedPlane2DEntity.labelPosition.y.toFixed(2)})`}
+                    readOnly
+                  />
+                </label>
+                <button
+                  className="danger-button"
+                  onClick={deleteSelectedPlane2DEntities}
+                  type="button"
+                >
+                  删除对象
+                </button>
+              </section>
             ) : hasMultipleSelectedPlane2DPoints ? null : (
               <section className="property-group">
                 <h3>平面画布</h3>
@@ -9451,11 +10353,13 @@ function App() {
                 <label>
                   对象
                   <input
-                    value={`点 ${plane2DPoints.length} / 线段 ${plane2DSegments.length} / 延长 ${plane2DExtensions.length} / 圆 ${plane2DCircles.length} / 多边形 ${plane2DPolygons.length} / 测量 ${plane2DMeasurements.length}`}
+                    value={`点 ${plane2DPoints.length} / 线段 ${plane2DSegments.length} / 延长 ${plane2DExtensions.length} / 圆 ${plane2DCircles.length} / 多边形 ${plane2DPolygons.length} / 测量 ${plane2DMeasurements.length} / 计算 ${plane2DCalculations.length}`}
                     readOnly
                   />
                 </label>
               </section>
+            )}
+              </>
             )}
           </aside>
           <footer className="status-bar">
@@ -9468,6 +10372,7 @@ function App() {
             <span>延长：{plane2DExtensions.length}</span>
             <span>多边形：{plane2DPolygons.length}</span>
             <span>测量：{plane2DMeasurements.length}</span>
+            <span>计算：{plane2DCalculations.length}</span>
           </footer>
         </>
       ) : (

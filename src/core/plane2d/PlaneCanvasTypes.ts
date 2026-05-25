@@ -1,3 +1,5 @@
+import type { CalculationExpression } from "../calculation/CalculationTypes";
+
 export interface Vec2 {
   readonly x: number;
   readonly y: number;
@@ -14,7 +16,8 @@ export type Plane2DToolName =
   | "perpendicular"
   | "extend"
   | "length"
-  | "angle";
+  | "angle"
+  | "calculation";
 
 export type Plane2DPointConstruction =
   | {
@@ -58,6 +61,7 @@ export interface Plane2DPointEntity {
   readonly id: string;
   readonly type: "plane2d-point";
   readonly position: Vec2;
+  readonly visible?: boolean;
   readonly pointKind?: "free" | "constructed";
   readonly construction?: Plane2DPointConstruction;
   readonly name?: string;
@@ -86,6 +90,7 @@ export interface Plane2DSegmentEntity {
   readonly type: "plane2d-segment";
   readonly startPointId: string;
   readonly endPointId: string;
+  readonly visible?: boolean;
   readonly segmentKind?: "free" | "constructed" | "extension";
   readonly construction?: Plane2DSegmentConstruction;
   readonly name?: string;
@@ -100,6 +105,7 @@ export interface Plane2DCircleEntity {
   readonly type: "plane2d-circle";
   readonly centerPointId: string;
   readonly radiusPointId: string;
+  readonly visible?: boolean;
   readonly circleKind?: "free" | "constructed";
   readonly construction?: {
     readonly kind: "copyCircle";
@@ -125,6 +131,7 @@ export interface Plane2DPolygonEntity {
   readonly id: string;
   readonly type: "plane2d-polygon";
   readonly vertexPointIds: readonly string[];
+  readonly visible?: boolean;
   readonly polygonKind?: "free" | "regular";
   readonly construction?: Plane2DPolygonConstruction;
   readonly name?: string;
@@ -166,6 +173,7 @@ export interface Plane2DMeasurementEntity {
     | Plane2DLengthMeasurementDefinition
     | Plane2DAngleMeasurementDefinition;
   readonly labelPosition?: Vec2;
+  readonly visible?: boolean;
   readonly name?: string;
   readonly nameSource?: "auto" | "manual";
   readonly showName?: boolean;
@@ -187,13 +195,27 @@ export interface Plane2DExtensionEntity {
   readonly updatedAt?: string;
 }
 
+export interface Plane2DCalculationEntity {
+  readonly id: string;
+  readonly type: "plane2d-calculation";
+  readonly expression: CalculationExpression;
+  readonly labelPosition: Vec2;
+  readonly visible?: boolean;
+  readonly name?: string;
+  readonly nameSource?: "auto" | "manual";
+  readonly showName?: boolean;
+  readonly createdAt?: string;
+  readonly updatedAt?: string;
+}
+
 export type Plane2DEntity =
   | Plane2DPointEntity
   | Plane2DSegmentEntity
   | Plane2DCircleEntity
   | Plane2DPolygonEntity
   | Plane2DMeasurementEntity
-  | Plane2DExtensionEntity;
+  | Plane2DExtensionEntity
+  | Plane2DCalculationEntity;
 
 export interface PlaneCanvasDocument {
   readonly id: string;

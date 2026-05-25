@@ -16,7 +16,8 @@ export type ToolName =
   | "plane"
   | "move"
   | "measureLength"
-  | "measureAngle";
+  | "measureAngle"
+  | "calculation";
 
 export interface PointerRay {
   readonly origin: Vec3;
