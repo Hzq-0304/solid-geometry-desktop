@@ -1571,6 +1571,14 @@ input {
   stroke-dasharray: 7 5;
 }
 
+.plane2d-segment.section {
+  stroke: #0f766e;
+}
+
+.plane2d-segment.section-extension {
+  stroke-dasharray: 9 5;
+}
+
 .plane2d-extension-segment {
   stroke: #6b7280;
   stroke-dasharray: 6 5;
@@ -1648,6 +1656,10 @@ input {
 
 .plane2d-point.constructed {
   fill: #374151;
+}
+
+.plane2d-point.section {
+  fill: #0f766e;
 }
 
 .plane2d-point.selected {

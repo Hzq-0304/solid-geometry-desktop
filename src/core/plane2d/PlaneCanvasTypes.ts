@@ -1,8 +1,52 @@
 import type { CalculationExpression } from "../calculation/CalculationTypes";
+import type { Vec3 } from "../geometry/Vec3";
 
 export interface Vec2 {
   readonly x: number;
   readonly y: number;
+}
+
+export type Plane2DSectionRelation =
+  | "line-plane-intersection-point"
+  | "line-contained-in-section-plane"
+  | "plane-plane-intersection-line"
+  | "plane-coincident-with-section-plane"
+  | "face-extension-intersection-line";
+
+export interface Plane2DSectionSourceRef {
+  readonly sourceDocumentId?: string;
+  readonly sourceTabId?: string;
+  readonly sourceEntityId: string;
+  readonly sourceEntityType: string;
+  readonly sourceName?: string;
+  readonly relation: Plane2DSectionRelation;
+}
+
+export interface Plane2DSectionObjectRef {
+  readonly kind: "section-object";
+  readonly sectionResultId: string;
+  readonly sourceRef: Plane2DSectionSourceRef;
+  readonly position3D?: Vec3;
+  readonly linePoint3D?: Vec3;
+  readonly lineDirection3D?: Vec3;
+  readonly lineKind?: "point" | "segment" | "line";
+}
+
+export interface Plane2DSectionMetadata {
+  readonly kind: "section-from-3d";
+  readonly source3DTabId: string;
+  readonly source3DDocumentId?: string;
+  readonly sourceSectionEntityId?: string;
+  readonly sectionPlane: {
+    readonly origin: Vec3;
+    readonly normal: Vec3;
+    readonly u: Vec3;
+    readonly v: Vec3;
+  };
+  readonly coincidentPlanes?: readonly Plane2DSectionSourceRef[];
+  readonly createdAt: string;
+  readonly liveUpdateEnabled: false;
+  readonly syncBackEnabled: false;
 }
 
 export type Plane2DToolName =
@@ -90,8 +134,11 @@ export interface Plane2DPointEntity {
   readonly type: "plane2d-point";
   readonly position: Vec2;
   readonly visible?: boolean;
+  readonly locked?: boolean;
+  readonly draggable?: boolean;
   readonly pointKind?: "free" | "constructed";
   readonly construction?: Plane2DPointConstruction;
+  readonly sectionRef?: Plane2DSectionObjectRef;
   readonly name?: string;
   readonly nameSource?: "auto" | "manual";
   readonly showName?: boolean;
@@ -119,8 +166,11 @@ export interface Plane2DSegmentEntity {
   readonly startPointId: string;
   readonly endPointId: string;
   readonly visible?: boolean;
+  readonly locked?: boolean;
+  readonly draggable?: boolean;
   readonly segmentKind?: "free" | "constructed" | "extension";
   readonly construction?: Plane2DSegmentConstruction;
+  readonly sectionRef?: Plane2DSectionObjectRef;
   readonly name?: string;
   readonly nameSource?: "auto" | "manual";
   readonly showName?: boolean;
@@ -276,6 +326,7 @@ export interface PlaneCanvasDocument {
   readonly type: "plane2d";
   readonly name: string;
   readonly version: string;
+  readonly section?: Plane2DSectionMetadata;
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly entities: Record<string, Plane2DEntity>;

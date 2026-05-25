@@ -2506,7 +2506,12 @@ export default function PlaneCanvasViewport({
     if (interaction.kind === "dragPoint" && interaction.pointerId === event.pointerId) {
       const point = document.entities[interaction.pointId];
 
-      if (point?.type !== "plane2d-point" || point.pointKind === "constructed") {
+      if (
+        point?.type !== "plane2d-point" ||
+        point.pointKind === "constructed" ||
+        point.locked ||
+        point.draggable === false
+      ) {
         return;
       }
 
@@ -2777,12 +2782,17 @@ export default function PlaneCanvasViewport({
 
       selectEntity(pick.pointId);
 
-      if (point?.type === "plane2d-point" && point.pointKind !== "constructed") {
+      if (
+        point?.type === "plane2d-point" &&
+        point.pointKind !== "constructed" &&
+        !point.locked &&
+        point.draggable !== false
+      ) {
         dragStartDocumentRef.current = document;
         setInteraction({ kind: "dragPoint", pointerId: event.pointerId, pointId: point.id });
         event.currentTarget.setPointerCapture(event.pointerId);
       } else if (point?.type === "plane2d-point") {
-        onStatus("构造点不能直接拖动。");
+        onStatus(point.sectionRef ? "截面对象为静态结果，不能直接拖动。" : "构造点不能直接拖动。");
       }
 
       return;
@@ -3669,6 +3679,11 @@ export default function PlaneCanvasViewport({
                   className={[
                     "plane2d-segment",
                     segment.segmentKind === "extension" ? "extension" : "",
+                    segment.sectionRef ? "section" : "",
+                    segment.sectionRef?.sourceRef.relation ===
+                    "face-extension-intersection-line"
+                      ? "section-extension"
+                      : "",
                     isSelected ? "selected" : "",
                     isHovered ? "hovered" : "",
                   ].join(" ")}
@@ -3945,7 +3960,7 @@ export default function PlaneCanvasViewport({
             return (
               <g key={point.id}>
                 <circle
-                  className={["plane2d-point", point.pointKind === "constructed" ? "constructed" : "", isSelected ? "selected" : "", isHovered ? "hovered" : ""].join(" ")}
+                  className={["plane2d-point", point.pointKind === "constructed" ? "constructed" : "", point.sectionRef ? "section" : "", isSelected ? "selected" : "", isHovered ? "hovered" : ""].join(" ")}
                   cx={pointScreen.x}
                   cy={pointScreen.y}
                   r={isSelected || isHovered ? document.settings.pointSizePx / 2 + 2 : point.pointKind === "constructed" ? document.settings.pointSizePx / 2 - 1 : document.settings.pointSizePx / 2}

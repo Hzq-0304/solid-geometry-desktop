@@ -9,6 +9,7 @@ import {
   Grid3X3,
   MousePointer2,
   Ruler,
+  Scissors,
 } from "lucide-react";
 import GreekLetterKeyboard from "./components/GreekLetterKeyboard";
 import ObjectListPanel, {
@@ -68,6 +69,7 @@ import type {
   PerpendicularLineEntity,
   PlaneEntity,
   PointEntity,
+  PolygonEntity,
   SegmentEntity,
 } from "./core/document/EntityTypes";
 import { createEntityId } from "./core/document/idGenerator";
@@ -144,6 +146,7 @@ import type {
   Plane2DMeasurementEntity,
   Plane2DPointEntity,
   Plane2DPolygonEntity,
+  Plane2DSectionSourceRef,
   Plane2DSegmentEntity,
   Plane2DToolName,
   PlaneCanvasDocument,
@@ -170,6 +173,12 @@ import {
   normalizeFunctionSurfaceResolution,
   sampleFunctionSurface3D,
 } from "./core/function-plot/FunctionSampler3D";
+import { createPlane2DSectionDocument } from "./core/section/SectionDocument";
+import {
+  createSectionPlaneFromPlaneEntity,
+  createSectionPlaneFromPolygonEntity,
+} from "./core/section/SectionPlane";
+import { solveSection } from "./core/section/SectionSolver";
 import {
   createPlane2DHistoryState,
   pushPlane2DHistoryEntry,
@@ -261,6 +270,7 @@ type PreselectedEntityType =
   | "linePlanePerpendicular"
   | "extension"
   | "plane"
+  | "polygon"
   | "functionSurface"
   | "measurement"
   | "calculation";
@@ -365,6 +375,7 @@ const constructTools: Array<{
   { name: "parallel", label: "\u5e73\u884c", icon: Ruler },
   { name: "intersection", label: "\u4ea4\u70b9/\u4ea4\u7ebf", icon: Ruler },
   { name: "plane", label: "\u5e73\u9762", icon: SolidPlaneIcon },
+  { name: "sectionPlane", label: "截取平面", icon: Scissors },
   { name: "functionSurface", label: "函数曲面", icon: Grid3X3 },
 ];
 
@@ -388,6 +399,7 @@ const toolLabels: Record<ToolName, string> = {
   parallel: "\u5e73\u884c",
   intersection: "\u4ea4\u70b9/\u4ea4\u7ebf",
   plane: "\u5e73\u9762",
+  sectionPlane: "截取平面",
   functionSurface: "函数曲面",
   move: "\u79fb\u52a8",
   measureLength: "\u957f\u5ea6",
@@ -1771,6 +1783,7 @@ const isPlane2DEntityVisible = (entity: Plane2DEntity): boolean =>
 const getPlane2DEntityTypeLabel = (entity: Plane2DEntity): string => {
   switch (entity.type) {
     case "plane2d-point":
+      if (entity.sectionRef) return "截面点";
       if (entity.construction?.kind === "segmentIntersection") return "交点";
       if (entity.construction?.kind === "midpoint") return "中点";
       if (entity.construction?.kind === "perpendicularFoot") return "垂足";
@@ -1788,6 +1801,7 @@ const getPlane2DEntityTypeLabel = (entity: Plane2DEntity): string => {
       }
       return "点";
     case "plane2d-segment":
+      if (entity.sectionRef) return "截面线";
       if (entity.segmentKind === "extension") return "延长线段";
       if (entity.construction?.kind === "perpendicular") return "垂线段";
       return "线段";
@@ -1807,6 +1821,45 @@ const getPlane2DEntityTypeLabel = (entity: Plane2DEntity): string => {
       return "对象";
   }
 };
+
+const getPlane2DSectionSourceLabel = (
+  entity: Plane2DPointEntity | Plane2DSegmentEntity,
+): string => {
+  const sourceRef = entity.sectionRef?.sourceRef;
+
+  if (!sourceRef) {
+    return "来源对象未加载或已丢失";
+  }
+
+  return (
+    sourceRef.sourceName?.trim() ||
+    `${sourceRef.sourceEntityType} ${getShortEntityId(sourceRef.sourceEntityId)}`
+  );
+};
+
+const getPlane2DSectionRelationLabel = (
+  relation: Plane2DSectionSourceRef["relation"] | undefined,
+): string => {
+  switch (relation) {
+    case "line-plane-intersection-point":
+      return "线与截取平面的交点";
+    case "line-contained-in-section-plane":
+      return "线段位于截取平面内";
+    case "plane-plane-intersection-line":
+      return "平面与截取平面的交线";
+    case "face-extension-intersection-line":
+      return "面的延长部分与截取平面的交线";
+    case "plane-coincident-with-section-plane":
+      return "平面与截取平面重合";
+    default:
+      return "来源对象未加载或已丢失";
+  }
+};
+
+const formatVec3ForInput = (value: Vec3 | undefined): string =>
+  value
+    ? `(${value.x.toFixed(2)}, ${value.y.toFixed(2)}, ${value.z.toFixed(2)})`
+    : "未记录";
 
 const formatPlane2DIntersectionEdgeRef = (
   edge: Plane2DIntersectionEdgeRef | undefined,
@@ -1833,9 +1886,9 @@ const formatPlane2DIntersectionEdgeRef = (
 const getPlane2DObjectGroupLabel = (entity: Plane2DEntity): string => {
   switch (entity.type) {
     case "plane2d-point":
-      return "点";
+      return entity.sectionRef ? "截面点" : "点";
     case "plane2d-segment":
-      return "线段";
+      return entity.sectionRef ? "截面线" : "线段";
     case "plane2d-circle":
       return "圆";
     case "plane2d-polygon":
@@ -1862,6 +1915,11 @@ const getPlane2DObjectListItem = (
     entity.showName && entity.name?.trim() ? entity.name.trim() : "";
   const expressionName =
     entity.type === "plane2d-function-graph" ? `y=${entity.expression}` : "";
+  const sectionName =
+    (entity.type === "plane2d-point" || entity.type === "plane2d-segment") &&
+    entity.sectionRef
+      ? getPlane2DSectionSourceLabel(entity)
+      : "";
   const name = manualName || expressionName || `${typeLabel} ${getShortEntityId(entity.id)}`;
 
   return {
@@ -1870,8 +1928,10 @@ const getPlane2DObjectListItem = (
     detail:
       entity.type === "plane2d-function-graph"
         ? entity.expression
+        : sectionName
+          ? `来自 ${sectionName}`
         : getShortEntityId(entity.id),
-    searchText: `${name} ${typeLabel} ${entity.id} ${expressionName}`,
+    searchText: `${name} ${typeLabel} ${entity.id} ${expressionName} ${sectionName}`,
     visible: isPlane2DEntityVisible(entity),
     selected: selectedEntityIds.includes(entity.id),
   };
@@ -2553,6 +2613,8 @@ function App() {
   const [intersectionFirstTarget, setIntersectionFirstTarget] =
     useState<IntersectionTarget | null>(null);
   const [intersectionStatusMessage, setIntersectionStatusMessage] =
+    useState<string | null>(null);
+  const [sectionPlaneStatusMessage, setSectionPlaneStatusMessage] =
     useState<string | null>(null);
   const [showCoordinatePointModal, setShowCoordinatePointModal] =
     useState(false);
@@ -3312,6 +3374,7 @@ function App() {
     setCalculationStatusMessage(null);
     setIntersectionFirstTarget(null);
     setIntersectionStatusMessage(null);
+    setSectionPlaneStatusMessage(null);
     setShowLinePlaneAnglePanel(false);
     setShowPlanePlaneAnglePanel(false);
     setLastPointerInfo(null);
@@ -3610,6 +3673,156 @@ function App() {
   const newPlaneCanvas = () => {
     resetPlaneCanvasDocument(createPlaneCanvasDocument(), null);
     setFileStatusMessage("平面画布已创建");
+  };
+
+  const isSectionPlaneCandidate = (
+    entity: BoardEntity | null | undefined,
+  ): entity is PlaneEntity | PolygonEntity =>
+    Boolean(
+      entity &&
+        entity.visible !== false &&
+        (entity.kind === "plane" || entity.kind === "polygon"),
+    );
+
+  const createSectionPlaneCanvasFromEntity = (entityId: EntityId): boolean => {
+    if (workspaceMode !== "geometry3d" || !activeTabId) {
+      showToast("请先在 3D 画布中选择一个截取平面。");
+      return false;
+    }
+
+    const sourceDocument = commandManager.getDocument();
+    const selectedEntity = sourceDocument.entities[entityId];
+
+    if (!isSectionPlaneCandidate(selectedEntity)) {
+      showToast("当前选中对象不能作为截取平面。");
+      setSectionPlaneStatusMessage("当前选中对象不能作为截取平面。");
+      setFileStatusMessage("当前选中对象不能作为截取平面");
+      return false;
+    }
+
+    const sectionPlane =
+      selectedEntity.kind === "plane"
+        ? createSectionPlaneFromPlaneEntity(sourceDocument, selectedEntity)
+        : createSectionPlaneFromPolygonEntity(sourceDocument, selectedEntity);
+
+    if (!sectionPlane) {
+      showToast("无法从该对象定义截取平面。");
+      setSectionPlaneStatusMessage("无法从该对象定义截取平面。");
+      setFileStatusMessage("截取平面无效");
+      return false;
+    }
+
+    const results = solveSection(sourceDocument, {
+      sourceDocumentId: sourceDocument.id,
+      sourceTabId: activeTabId,
+      sectionPlane,
+      sectionPlaneSourceEntityId: selectedEntity.id,
+    });
+    const hasGeometryResults = results.some(
+      (result) => result.kind === "point" || result.kind === "line",
+    );
+
+    const sourceName =
+      selectedEntity.name?.trim() ||
+      `${getBoardEntityTypeLabel(selectedEntity)} ${getShortEntityId(selectedEntity.id)}`;
+    const title = `截面 - ${sourceName}`;
+    const sectionDocument = normalizePlaneCanvasDocument(
+      createPlane2DSectionDocument(
+        {
+          title,
+          source3DTabId: activeTabId,
+          source3DDocumentId: sourceDocument.id,
+          sourceSectionEntityId: selectedEntity.id,
+          sectionPlane,
+        },
+        results,
+      ),
+    );
+    const now = new Date().toISOString();
+    const history = createPlane2DHistoryState();
+    const tab: WorkspaceTab = {
+      id: createWorkspaceTabId(),
+      kind: "plane2d",
+      title,
+      filePath: null,
+      document: sectionDocument,
+      isDirty: true,
+      createdAt: now,
+      updatedAt: now,
+      plane2DState: {
+        history,
+        activeTool: "select",
+        pendingSegmentPointId: null,
+        viewport: { panX: 0, panY: 0, zoom: 1 },
+      },
+    };
+
+    nextPlaneTabNumberRef.current += 1;
+    setTabs((currentTabs) => [
+      ...currentTabs.map((currentTab) =>
+        currentTab.id === activeTabId
+          ? captureActiveWorkspaceTab(currentTab)
+          : currentTab,
+      ),
+      tab,
+    ]);
+    setActiveTabId(tab.id);
+    resetTransientToolState();
+    setPlaneCanvasDocument(sectionDocument);
+    setPlane2DHistory(history);
+    setPlane2DViewportState({ panX: 0, panY: 0, zoom: 1 });
+    setCurrentFilePath(null);
+    setIsDirty(true);
+    setPlane2DTool("select");
+    resetPlane2DTransientState();
+    setWorkspaceMode("plane2d");
+    setCurrentTool("select");
+    setSectionPlaneStatusMessage(null);
+    const message = hasGeometryResults
+      ? `已生成 2D 截面画布：${title}`
+      : `已生成空 2D 截面画布：${title}`;
+    showToast(
+      hasGeometryResults
+        ? "已生成 2D 截面画布。"
+        : "未找到与该平面相交的对象，已生成空截面画布。",
+    );
+    setFileStatusMessage(message);
+    return true;
+  };
+
+  const createSectionPlaneCanvasFromSelection = (): boolean => {
+    if (workspaceMode !== "geometry3d" || !activeTabId) {
+      showToast("请先在 3D 画布中选择一个截取平面。");
+      return false;
+    }
+
+    const sourceDocument = commandManager.getDocument();
+    const selectedEntity = sourceDocument.selectedEntityIds
+      .map((selectedEntityId) => sourceDocument.entities[selectedEntityId])
+      .find(isSectionPlaneCandidate);
+
+    if (selectedEntity) {
+      return createSectionPlaneCanvasFromEntity(selectedEntity.id);
+    }
+
+    if (sourceDocument.selectedEntityIds.length > 0) {
+      showToast("当前选中对象不能作为截取平面。");
+      setSectionPlaneStatusMessage("当前选中对象不能作为截取平面。");
+      setFileStatusMessage("当前选中对象不能作为截取平面");
+      return false;
+    }
+
+    return false;
+  };
+
+  const activateSectionPlaneTool = () => {
+    if (createSectionPlaneCanvasFromSelection()) {
+      return;
+    }
+
+    changeTool("sectionPlane");
+    setSectionPlaneStatusMessage("请选择一个 3D 平面作为截取平面。");
+    setFileStatusMessage("请选择一个 3D 平面作为截取平面");
   };
 
   const closeWorkspaceTab = (tabId: string) => {
@@ -6864,6 +7077,22 @@ function App() {
       : null;
   };
 
+  const getSectionPlanePreselection = (
+    pointerInfo: PointerInfo,
+    sourceDocument: BoardDocument,
+  ): Preselection | null => {
+    const entity =
+      pointerInfo.hitEntityId &&
+      (pointerInfo.hitEntityType === "plane" ||
+        pointerInfo.hitEntityType === "polygon")
+        ? sourceDocument.entities[pointerInfo.hitEntityId]
+        : null;
+
+    return isSectionPlaneCandidate(entity)
+      ? { entityId: entity.id, entityType: entity.kind }
+      : null;
+  };
+
   const getFunctionSurfacePreselection = (
     pointerInfo: PointerInfo,
     sourceDocument: BoardDocument,
@@ -7051,6 +7280,8 @@ function App() {
           ? null
           : candidate;
       }
+      case "sectionPlane":
+        return getSectionPlanePreselection(pointerInfo, sourceDocument);
       case "perpendicular":
         if (perpendicularDirectionPick) {
           return getSnapTargetPreselection(pointerInfo, sourceDocument);
@@ -7703,6 +7934,25 @@ function App() {
       return;
     }
 
+    if (currentTool === "sectionPlane") {
+      const candidateId =
+        clickPreselection &&
+        isSectionPlaneCandidate(
+          commandManager.getDocument().entities[clickPreselection.entityId],
+        )
+          ? clickPreselection.entityId
+          : null;
+
+      if (!candidateId) {
+        showToast("请选择一个 3D 平面作为截取平面。");
+        setSectionPlaneStatusMessage("请选择一个 3D 平面作为截取平面。");
+        return;
+      }
+
+      createSectionPlaneCanvasFromEntity(candidateId);
+      return;
+    }
+
     if (currentTool === "plane") {
       const pointInput = resolvePointInputFromPointer(
         nextPointerInfo,
@@ -8068,6 +8318,10 @@ function App() {
       setIntersectionStatusMessage(null);
     }
 
+    if (nextTool !== "sectionPlane") {
+      setSectionPlaneStatusMessage(null);
+    }
+
     if (nextTool !== "measureAngle") {
       setShowAngleToolPanel(false);
       setShowLinePlaneAnglePanel(false);
@@ -8122,6 +8376,10 @@ function App() {
     if (currentTool === "intersection" && nextTool !== "intersection") {
       setIntersectionFirstTarget(null);
       setIntersectionStatusMessage(null);
+    }
+
+    if (currentTool === "sectionPlane" && nextTool !== "sectionPlane") {
+      setSectionPlaneStatusMessage(null);
     }
 
     if (currentTool === "measureLength" && nextTool !== "measureLength") {
@@ -8518,12 +8776,42 @@ function App() {
     planeCanvasDocument.selectedEntityIds.length > 1 &&
     selectedPlane2DPointEntities.length ===
       planeCanvasDocument.selectedEntityIds.length;
+  const getPlane2DSectionSourceLoadStatus = (
+    sourceRef: Plane2DSectionSourceRef | undefined,
+  ): string => {
+    if (!sourceRef?.sourceTabId) {
+      return "来源对象未加载或已丢失";
+    }
+
+    const sourceTab = tabs.find(
+      (tab) => tab.id === sourceRef.sourceTabId && tab.kind === "geometry3d",
+    );
+    const sourceDocument =
+      sourceTab?.kind === "geometry3d"
+        ? (sourceTab.document as BoardDocument)
+        : null;
+
+    return sourceDocument?.entities[sourceRef.sourceEntityId]
+      ? "来源对象已加载"
+      : "来源对象未加载或已丢失";
+  };
   const plane2DObjectListGroups = useMemo<readonly ObjectListGroup[]>(() => {
     if (!planeCanvasDocument) {
       return [];
     }
 
-    const groupOrder = ["点", "线段", "圆", "多边形", "函数图像", "测量", "计算", "对象"];
+    const groupOrder = [
+      "截面点",
+      "截面线",
+      "点",
+      "线段",
+      "圆",
+      "多边形",
+      "函数图像",
+      "测量",
+      "计算",
+      "对象",
+    ];
     const groups = new Map<string, ObjectListItem[]>();
 
     Object.values(planeCanvasDocument.entities).forEach((entity) => {
@@ -9018,7 +9306,11 @@ function App() {
                   disabled={disabled}
                   key={name}
                   onClick={() =>
-                    name === "plane" ? activateThreePointPlaneMode() : changeTool(name)
+                    name === "plane"
+                      ? activateThreePointPlaneMode()
+                      : name === "sectionPlane"
+                        ? activateSectionPlaneTool()
+                        : changeTool(name)
                   }
                   title={label}
                   aria-label={label}
@@ -10591,6 +10883,7 @@ function App() {
         {extendToolStatus ? <span>{extendToolStatus}</span> : null}
         {parallelToolStatus ? <span>{parallelToolStatus}</span> : null}
         {intersectionToolStatus ? <span>{intersectionToolStatus}</span> : null}
+        {sectionPlaneStatusMessage ? <span>{sectionPlaneStatusMessage}</span> : null}
         {pointDragStatus ? <span>{pointDragStatus}</span> : null}
         {measureLengthToolStatus ? <span>{measureLengthToolStatus}</span> : null}
         {measureAngleToolStatus ? <span>{measureAngleToolStatus}</span> : null}
@@ -10631,9 +10924,13 @@ function App() {
                   ? `已选择 ${selectedPlane2DPointEntities.length} 个点`
                   : selectedPlane2DEntity
                   ? selectedPlane2DEntity.type === "plane2d-point"
-                    ? "已选择点"
+                    ? selectedPlane2DEntity.sectionRef
+                      ? "已选择截面点"
+                      : "已选择点"
                     : selectedPlane2DEntity.type === "plane2d-segment"
-                      ? "已选择线段"
+                      ? selectedPlane2DEntity.sectionRef
+                        ? "已选择截面线"
+                        : "已选择线段"
                     : selectedPlane2DEntity.type === "plane2d-circle"
                       ? "已选择圆"
                     : selectedPlane2DEntity.type === "plane2d-polygon"
@@ -10724,7 +11021,9 @@ function App() {
             selectedPlane2DEntity?.type === "plane2d-point" ? (
               <section className="property-group">
                 <h3>
-                  {selectedPlane2DEntity.construction?.kind === "segmentIntersection"
+                  {selectedPlane2DEntity.sectionRef
+                    ? "截面点"
+                    : selectedPlane2DEntity.construction?.kind === "segmentIntersection"
                     ? "线段交点"
                     : selectedPlane2DEntity.construction?.kind === "midpoint"
                       ? "中点"
@@ -10750,7 +11049,9 @@ function App() {
                   构造方式
                   <input
                     value={
-                      selectedPlane2DEntity.construction?.kind === "segmentIntersection"
+                      selectedPlane2DEntity.sectionRef
+                        ? "截面点"
+                        : selectedPlane2DEntity.construction?.kind === "segmentIntersection"
                         ? "线段交点"
                         : selectedPlane2DEntity.construction?.kind === "midpoint"
                           ? "中点"
@@ -10822,10 +11123,73 @@ function App() {
             ) : selectedPlane2DEntity?.type === "plane2d-segment" ? (
               <section className="property-group">
                 <h3>
-                  {selectedPlane2DEntity.segmentKind === "extension"
+                  {selectedPlane2DEntity.sectionRef
+                    ? "截面线"
+                    : selectedPlane2DEntity.segmentKind === "extension"
                     ? "延长线段"
                     : "二维线段"}
                 </h3>
+                {selectedPlane2DEntity.sectionRef ? (
+                  <>
+                    <label>
+                      来源对象
+                      <input
+                        value={getPlane2DSectionSourceLabel(selectedPlane2DEntity)}
+                        readOnly
+                      />
+                    </label>
+                    <label>
+                      来源类型
+                      <input
+                        value={selectedPlane2DEntity.sectionRef.sourceRef.sourceEntityType}
+                        readOnly
+                      />
+                    </label>
+                    <label>
+                      来源状态
+                      <input
+                        value={getPlane2DSectionSourceLoadStatus(
+                          selectedPlane2DEntity.sectionRef.sourceRef,
+                        )}
+                        readOnly
+                      />
+                    </label>
+                    <label>
+                      关系
+                      <input
+                        value={getPlane2DSectionRelationLabel(
+                          selectedPlane2DEntity.sectionRef.sourceRef.relation,
+                        )}
+                        readOnly
+                      />
+                    </label>
+                    <label>
+                      是否来自延长部分
+                      <input
+                        value={
+                          selectedPlane2DEntity.sectionRef.sourceRef.relation ===
+                          "face-extension-intersection-line"
+                            ? "是"
+                            : "否"
+                        }
+                        readOnly
+                      />
+                    </label>
+                    <label>
+                      线上一点 3D 坐标
+                      <input
+                        value={formatVec3ForInput(
+                          selectedPlane2DEntity.sectionRef.linePoint3D,
+                        )}
+                        readOnly
+                      />
+                    </label>
+                    <label>
+                      同步状态
+                      <input value="静态截面，未启用实时同步" readOnly />
+                    </label>
+                  </>
+                ) : null}
                 {selectedPlane2DEntity.segmentKind === "extension" ? (
                   <label>
                     构造方式
@@ -10887,7 +11251,57 @@ function App() {
                     readOnly
                   />
                 </label>
-                {selectedPlane2DEntity.segmentKind !== "extension" ? (
+                {selectedPlane2DEntity.sectionRef ? (
+                  <>
+                    <label>
+                      来源对象
+                      <input
+                        value={getPlane2DSectionSourceLabel(selectedPlane2DEntity)}
+                        readOnly
+                      />
+                    </label>
+                    <label>
+                      来源类型
+                      <input
+                        value={selectedPlane2DEntity.sectionRef.sourceRef.sourceEntityType}
+                        readOnly
+                      />
+                    </label>
+                    <label>
+                      来源状态
+                      <input
+                        value={getPlane2DSectionSourceLoadStatus(
+                          selectedPlane2DEntity.sectionRef.sourceRef,
+                        )}
+                        readOnly
+                      />
+                    </label>
+                    <label>
+                      关系
+                      <input
+                        value={getPlane2DSectionRelationLabel(
+                          selectedPlane2DEntity.sectionRef.sourceRef.relation,
+                        )}
+                        readOnly
+                      />
+                    </label>
+                    <label>
+                      3D 坐标
+                      <input
+                        value={formatVec3ForInput(
+                          selectedPlane2DEntity.sectionRef.position3D,
+                        )}
+                        readOnly
+                      />
+                    </label>
+                    <label>
+                      同步状态
+                      <input value="静态截面，未启用实时同步" readOnly />
+                    </label>
+                  </>
+                ) : null}
+                {selectedPlane2DEntity.segmentKind !== "extension" &&
+                !selectedPlane2DEntity.sectionRef ? (
                   <section className="property-subgroup">
                     <h4>延长部分</h4>
                     {(() => {
@@ -11348,8 +11762,52 @@ function App() {
                 </label>
                 <label>
                   类型
-                  <input value="平面画布" readOnly />
+                  <input
+                    value={
+                      planeCanvasDocument?.section?.kind === "section-from-3d"
+                        ? "3D 截面画布"
+                        : "平面画布"
+                    }
+                    readOnly
+                  />
                 </label>
+                {planeCanvasDocument?.section?.kind === "section-from-3d" ? (
+                  <>
+                    <label>
+                      截面来源
+                      <input
+                        value={
+                          planeCanvasDocument.section.source3DDocumentId ??
+                          planeCanvasDocument.section.source3DTabId
+                        }
+                        readOnly
+                      />
+                    </label>
+                    <label>
+                      同步状态
+                      <input value="静态截面，未启用实时同步" readOnly />
+                    </label>
+                    <label>
+                      重合平面记录
+                      <input
+                        value={
+                          planeCanvasDocument.section.coincidentPlanes?.length
+                            ? planeCanvasDocument.section.coincidentPlanes
+                                .map(
+                                  (source) =>
+                                    source.sourceName?.trim() ||
+                                    `${source.sourceEntityType} ${getShortEntityId(
+                                      source.sourceEntityId,
+                                    )}`,
+                                )
+                                .join(" / ")
+                            : "无"
+                        }
+                        readOnly
+                      />
+                    </label>
+                  </>
+                ) : null}
                 <label>
                   工具
                   <input value={plane2DTool} readOnly />

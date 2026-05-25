@@ -253,6 +253,34 @@ export const normalizePlaneCanvasDocument = (
         ];
       }
 
+      if (entity.type === "plane2d-point" && entity.sectionRef) {
+        return [
+          entityId,
+          {
+            ...entity,
+            locked: entity.locked ?? true,
+            draggable: entity.draggable ?? false,
+            visible: entity.visible ?? true,
+            nameSource: entity.nameSource ?? "auto",
+            showName: entity.showName ?? false,
+          },
+        ];
+      }
+
+      if (entity.type === "plane2d-segment" && entity.sectionRef) {
+        return [
+          entityId,
+          {
+            ...entity,
+            locked: entity.locked ?? true,
+            draggable: entity.draggable ?? false,
+            visible: entity.visible ?? true,
+            nameSource: entity.nameSource ?? "auto",
+            showName: entity.showName ?? false,
+          },
+        ];
+      }
+
       return [entityId, entity];
     }),
   ) as PlaneCanvasDocument["entities"];
@@ -1329,7 +1357,11 @@ export const syncPlane2DConstructions = (
   };
 
   Object.values(nextEntities).forEach((entity) => {
-    if (entity.type === "plane2d-segment" && entity.visible !== false) {
+    if (
+      entity.type === "plane2d-segment" &&
+      entity.visible !== false &&
+      !entity.sectionRef
+    ) {
       const positions = getPlane2DSegmentPositions(
         { ...document, entities: nextEntities },
         entity,

@@ -980,6 +980,7 @@ function SceneViewport({
           currentTool === "midpoint" ||
           currentTool === "parallel" ||
           currentTool === "intersection" ||
+          currentTool === "sectionPlane" ||
           currentTool === "plane"
             ? "point-tool-active"
             : "",
