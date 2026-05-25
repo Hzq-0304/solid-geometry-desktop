@@ -15,6 +15,7 @@ export type Plane2DToolName =
   | "midpoint"
   | "perpendicular"
   | "extend"
+  | "function"
   | "length"
   | "angle"
   | "calculation";
@@ -243,6 +244,23 @@ export interface Plane2DCalculationEntity {
   readonly updatedAt?: string;
 }
 
+export interface Plane2DFunctionGraphEntity {
+  readonly id: string;
+  readonly type: "plane2d-function-graph";
+  readonly expression: string;
+  readonly variable: "x";
+  readonly xMin: number;
+  readonly xMax: number;
+  readonly sampleCount: number;
+  readonly strokeWidth?: number;
+  readonly visible?: boolean;
+  readonly name?: string;
+  readonly nameSource?: "auto" | "manual";
+  readonly showName?: boolean;
+  readonly createdAt?: string;
+  readonly updatedAt?: string;
+}
+
 export type Plane2DEntity =
   | Plane2DPointEntity
   | Plane2DSegmentEntity
@@ -250,7 +268,8 @@ export type Plane2DEntity =
   | Plane2DPolygonEntity
   | Plane2DMeasurementEntity
   | Plane2DExtensionEntity
-  | Plane2DCalculationEntity;
+  | Plane2DCalculationEntity
+  | Plane2DFunctionGraphEntity;
 
 export interface PlaneCanvasDocument {
   readonly id: string;

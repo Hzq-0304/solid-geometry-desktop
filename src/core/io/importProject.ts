@@ -1,6 +1,7 @@
 import type { BoardDocument } from "../document/BoardDocument";
 import type {
   BoardEntity,
+  FunctionSurface3DEntity,
   LinePlanePerpendicularEntity,
   PerpendicularLineEntity,
   PlaneEntity,
@@ -194,6 +195,34 @@ const normalizeEntity = (
         boundaryLineColor: "#60a5fa",
         ...extension.style,
       },
+    };
+  }
+
+  if (kind === "functionSurface") {
+    const surface = rawEntity as unknown as FunctionSurface3DEntity;
+
+    return {
+      ...surface,
+      kind: "functionSurface",
+      type: "function-surface-3d",
+      visible: surface.visible ?? true,
+      locked: surface.locked ?? false,
+      nameSource: surface.nameSource ?? "auto",
+      xMin: Number.isFinite(surface.xMin) ? surface.xMin : -5,
+      xMax: Number.isFinite(surface.xMax) ? surface.xMax : 5,
+      yMin: Number.isFinite(surface.yMin) ? surface.yMin : -5,
+      yMax: Number.isFinite(surface.yMax) ? surface.yMax : 5,
+      resolutionX: Number.isFinite(surface.resolutionX)
+        ? surface.resolutionX
+        : 80,
+      resolutionY: Number.isFinite(surface.resolutionY)
+        ? surface.resolutionY
+        : 80,
+      opacity: Number.isFinite(surface.opacity ?? Number.NaN)
+        ? surface.opacity
+        : 0.6,
+      wireframe: surface.wireframe ?? false,
+      showName: surface.showName ?? false,
     };
   }
 

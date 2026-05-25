@@ -3,6 +3,7 @@
   Plane2DEntity,
   Plane2DExtensionEntity,
   Plane2DIntersectionEdgeRef,
+  Plane2DFunctionGraphEntity,
   Plane2DMeasurementEntity,
   Plane2DPointEntity,
   Plane2DPolygonEntity,
@@ -163,6 +164,33 @@ export const createPlane2DCalculation = (
   };
 };
 
+export const createPlane2DFunctionGraph = (
+  id: string,
+  options: Omit<
+    Plane2DFunctionGraphEntity,
+    "id" | "type" | "variable" | "nameSource" | "showName" | "createdAt" | "updatedAt"
+  > &
+    Partial<
+      Pick<
+        Plane2DFunctionGraphEntity,
+        "variable" | "name" | "nameSource" | "showName" | "createdAt" | "updatedAt"
+      >
+    >,
+): Plane2DFunctionGraphEntity => {
+  const now = new Date().toISOString();
+
+  return {
+    id,
+    type: "plane2d-function-graph",
+    variable: "x",
+    nameSource: "auto",
+    showName: false,
+    createdAt: now,
+    updatedAt: now,
+    ...options,
+  };
+};
+
 export const createPlane2DPolygon = (
   id: string,
   vertexPointIds: readonly string[],
@@ -209,10 +237,30 @@ export const normalizePlaneCanvasDocument = (
   document: PlaneCanvasDocument,
 ): PlaneCanvasDocument => {
   const defaults = createPlaneCanvasDocument();
+  const entities = Object.fromEntries(
+    Object.entries(document.entities ?? {}).map(([entityId, entity]) => {
+      if (entity.type === "plane2d-function-graph") {
+        return [
+          entityId,
+          {
+            ...entity,
+            variable: entity.variable ?? "x",
+            sampleCount: entity.sampleCount ?? 800,
+            visible: entity.visible ?? true,
+            nameSource: entity.nameSource ?? "auto",
+            showName: entity.showName ?? false,
+          },
+        ];
+      }
+
+      return [entityId, entity];
+    }),
+  ) as PlaneCanvasDocument["entities"];
 
   return {
     ...defaults,
     ...document,
+    entities,
     selectedEntityIds: document.selectedEntityIds ?? [],
     settings: {
       ...defaults.settings,

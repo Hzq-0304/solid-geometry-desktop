@@ -6,6 +6,7 @@ import type {
   BoardEntity,
   EntityId,
   ExtensionEntity,
+  FunctionSurface3DEntity,
   LinePlanePerpendicularEntity,
   MeasurementEntity,
   PerpendicularLineEntity,
@@ -13,6 +14,7 @@ import type {
   PointEntity,
   SegmentEntity,
 } from "../../core/document/EntityTypes";
+import { sampleFunctionSurface3D } from "../../core/function-plot/FunctionSampler3D";
 import {
   formatMeasurementText,
   type MeasurementTextFormat,
@@ -1046,6 +1048,48 @@ const createPolygonGeometry = (
   return geometry;
 };
 
+const createFunctionSurfaceObject = (
+  surface: FunctionSurface3DEntity,
+  document: BoardDocument,
+  preselected = false,
+): THREE.Mesh | null => {
+  const result = sampleFunctionSurface3D(
+    surface.expression,
+    { min: surface.xMin, max: surface.xMax },
+    { min: surface.yMin, max: surface.yMax },
+    surface.resolutionX,
+    surface.resolutionY,
+  );
+
+  if (!result.ok || result.sample.indices.length === 0) {
+    return null;
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute(
+    "position",
+    new THREE.BufferAttribute(result.sample.vertices, 3),
+  );
+  geometry.setIndex(new THREE.BufferAttribute(result.sample.indices, 1));
+  geometry.computeVertexNormals();
+
+  const selected = document.selectedEntityIds.includes(surface.id);
+  const material = new THREE.MeshBasicMaterial({
+    color: selected || preselected ? SELECTED_ENTITY_COLOR : "#14b8a6",
+    opacity: Math.min(1, Math.max(0.05, surface.opacity ?? 0.6)),
+    transparent: true,
+    side: THREE.DoubleSide,
+    wireframe: surface.wireframe ?? false,
+    depthWrite: false,
+  });
+  const mesh = new THREE.Mesh(geometry, material);
+
+  mesh.renderOrder = selected || preselected ? 8 : 2;
+  applyEntityUserData(mesh, surface);
+  markObjectSelectable(mesh, true);
+  return mesh;
+};
+
 interface Vec3Like {
   readonly x: number;
   readonly y: number;
@@ -1246,6 +1290,13 @@ export const createEntityObject = (
           !document.selectedEntityIds.includes(entity.id) &&
           !highlightedEntityIds.includes(entity.id),
         highlightedEntityIds.includes(entity.id),
+      );
+    case "functionSurface":
+      return createFunctionSurfaceObject(
+        entity,
+        document,
+        preselectedEntityId === entity.id &&
+          !document.selectedEntityIds.includes(entity.id),
       );
     case "measurement":
       return null;

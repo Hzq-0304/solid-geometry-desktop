@@ -4,6 +4,7 @@ import type {
   Plane2DCircleEntity,
   Plane2DEntity,
   Plane2DExtensionEntity,
+  Plane2DFunctionGraphEntity,
   Plane2DMeasurementEntity,
   Plane2DPointEntity,
   Plane2DPolygonEntity,
@@ -40,7 +41,13 @@ import {
   plane2DExtensionId,
   syncPlane2DConstructions,
   evaluatePlane2DCalculation,
+  createPlane2DFunctionGraph,
 } from "../core/plane2d/planeCanvasUtils";
+import {
+  DEFAULT_FUNCTION_SAMPLE_COUNT_2D,
+  normalizeFunctionSampleCount2D,
+  sampleFunction2D,
+} from "../core/function-plot/FunctionSampler2D";
 import type { Plane2DDocumentChangeOptions } from "../core/plane2d/plane2DHistory";
 import FormulaView from "../core/calculation/FormulaView";
 import type { CalculationExpression } from "../core/calculation/CalculationTypes";
@@ -89,6 +96,11 @@ type Plane2DPickResult =
     }
   | { readonly kind: "circle"; readonly circleId: string; readonly distancePx: number }
   | { readonly kind: "polygon"; readonly polygonId: string; readonly distancePx: number }
+  | {
+      readonly kind: "functionGraph";
+      readonly functionGraphId: string;
+      readonly distancePx: number;
+    }
   | {
       readonly kind: "measurement";
       readonly measurementId: string;
@@ -168,6 +180,14 @@ type CalculationPointPickerState = {
   readonly searchQuery: string;
 };
 
+type FunctionGraphDialogState = {
+  readonly expression: string;
+  readonly xMin: string;
+  readonly xMax: string;
+  readonly sampleCount: string;
+  readonly error: string | null;
+};
+
 const POINT_EPSILON = 1e-5;
 const POLYGON_DISTANCE_EPSILON = 1e-8;
 const POLYGON_AREA2_EPSILON = 1e-10;
@@ -178,6 +198,7 @@ const PAN_THRESHOLD_PX = 4;
 const CIRCLE_HIT_RADIUS_PX = 8;
 const MEASUREMENT_HIT_RADIUS_PX = 18;
 const DEFAULT_PERPENDICULAR_LENGTH = 2;
+const FUNCTION_GRAPH_HIT_RADIUS_PX = 8;
 
 const makePlane2DId = (prefix: string): string =>
   `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -192,6 +213,7 @@ const planeToolLabels: Record<Plane2DToolName, string> = {
   midpoint: "中点",
   perpendicular: "垂直",
   extend: "延长",
+  function: "函数",
   length: "长度",
   angle: "角度",
   calculation: "计算",
@@ -207,6 +229,7 @@ const planeToolIcons: Record<Plane2DToolName, string> = {
   midpoint: "◉",
   perpendicular: "⊥",
   extend: "",
+  function: "ƒ",
   length: "↔",
   angle: "∠",
   calculation: "ƒ",
@@ -257,6 +280,7 @@ const planeToolGroups: ReadonlyArray<{
 }> = [
   { title: "基础", tools: ["select"] },
   { title: "构造", tools: ["point", "segment", "circle", "copyCircle", "polygon", "midpoint", "perpendicular", "extend"] },
+  { title: "绘制", tools: ["function"] },
   { title: "测量", tools: ["length", "angle", "calculation"] },
 ];
 
@@ -278,6 +302,8 @@ const getBaseToolHint = (tool: Plane2DToolName): string => {
       return "请选择点和线段，也可按 Ctrl+K 输入坐标建点。";
     case "extend":
       return "请选择要延长的线段。";
+    case "function":
+      return "绘制函数图像。";
     case "length":
       return "请选择线段或两个点进行长度测量，也可按 Ctrl+K 输入坐标点。";
     case "angle":
@@ -297,6 +323,7 @@ const getEntityDisplayName = (
     | Plane2DMeasurementEntity
     | Plane2DExtensionEntity
     | Plane2DCalculationEntity
+    | Plane2DFunctionGraphEntity
     | undefined,
 ): string => {
   const manualName =
@@ -366,6 +393,8 @@ export default function PlaneCanvasViewport({
   const [isPlacingCalculation, setIsPlacingCalculation] = useState(false);
   const [calculationPointPicker, setCalculationPointPicker] =
     useState<CalculationPointPickerState | null>(null);
+  const [functionGraphDialog, setFunctionGraphDialog] =
+    useState<FunctionGraphDialogState | null>(null);
 
   const selectedEntityId = document.selectedEntityIds[0] ?? null;
   const selectedEntityIdSet = new Set(document.selectedEntityIds);
@@ -418,6 +447,14 @@ export default function PlaneCanvasViewport({
       Object.values(document.entities).filter(
         (entity): entity is Plane2DCalculationEntity =>
           entity.type === "plane2d-calculation" && entity.visible !== false,
+      ),
+    [document.entities],
+  );
+  const functionGraphs = useMemo(
+    () =>
+      Object.values(document.entities).filter(
+        (entity): entity is Plane2DFunctionGraphEntity =>
+          entity.type === "plane2d-function-graph" && entity.visible !== false,
       ),
     [document.entities],
   );
@@ -651,6 +688,79 @@ export default function PlaneCanvasViewport({
       minY: Math.min(topLeft.y, bottomRight.y),
       maxY: Math.max(topLeft.y, bottomRight.y),
     };
+  };
+
+  const functionGraphSamples = useMemo(
+    () =>
+      functionGraphs.map((graph) => ({
+        graph,
+        sample: sampleFunction2D(
+          graph.expression,
+          { min: graph.xMin, max: graph.xMax },
+          graph.sampleCount,
+        ),
+      })),
+    [functionGraphs],
+  );
+  const showFunctionCoordinateSystem =
+    currentTool === "function" || functionGraphs.length > 0;
+  const coordinateGridStep = useMemo(() => {
+    const scale = WORLD_UNIT_TO_CSS_PX * viewport.zoom;
+    const targetPx = 72;
+    const rawStep = targetPx / scale;
+    const power = 10 ** Math.floor(Math.log10(rawStep));
+    const normalized = rawStep / power;
+    const multiplier = normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
+
+    return multiplier * power;
+  }, [viewport.zoom]);
+  const coordinateGrid = useMemo(() => {
+    const bounds = getViewportWorldBounds();
+    const xLines: number[] = [];
+    const yLines: number[] = [];
+    const startX = Math.floor(bounds.minX / coordinateGridStep) * coordinateGridStep;
+    const startY = Math.floor(bounds.minY / coordinateGridStep) * coordinateGridStep;
+
+    for (let x = startX; x <= bounds.maxX; x += coordinateGridStep) {
+      xLines.push(Number(x.toFixed(10)));
+    }
+
+    for (let y = startY; y <= bounds.maxY; y += coordinateGridStep) {
+      yLines.push(Number(y.toFixed(10)));
+    }
+
+    return { bounds, xLines, yLines };
+  }, [coordinateGridStep, viewport, viewportSize]);
+
+  const distancePointToFunctionGraph = (
+    graph: Plane2DFunctionGraphEntity,
+    screenPosition: Vec2,
+  ): number => {
+    const sample = sampleFunction2D(
+      graph.expression,
+      { min: graph.xMin, max: graph.xMax },
+      graph.sampleCount,
+    );
+
+    if (!sample.ok) {
+      return Number.POSITIVE_INFINITY;
+    }
+
+    let bestDistance = Number.POSITIVE_INFINITY;
+
+    sample.polylines.forEach((polyline) => {
+      for (let index = 0; index < polyline.points.length - 1; index += 1) {
+        const closest = getClosestPointOnSegment2D(
+          screenPosition,
+          worldToScreen(polyline.points[index]),
+          worldToScreen(polyline.points[index + 1]),
+        );
+
+        bestDistance = Math.min(bestDistance, closest.distance);
+      }
+    });
+
+    return bestDistance;
   };
 
   const getExtensionViewportParts = (
@@ -926,6 +1036,19 @@ export default function PlaneCanvasViewport({
 
     if (polygonCandidate) {
       return polygonCandidate;
+    }
+
+    const functionGraphCandidate = functionGraphs
+      .map((graph) => ({
+        kind: "functionGraph" as const,
+        functionGraphId: graph.id,
+        distancePx: distancePointToFunctionGraph(graph, screenPosition),
+      }))
+      .filter((candidate) => candidate.distancePx <= FUNCTION_GRAPH_HIT_RADIUS_PX)
+      .sort((a, b) => a.distancePx - b.distancePx)[0];
+
+    if (functionGraphCandidate) {
+      return functionGraphCandidate;
     }
 
     const measurementCandidate = measurements
@@ -2705,6 +2828,16 @@ export default function PlaneCanvasViewport({
       return;
     }
 
+    if (pick?.kind === "functionGraph") {
+      if (event.ctrlKey) {
+        onStatus("连续命名仅支持点。");
+        return;
+      }
+
+      selectEntity(pick.functionGraphId);
+      return;
+    }
+
     if (pick?.kind === "measurement") {
       if (event.ctrlKey) {
         onStatus("连续命名仅支持点。");
@@ -2825,6 +2958,7 @@ export default function PlaneCanvasViewport({
     setCalculationExpression(null);
     setCalculationPendingOp(null);
     setIsPlacingCalculation(false);
+    setFunctionGraphDialog(null);
     setInteraction({ kind: "idle" });
     onStatus(getBaseToolHint(currentTool));
   };
@@ -3099,6 +3233,7 @@ export default function PlaneCanvasViewport({
             hoverTarget?.kind === "extension" ||
             hoverTarget?.kind === "circle" ||
             hoverTarget?.kind === "polygon" ||
+            hoverTarget?.kind === "functionGraph" ||
             hoverTarget?.kind === "measurement" ||
             hoverTarget?.kind === "calculation"
           ? "hover-segment"
@@ -3119,6 +3254,7 @@ export default function PlaneCanvasViewport({
     setCalculationExpression(null);
     setCalculationPendingOp(null);
     setIsPlacingCalculation(false);
+    setFunctionGraphDialog(null);
     setInteraction({ kind: "idle" });
   };
 
@@ -3147,6 +3283,84 @@ export default function PlaneCanvasViewport({
 
     setPolygonSidesDialog(null);
     selectPolygonVariant({ kind: "polygon", sides });
+  };
+
+  const openFunctionGraphDialog = () => {
+    onToolChange("function");
+    resetToolPendingState();
+    setFunctionGraphDialog({
+      expression: "sin(x)",
+      xMin: "-10",
+      xMax: "10",
+      sampleCount: String(DEFAULT_FUNCTION_SAMPLE_COUNT_2D),
+      error: null,
+    });
+    onStatus("绘制函数：请输入 y = f(x)。");
+  };
+
+  const confirmFunctionGraphDialog = () => {
+    if (!functionGraphDialog) {
+      return;
+    }
+
+    const expression = functionGraphDialog.expression.trim();
+    const xMin = Number(functionGraphDialog.xMin);
+    const xMax = Number(functionGraphDialog.xMax);
+    const rawSampleCount = Number(functionGraphDialog.sampleCount);
+
+    if (!Number.isFinite(xMin) || !Number.isFinite(xMax) || xMin >= xMax) {
+      setFunctionGraphDialog({
+        ...functionGraphDialog,
+        error: "x 范围错误。",
+      });
+      return;
+    }
+
+    if (!Number.isFinite(rawSampleCount)) {
+      setFunctionGraphDialog({
+        ...functionGraphDialog,
+        error: "采样数错误。",
+      });
+      return;
+    }
+
+    const sampleCount = normalizeFunctionSampleCount2D(rawSampleCount);
+    const sample = sampleFunction2D(expression, { min: xMin, max: xMax }, sampleCount);
+
+    if (!sample.ok || sample.polylines.length === 0) {
+      setFunctionGraphDialog({
+        ...functionGraphDialog,
+        error: sample.ok ? "表达式错误，无法绘制函数。" : sample.error,
+      });
+      return;
+    }
+
+    const graph = createPlane2DFunctionGraph(
+      makePlane2DId("plane2d-function-graph"),
+      {
+        expression,
+        xMin,
+        xMax,
+        sampleCount,
+        strokeWidth: document.settings.lineWidthPx,
+        visible: true,
+      },
+    );
+
+    setDocument(
+      {
+        ...document,
+        entities: {
+          ...document.entities,
+          [graph.id]: graph,
+        },
+        selectedEntityIds: [graph.id],
+      },
+      true,
+      { label: "创建函数图像" },
+    );
+    setFunctionGraphDialog(null);
+    onStatus("已创建函数图像。");
   };
 
   return (
@@ -3237,6 +3451,12 @@ export default function PlaneCanvasViewport({
                       }
                       key={tool}
                       onClick={() => {
+                        if (tool === "function") {
+                          openFunctionGraphDialog();
+                          setIsPolygonMenuOpen(false);
+                          return;
+                        }
+
                         onToolChange(tool);
                         resetToolPendingState();
                         setIsPolygonMenuOpen(false);
@@ -3273,6 +3493,103 @@ export default function PlaneCanvasViewport({
         viewBox={`0 0 ${viewportSize.width} ${viewportSize.height}`}
       >
         <g>
+          {showFunctionCoordinateSystem ? (
+            <g className="plane2d-function-coordinate-system">
+              {coordinateGrid.xLines.map((x) => {
+                const start = worldToScreen({ x, y: coordinateGrid.bounds.minY });
+                const end = worldToScreen({ x, y: coordinateGrid.bounds.maxY });
+                const label = worldToScreen({ x, y: 0 });
+
+                return (
+                  <g key={`x-${x}`}>
+                    <line
+                      className={Math.abs(x) < POINT_EPSILON ? "axis" : "grid"}
+                      x1={start.x}
+                      x2={end.x}
+                      y1={start.y}
+                      y2={end.y}
+                    />
+                    {Math.abs(x) >= POINT_EPSILON ? (
+                      <text className="tick-label" x={label.x + 3} y={Math.max(12, Math.min(viewportSize.height - 4, label.y + 14))}>
+                        {Number.isInteger(x) ? x.toFixed(0) : x.toPrecision(2)}
+                      </text>
+                    ) : null}
+                  </g>
+                );
+              })}
+              {coordinateGrid.yLines.map((y) => {
+                const start = worldToScreen({ x: coordinateGrid.bounds.minX, y });
+                const end = worldToScreen({ x: coordinateGrid.bounds.maxX, y });
+                const label = worldToScreen({ x: 0, y });
+
+                return (
+                  <g key={`y-${y}`}>
+                    <line
+                      className={Math.abs(y) < POINT_EPSILON ? "axis" : "grid"}
+                      x1={start.x}
+                      x2={end.x}
+                      y1={start.y}
+                      y2={end.y}
+                    />
+                    {Math.abs(y) >= POINT_EPSILON ? (
+                      <text className="tick-label" x={Math.max(4, Math.min(viewportSize.width - 36, label.x + 6))} y={label.y - 3}>
+                        {Number.isInteger(y) ? y.toFixed(0) : y.toPrecision(2)}
+                      </text>
+                    ) : null}
+                  </g>
+                );
+              })}
+              <text
+                className="origin-label"
+                x={worldToScreen({ x: 0, y: 0 }).x + 6}
+                y={worldToScreen({ x: 0, y: 0 }).y - 6}
+              >
+                O
+              </text>
+            </g>
+          ) : null}
+          {functionGraphSamples.map(({ graph, sample }) => {
+            if (!sample.ok) {
+              return null;
+            }
+
+            const isSelected = selectedEntityIdSet.has(graph.id);
+            const isHovered =
+              hoverTarget?.kind === "functionGraph" &&
+              hoverTarget.functionGraphId === graph.id;
+
+            return (
+              <g className="plane2d-function-graph-layer" key={graph.id}>
+                {sample.polylines.map((polyline, index) => (
+                  <polyline
+                    className={[
+                      "plane2d-function-graph",
+                      isSelected ? "selected" : "",
+                      isHovered ? "hovered" : "",
+                    ].join(" ")}
+                    key={`${graph.id}-${index}`}
+                    points={polyline.points
+                      .map((point) => worldToScreen(point))
+                      .map((point) => `${point.x},${point.y}`)
+                      .join(" ")}
+                    strokeWidth={
+                      (graph.strokeWidth ?? document.settings.lineWidthPx) +
+                      (isSelected || isHovered ? 2 : 0)
+                    }
+                  />
+                ))}
+                {graph.showName && graph.name?.trim() && sample.polylines[0]?.points[0] ? (
+                  <text
+                    className="plane2d-label"
+                    x={worldToScreen(sample.polylines[0].points[0]).x + 8}
+                    y={worldToScreen(sample.polylines[0].points[0]).y - 8}
+                  >
+                    {graph.name.trim()}
+                  </text>
+                ) : null}
+              </g>
+            );
+          })}
           {circles.map((circle) => {
             const geometry = getPlane2DCircleGeometry(document, circle);
             if (!geometry || geometry.radius < POINT_EPSILON) return null;
@@ -3641,7 +3958,10 @@ export default function PlaneCanvasViewport({
               </g>
             );
           })}
-          {previewPosition && currentTool !== "select" && interaction.kind !== "pan" ? (
+          {previewPosition &&
+          currentTool !== "select" &&
+          currentTool !== "function" &&
+          interaction.kind !== "pan" ? (
             <circle
               className="plane2d-point preview"
               cx={worldToScreen(previewPosition).x}
@@ -3847,6 +4167,92 @@ export default function PlaneCanvasViewport({
               <div className="modal-actions">
                 <button onClick={() => setCoordinateDialog(null)} type="button">取消</button>
                 <button onClick={confirmCoordinateDialog} type="button">确定</button>
+              </div>
+            </div>
+          </section>
+        </div>
+      ) : null}
+      {functionGraphDialog ? (
+        <div className="modal-backdrop" role="presentation">
+          <section aria-label="绘制函数" className="coordinate-point-modal" role="dialog">
+            <header className="modal-header">
+              <h2>绘制函数</h2>
+              <button
+                aria-label="关闭"
+                onClick={() => setFunctionGraphDialog(null)}
+                type="button"
+              >
+                x
+              </button>
+            </header>
+            <p className="plane2d-dialog-hint">y = f(x)</p>
+            <div className="coordinate-point-form">
+              <label className="form-field coordinate-point-name">
+                <span>表达式</span>
+                <input
+                  autoFocus
+                  value={functionGraphDialog.expression}
+                  onChange={(event) =>
+                    setFunctionGraphDialog({
+                      ...functionGraphDialog,
+                      expression: event.target.value,
+                      error: null,
+                    })
+                  }
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") confirmFunctionGraphDialog();
+                  }}
+                />
+              </label>
+              <label className="form-field">
+                <span>x 最小值</span>
+                <input
+                  value={functionGraphDialog.xMin}
+                  onChange={(event) =>
+                    setFunctionGraphDialog({
+                      ...functionGraphDialog,
+                      xMin: event.target.value,
+                      error: null,
+                    })
+                  }
+                />
+              </label>
+              <label className="form-field">
+                <span>x 最大值</span>
+                <input
+                  value={functionGraphDialog.xMax}
+                  onChange={(event) =>
+                    setFunctionGraphDialog({
+                      ...functionGraphDialog,
+                      xMax: event.target.value,
+                      error: null,
+                    })
+                  }
+                />
+              </label>
+              <label className="form-field">
+                <span>采样数</span>
+                <input
+                  value={functionGraphDialog.sampleCount}
+                  onChange={(event) =>
+                    setFunctionGraphDialog({
+                      ...functionGraphDialog,
+                      sampleCount: event.target.value,
+                      error: null,
+                    })
+                  }
+                />
+              </label>
+              {functionGraphDialog.error ? (
+                <span className="form-error">{functionGraphDialog.error}</span>
+              ) : null}
+              <div className="modal-actions">
+                <button onClick={() => setFunctionGraphDialog(null)} type="button">
+                  取消
+                </button>
+                <button onClick={confirmFunctionGraphDialog} type="button">
+                  创建函数
+                </button>
               </div>
             </div>
           </section>

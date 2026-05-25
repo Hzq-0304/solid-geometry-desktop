@@ -1031,6 +1031,14 @@ input {
   box-sizing: border-box;
 }
 
+.checkbox-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #374151;
+  font-size: 13px;
+}
+
 .form-error,
 .form-hint {
   font-size: 12px;
@@ -1510,6 +1518,42 @@ input {
 .plane2d-svg.hover-point,
 .plane2d-svg.hover-segment {
   cursor: pointer;
+}
+
+.plane2d-function-coordinate-system {
+  pointer-events: none;
+}
+
+.plane2d-function-coordinate-system .grid {
+  stroke: #e5e7eb;
+  stroke-width: 1;
+}
+
+.plane2d-function-coordinate-system .axis {
+  stroke: #94a3b8;
+  stroke-width: 1.5;
+}
+
+.plane2d-function-coordinate-system .tick-label,
+.plane2d-function-coordinate-system .origin-label {
+  fill: #64748b;
+  font-size: 11px;
+  user-select: none;
+}
+
+.plane2d-function-graph {
+  fill: none;
+  stroke: #0f766e;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.plane2d-function-graph.selected {
+  stroke: #2563eb;
+}
+
+.plane2d-function-graph.hovered {
+  stroke: #3b82f6;
 }
 
 .plane2d-segment {

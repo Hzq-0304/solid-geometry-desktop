@@ -12,6 +12,7 @@ export type EntityKind =
   | "plane"
   | "polygon"
   | "solid"
+  | "functionSurface"
   | "label"
   | "measurement"
   | "calculation";
@@ -198,6 +199,22 @@ export interface SolidEntity extends BaseEntity {
   readonly faceIds: readonly EntityId[];
 }
 
+export interface FunctionSurface3DEntity extends BaseEntity {
+  readonly kind: "functionSurface";
+  readonly type: "function-surface-3d";
+  readonly expression: string;
+  readonly xMin: number;
+  readonly xMax: number;
+  readonly yMin: number;
+  readonly yMax: number;
+  readonly resolutionX: number;
+  readonly resolutionY: number;
+  readonly opacity?: number;
+  readonly wireframe?: boolean;
+  readonly nameSource?: "auto" | "manual";
+  readonly showName?: boolean;
+}
+
 export interface LabelEntity extends BaseEntity {
   readonly kind: "label";
   readonly text: string;
@@ -253,6 +270,7 @@ export type BoardEntity =
   | PlaneEntity
   | PolygonEntity
   | SolidEntity
+  | FunctionSurface3DEntity
   | LabelEntity
   | MeasurementEntity
   | CalculationEntity;

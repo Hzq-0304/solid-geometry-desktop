@@ -14,6 +14,7 @@ export type ToolName =
   | "parallel"
   | "intersection"
   | "plane"
+  | "functionSurface"
   | "move"
   | "measureLength"
   | "measureAngle"

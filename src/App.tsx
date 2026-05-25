@@ -62,6 +62,7 @@ import type {
   EntityId,
   EntityStyle,
   ExtensionEntity,
+  FunctionSurface3DEntity,
   LinePlanePerpendicularEntity,
   MeasurementEntity,
   PerpendicularLineEntity,
@@ -138,6 +139,7 @@ import type {
   Plane2DCalculationEntity,
   Plane2DCircleEntity,
   Plane2DExtensionEntity,
+  Plane2DFunctionGraphEntity,
   Plane2DIntersectionEdgeRef,
   Plane2DMeasurementEntity,
   Plane2DPointEntity,
@@ -160,6 +162,14 @@ import {
   plane2DExtensionId,
   syncPlane2DIntersections,
 } from "./core/plane2d/planeCanvasUtils";
+import {
+  normalizeFunctionSampleCount2D,
+  sampleFunction2D,
+} from "./core/function-plot/FunctionSampler2D";
+import {
+  normalizeFunctionSurfaceResolution,
+  sampleFunctionSurface3D,
+} from "./core/function-plot/FunctionSampler3D";
 import {
   createPlane2DHistoryState,
   pushPlane2DHistoryEntry,
@@ -228,6 +238,18 @@ type CalculationPointPickerState = {
   readonly selectedPointIds: readonly EntityId[];
   readonly searchQuery: string;
 };
+type FunctionSurfaceDialogState = {
+  readonly expression: string;
+  readonly xMin: string;
+  readonly xMax: string;
+  readonly yMin: string;
+  readonly yMax: string;
+  readonly resolutionX: string;
+  readonly resolutionY: string;
+  readonly opacity: string;
+  readonly wireframe: boolean;
+  readonly error: string | null;
+};
 type IntersectionTarget = {
   readonly entityId: EntityId;
   readonly entityType: "segment" | "plane";
@@ -239,6 +261,7 @@ type PreselectedEntityType =
   | "linePlanePerpendicular"
   | "extension"
   | "plane"
+  | "functionSurface"
   | "measurement"
   | "calculation";
 
@@ -342,6 +365,7 @@ const constructTools: Array<{
   { name: "parallel", label: "\u5e73\u884c", icon: Ruler },
   { name: "intersection", label: "\u4ea4\u70b9/\u4ea4\u7ebf", icon: Ruler },
   { name: "plane", label: "\u5e73\u9762", icon: SolidPlaneIcon },
+  { name: "functionSurface", label: "函数曲面", icon: Grid3X3 },
 ];
 
 const measureTools: Array<{
@@ -364,6 +388,7 @@ const toolLabels: Record<ToolName, string> = {
   parallel: "\u5e73\u884c",
   intersection: "\u4ea4\u70b9/\u4ea4\u7ebf",
   plane: "\u5e73\u9762",
+  functionSurface: "函数曲面",
   move: "\u79fb\u52a8",
   measureLength: "\u957f\u5ea6",
   measureAngle: "\u89d2\u5ea6",
@@ -1711,6 +1736,7 @@ const isNameableEntity = (
   | LinePlanePerpendicularEntity
   | ExtensionEntity
   | PlaneEntity
+  | FunctionSurface3DEntity
   | CalculationEntity =>
   entity?.kind === "point" ||
   entity?.kind === "segment" ||
@@ -1718,6 +1744,7 @@ const isNameableEntity = (
   entity?.kind === "linePlanePerpendicular" ||
   entity?.kind === "extension" ||
   entity?.kind === "plane" ||
+  entity?.kind === "functionSurface" ||
   entity?.kind === "calculation";
 
 const getManualNameDraft = (
@@ -1728,6 +1755,7 @@ const getManualNameDraft = (
     | LinePlanePerpendicularEntity
     | ExtensionEntity
     | PlaneEntity
+    | FunctionSurface3DEntity
     | CalculationEntity,
 ): string => (entity.nameSource === "manual" ? entity.name?.trim() ?? "" : "");
 
@@ -1773,6 +1801,8 @@ const getPlane2DEntityTypeLabel = (entity: Plane2DEntity): string => {
       return "延长部分";
     case "plane2d-calculation":
       return "计算";
+    case "plane2d-function-graph":
+      return "函数图像";
     default:
       return "对象";
   }
@@ -1814,6 +1844,8 @@ const getPlane2DObjectGroupLabel = (entity: Plane2DEntity): string => {
       return "测量";
     case "plane2d-calculation":
       return "计算";
+    case "plane2d-function-graph":
+      return "函数图像";
     case "plane2d-extension":
       return "线段";
     default:
@@ -1828,13 +1860,18 @@ const getPlane2DObjectListItem = (
   const typeLabel = getPlane2DEntityTypeLabel(entity);
   const manualName =
     entity.showName && entity.name?.trim() ? entity.name.trim() : "";
-  const name = manualName || `${typeLabel} ${getShortEntityId(entity.id)}`;
+  const expressionName =
+    entity.type === "plane2d-function-graph" ? `y=${entity.expression}` : "";
+  const name = manualName || expressionName || `${typeLabel} ${getShortEntityId(entity.id)}`;
 
   return {
     id: entity.id,
     name,
-    detail: getShortEntityId(entity.id),
-    searchText: `${name} ${typeLabel} ${entity.id}`,
+    detail:
+      entity.type === "plane2d-function-graph"
+        ? entity.expression
+        : getShortEntityId(entity.id),
+    searchText: `${name} ${typeLabel} ${entity.id} ${expressionName}`,
     visible: isPlane2DEntityVisible(entity),
     selected: selectedEntityIds.includes(entity.id),
   };
@@ -1852,6 +1889,8 @@ const getBoardEntityTypeLabel = (entity: BoardEntity): string => {
       return "多边形";
     case "solid":
       return "立体";
+    case "functionSurface":
+      return "函数曲面";
     case "measurement":
       return "测量";
     case "calculation":
@@ -1879,6 +1918,8 @@ const getBoardEntityGroupLabel = (entity: BoardEntity): string => {
     case "polygon":
     case "solid":
       return "平面 / 多边形 / 立体对象";
+    case "functionSurface":
+      return "函数曲面";
     case "measurement":
       return "测量";
     case "calculation":
@@ -1898,13 +1939,18 @@ const getBoardObjectListItem = (
 ): ObjectListItem => {
   const typeLabel = getBoardEntityTypeLabel(entity);
   const manualName = entity.name?.trim() ?? "";
-  const name = manualName || `${typeLabel} ${getShortEntityId(entity.id)}`;
+  const expressionName =
+    entity.kind === "functionSurface" ? `z=${entity.expression}` : "";
+  const name = manualName || expressionName || `${typeLabel} ${getShortEntityId(entity.id)}`;
 
   return {
     id: entity.id,
     name,
-    detail: getShortEntityId(entity.id),
-    searchText: `${name} ${typeLabel} ${entity.kind} ${entity.id}`,
+    detail:
+      entity.kind === "functionSurface"
+        ? entity.expression
+        : getShortEntityId(entity.id),
+    searchText: `${name} ${typeLabel} ${entity.kind} ${entity.id} ${expressionName}`,
     visible: entity.visible !== false,
     selected: selectedEntityIds.includes(entity.id),
   };
@@ -2469,6 +2515,8 @@ function App() {
   const [calculationStatusMessage, setCalculationStatusMessage] = useState<
     string | null
   >(null);
+  const [functionSurfaceDialog, setFunctionSurfaceDialog] =
+    useState<FunctionSurfaceDialogState | null>(null);
   const [deleteStatusMessage, setDeleteStatusMessage] = useState<string | null>(
     null,
   );
@@ -2739,6 +2787,7 @@ function App() {
       "点",
       "线段 / 直线类对象",
       "平面 / 多边形 / 立体对象",
+      "函数曲面",
       "构造对象",
       "测量",
       "计算",
@@ -3917,6 +3966,154 @@ function App() {
     executeCommand(new UpdateEntityCommand(entityId, patch));
   };
 
+  const createFunctionSurfaceEntity = (
+    input: Omit<
+      FunctionSurface3DEntity,
+      "id" | "kind" | "type" | "visible" | "locked" | "createdAt" | "updatedAt"
+    > &
+      Partial<Pick<FunctionSurface3DEntity, "visible" | "locked">>,
+  ): FunctionSurface3DEntity => {
+    const now = new Date().toISOString();
+
+    return {
+      id: createEntityId("function-surface"),
+      kind: "functionSurface",
+      type: "function-surface-3d",
+      visible: input.visible ?? true,
+      locked: input.locked ?? false,
+      createdAt: now,
+      updatedAt: now,
+      ...input,
+    };
+  };
+
+  const confirmFunctionSurfaceDialog = () => {
+    if (!functionSurfaceDialog) {
+      return;
+    }
+
+    const expression = functionSurfaceDialog.expression.trim();
+    const xMin = Number(functionSurfaceDialog.xMin);
+    const xMax = Number(functionSurfaceDialog.xMax);
+    const yMin = Number(functionSurfaceDialog.yMin);
+    const yMax = Number(functionSurfaceDialog.yMax);
+    const resolutionX = normalizeFunctionSurfaceResolution(
+      Number(functionSurfaceDialog.resolutionX),
+    );
+    const resolutionY = normalizeFunctionSurfaceResolution(
+      Number(functionSurfaceDialog.resolutionY),
+    );
+    const opacity = Math.min(
+      1,
+      Math.max(0.05, Number(functionSurfaceDialog.opacity)),
+    );
+
+    if (
+      !Number.isFinite(xMin) ||
+      !Number.isFinite(xMax) ||
+      !Number.isFinite(yMin) ||
+      !Number.isFinite(yMax) ||
+      xMin >= xMax ||
+      yMin >= yMax
+    ) {
+      setFunctionSurfaceDialog({
+        ...functionSurfaceDialog,
+        error: "范围错误。",
+      });
+      return;
+    }
+
+    const sample = sampleFunctionSurface3D(
+      expression,
+      { min: xMin, max: xMax },
+      { min: yMin, max: yMax },
+      resolutionX,
+      resolutionY,
+    );
+
+    if (!sample.ok || sample.sample.indices.length === 0) {
+      setFunctionSurfaceDialog({
+        ...functionSurfaceDialog,
+        error: "表达式错误，无法绘制曲面。",
+      });
+      return;
+    }
+
+    const surface = createFunctionSurfaceEntity({
+      expression,
+      xMin,
+      xMax,
+      yMin,
+      yMax,
+      resolutionX,
+      resolutionY,
+      opacity: Number.isFinite(opacity) ? opacity : 0.6,
+      wireframe: functionSurfaceDialog.wireframe,
+      nameSource: "auto",
+      showName: false,
+    });
+
+    executeCommand(new AddEntityCommand(surface, "创建函数曲面"));
+    setSelection([surface.id]);
+    setFunctionSurfaceDialog(null);
+    showToast("已创建函数曲面。");
+  };
+
+  const updateFunctionSurface = (
+    surfaceId: EntityId,
+    patch: Partial<
+      Pick<
+        FunctionSurface3DEntity,
+        | "expression"
+        | "xMin"
+        | "xMax"
+        | "yMin"
+        | "yMax"
+        | "resolutionX"
+        | "resolutionY"
+        | "opacity"
+        | "wireframe"
+      >
+    >,
+  ) => {
+    const surface = commandManager.getDocument().entities[surfaceId];
+
+    if (surface?.kind !== "functionSurface") {
+      return;
+    }
+
+    const nextSurface = {
+      ...surface,
+      ...patch,
+      resolutionX:
+        patch.resolutionX === undefined
+          ? surface.resolutionX
+          : normalizeFunctionSurfaceResolution(patch.resolutionX),
+      resolutionY:
+        patch.resolutionY === undefined
+          ? surface.resolutionY
+          : normalizeFunctionSurfaceResolution(patch.resolutionY),
+      opacity:
+        patch.opacity === undefined
+          ? surface.opacity
+          : Math.min(1, Math.max(0.05, patch.opacity)),
+    };
+    const sample = sampleFunctionSurface3D(
+      nextSurface.expression,
+      { min: nextSurface.xMin, max: nextSurface.xMax },
+      { min: nextSurface.yMin, max: nextSurface.yMax },
+      nextSurface.resolutionX,
+      nextSurface.resolutionY,
+    );
+
+    if (!sample.ok || sample.sample.indices.length === 0) {
+      showToast("表达式错误，无法绘制曲面。");
+      return;
+    }
+
+    executeCommand(new UpdateEntityCommand<FunctionSurface3DEntity>(surfaceId, patch));
+  };
+
   const setBoardEntityVisibility = (entityId: EntityId, visible: boolean) => {
     const entity = commandManager.getDocument().entities[entityId];
 
@@ -3998,10 +4195,16 @@ function App() {
       ? {
           name: trimmedName,
           nameSource: "manual" as const,
+          ...(selectedNameableEntity.kind === "functionSurface"
+            ? { showName: true }
+            : {}),
         }
       : {
           name: "",
           nameSource: "auto" as const,
+          ...(selectedNameableEntity.kind === "functionSurface"
+            ? { showName: false }
+            : {}),
         };
     const currentName = selectedNameableEntity.name?.trim() ?? "";
     const currentNameSource = selectedNameableEntity.nameSource ?? "auto";
@@ -6661,6 +6864,20 @@ function App() {
       : null;
   };
 
+  const getFunctionSurfacePreselection = (
+    pointerInfo: PointerInfo,
+    sourceDocument: BoardDocument,
+  ): Preselection | null => {
+    const entity =
+      pointerInfo.hitEntityType === "functionSurface" && pointerInfo.hitEntityId
+        ? sourceDocument.entities[pointerInfo.hitEntityId]
+        : null;
+
+    return entity?.kind === "functionSurface" && entity.visible
+      ? { entityId: entity.id, entityType: "functionSurface" }
+      : null;
+  };
+
   const getPerpendicularLinePreselection = (
     pointerInfo: PointerInfo,
     sourceDocument: BoardDocument,
@@ -6774,6 +6991,7 @@ function App() {
           getPerpendicularLinePreselection(pointerInfo, sourceDocument) ??
           getLinePlanePerpendicularPreselection(pointerInfo, sourceDocument) ??
           getPlanePreselection(pointerInfo, sourceDocument) ??
+          getFunctionSurfacePreselection(pointerInfo, sourceDocument) ??
           getExtensionPreselection(pointerInfo, sourceDocument) ??
           getMeasurementPreselection(pointerInfo, sourceDocument)
         );
@@ -7864,6 +8082,10 @@ function App() {
       setCalculationStatusMessage(null);
     }
 
+    if (nextTool !== "functionSurface") {
+      setFunctionSurfaceDialog(null);
+    }
+
     if (currentTool === "segment" && nextTool !== "segment") {
       segmentToolRef.current.cancel();
       setSegmentFirstPointId(null);
@@ -7925,6 +8147,21 @@ function App() {
     }
 
     setCurrentTool(nextTool);
+
+    if (nextTool === "functionSurface") {
+      setFunctionSurfaceDialog({
+        expression: "sin(x) * cos(y)",
+        xMin: "-5",
+        xMax: "5",
+        yMin: "-5",
+        yMax: "5",
+        resolutionX: "80",
+        resolutionY: "80",
+        opacity: "0.6",
+        wireframe: false,
+        error: null,
+      });
+    }
   };
 
   useEffect(() => {
@@ -8256,6 +8493,10 @@ function App() {
     (entity): entity is Plane2DCalculationEntity =>
       entity.type === "plane2d-calculation",
   );
+  const plane2DFunctionGraphs = plane2DEntities.filter(
+    (entity): entity is Plane2DFunctionGraphEntity =>
+      entity.type === "plane2d-function-graph",
+  );
   const plane2DExtensions = plane2DEntities.filter(
     (entity): entity is Plane2DExtensionEntity =>
       entity.type === "plane2d-extension",
@@ -8282,7 +8523,7 @@ function App() {
       return [];
     }
 
-    const groupOrder = ["点", "线段", "圆", "多边形", "测量", "计算", "对象"];
+    const groupOrder = ["点", "线段", "圆", "多边形", "函数图像", "测量", "计算", "对象"];
     const groups = new Map<string, ObjectListItem[]>();
 
     Object.values(planeCanvasDocument.entities).forEach((entity) => {
@@ -8447,6 +8688,59 @@ function App() {
       },
     });
     setPlane2DStatusMessage(visible ? "已显示延长部分。" : "已隐藏延长部分。");
+  };
+
+  const updatePlane2DFunctionGraph = (
+    graphId: string,
+    patch: Partial<
+      Pick<
+        Plane2DFunctionGraphEntity,
+        "expression" | "xMin" | "xMax" | "sampleCount"
+      >
+    >,
+  ) => {
+    if (!planeCanvasDocument) {
+      return;
+    }
+
+    const graph = planeCanvasDocument.entities[graphId];
+
+    if (graph?.type !== "plane2d-function-graph") {
+      return;
+    }
+
+    const nextGraph: Plane2DFunctionGraphEntity = {
+      ...graph,
+      ...patch,
+      sampleCount:
+        patch.sampleCount === undefined
+          ? graph.sampleCount
+          : normalizeFunctionSampleCount2D(patch.sampleCount),
+      updatedAt: new Date().toISOString(),
+    };
+    const sample = sampleFunction2D(
+      nextGraph.expression,
+      { min: nextGraph.xMin, max: nextGraph.xMax },
+      nextGraph.sampleCount,
+    );
+
+    if (!sample.ok || sample.polylines.length === 0) {
+      showToast("表达式错误，无法绘制函数。");
+      setPlane2DStatusMessage("表达式错误，无法绘制函数。");
+      return;
+    }
+
+    updatePlaneCanvasDocument(
+      {
+        ...planeCanvasDocument,
+        entities: {
+          ...planeCanvasDocument.entities,
+          [graph.id]: nextGraph,
+        },
+      },
+      true,
+      { label: "修改函数图像" },
+    );
   };
 
   return (
@@ -9774,6 +10068,138 @@ function App() {
                 </span>
               </div>
             ) : null}
+            {singleSelectedEntity?.kind === "functionSurface" ? (
+              <div className="batch-naming">
+                <span>类型：函数曲面</span>
+                <label>
+                  表达式 z =
+                  <input
+                    defaultValue={singleSelectedEntity.expression}
+                    onBlur={(event) =>
+                      updateFunctionSurface(singleSelectedEntity.id, {
+                        expression: event.target.value,
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  xMin
+                  <input
+                    type="number"
+                    defaultValue={singleSelectedEntity.xMin}
+                    onBlur={(event) =>
+                      updateFunctionSurface(singleSelectedEntity.id, {
+                        xMin: Number(event.target.value),
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  xMax
+                  <input
+                    type="number"
+                    defaultValue={singleSelectedEntity.xMax}
+                    onBlur={(event) =>
+                      updateFunctionSurface(singleSelectedEntity.id, {
+                        xMax: Number(event.target.value),
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  yMin
+                  <input
+                    type="number"
+                    defaultValue={singleSelectedEntity.yMin}
+                    onBlur={(event) =>
+                      updateFunctionSurface(singleSelectedEntity.id, {
+                        yMin: Number(event.target.value),
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  yMax
+                  <input
+                    type="number"
+                    defaultValue={singleSelectedEntity.yMax}
+                    onBlur={(event) =>
+                      updateFunctionSurface(singleSelectedEntity.id, {
+                        yMax: Number(event.target.value),
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  X 分辨率
+                  <input
+                    max="160"
+                    min="10"
+                    type="number"
+                    defaultValue={singleSelectedEntity.resolutionX}
+                    onBlur={(event) =>
+                      updateFunctionSurface(singleSelectedEntity.id, {
+                        resolutionX: Number(event.target.value),
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  Y 分辨率
+                  <input
+                    max="160"
+                    min="10"
+                    type="number"
+                    defaultValue={singleSelectedEntity.resolutionY}
+                    onBlur={(event) =>
+                      updateFunctionSurface(singleSelectedEntity.id, {
+                        resolutionY: Number(event.target.value),
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  透明度
+                  <input
+                    max="1"
+                    min="0.05"
+                    step="0.05"
+                    type="number"
+                    defaultValue={singleSelectedEntity.opacity ?? 0.6}
+                    onBlur={(event) =>
+                      updateFunctionSurface(singleSelectedEntity.id, {
+                        opacity: Number(event.target.value),
+                      })
+                    }
+                  />
+                </label>
+                <div className="setting-button-grid">
+                  <button
+                    className={singleSelectedEntity.wireframe ? "active" : ""}
+                    onClick={() =>
+                      updateFunctionSurface(singleSelectedEntity.id, {
+                        wireframe: !singleSelectedEntity.wireframe,
+                      })
+                    }
+                    type="button"
+                  >
+                    线框模式
+                  </button>
+                  <button
+                    className={singleSelectedEntity.visible ? "active" : ""}
+                    onClick={() =>
+                      setBoardEntityVisibility(
+                        singleSelectedEntity.id,
+                        !singleSelectedEntity.visible,
+                      )
+                    }
+                    type="button"
+                  >
+                    {singleSelectedEntity.visible ? "隐藏" : "显示"}
+                  </button>
+                </div>
+              </div>
+            ) : null}
             <button
               className="danger-button"
               onClick={deleteSelectedEntities}
@@ -10061,6 +10487,93 @@ function App() {
         </div>
       ) : null}
 
+      {functionSurfaceDialog ? (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            aria-label="绘制函数曲面"
+            className="coordinate-point-modal"
+            role="dialog"
+          >
+            <header className="modal-header">
+              <h2>绘制函数曲面</h2>
+              <button
+                aria-label="关闭"
+                onClick={() => setFunctionSurfaceDialog(null)}
+                type="button"
+              >
+                ×
+              </button>
+            </header>
+            <p className="plane2d-dialog-hint">z = f(x, y)</p>
+            <div className="coordinate-point-form">
+              <label className="form-field coordinate-point-name">
+                <span>表达式</span>
+                <input
+                  autoFocus
+                  value={functionSurfaceDialog.expression}
+                  onChange={(event) =>
+                    setFunctionSurfaceDialog({
+                      ...functionSurfaceDialog,
+                      expression: event.target.value,
+                      error: null,
+                    })
+                  }
+                />
+              </label>
+              {(
+                [
+                  ["xMin", "x 最小值"],
+                  ["xMax", "x 最大值"],
+                  ["yMin", "y 最小值"],
+                  ["yMax", "y 最大值"],
+                  ["resolutionX", "X 分辨率"],
+                  ["resolutionY", "Y 分辨率"],
+                  ["opacity", "透明度"],
+                ] as const
+              ).map(([field, label]) => (
+                <label className="form-field" key={field}>
+                  <span>{label}</span>
+                  <input
+                    value={functionSurfaceDialog[field]}
+                    onChange={(event) =>
+                      setFunctionSurfaceDialog({
+                        ...functionSurfaceDialog,
+                        [field]: event.target.value,
+                        error: null,
+                      })
+                    }
+                  />
+                </label>
+              ))}
+              <label className="checkbox-field">
+                <input
+                  checked={functionSurfaceDialog.wireframe}
+                  onChange={(event) =>
+                    setFunctionSurfaceDialog({
+                      ...functionSurfaceDialog,
+                      wireframe: event.target.checked,
+                    })
+                  }
+                  type="checkbox"
+                />
+                <span>线框模式</span>
+              </label>
+              {functionSurfaceDialog.error ? (
+                <span className="form-error">{functionSurfaceDialog.error}</span>
+              ) : null}
+              <div className="modal-actions">
+                <button onClick={() => setFunctionSurfaceDialog(null)} type="button">
+                  取消
+                </button>
+                <button onClick={confirmFunctionSurfaceDialog} type="button">
+                  创建曲面
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
       <footer className="status-bar">
         <span>
           File: {currentFileName}
@@ -10127,6 +10640,8 @@ function App() {
                       ? "已选择多边形"
                     : selectedPlane2DEntity.type === "plane2d-extension"
                         ? "已选择延长线"
+                    : selectedPlane2DEntity.type === "plane2d-function-graph"
+                      ? "已选择函数图像"
                     : selectedPlane2DEntity.type === "plane2d-calculation"
                       ? "已选择计算"
                       : "已选择测量"
@@ -10682,6 +11197,86 @@ function App() {
                   删除对象
                 </button>
               </section>
+            ) : selectedPlane2DEntity?.type === "plane2d-function-graph" ? (
+              <section className="property-group">
+                <h3>函数图像</h3>
+                <label>
+                  表达式 y =
+                  <input
+                    defaultValue={selectedPlane2DEntity.expression}
+                    onBlur={(event) =>
+                      updatePlane2DFunctionGraph(selectedPlane2DEntity.id, {
+                        expression: event.target.value,
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  x 最小值
+                  <input
+                    type="number"
+                    defaultValue={selectedPlane2DEntity.xMin}
+                    onBlur={(event) =>
+                      updatePlane2DFunctionGraph(selectedPlane2DEntity.id, {
+                        xMin: Number(event.target.value),
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  x 最大值
+                  <input
+                    type="number"
+                    defaultValue={selectedPlane2DEntity.xMax}
+                    onBlur={(event) =>
+                      updatePlane2DFunctionGraph(selectedPlane2DEntity.id, {
+                        xMax: Number(event.target.value),
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  采样数
+                  <input
+                    type="number"
+                    min="50"
+                    max="5000"
+                    defaultValue={selectedPlane2DEntity.sampleCount}
+                    onBlur={(event) =>
+                      updatePlane2DFunctionGraph(selectedPlane2DEntity.id, {
+                        sampleCount: Number(event.target.value),
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  状态
+                  <input
+                    value={
+                      selectedPlane2DEntity.visible === false ? "隐藏" : "显示"
+                    }
+                    readOnly
+                  />
+                </label>
+                <button
+                  onClick={() =>
+                    setPlane2DEntityVisibility(
+                      selectedPlane2DEntity.id,
+                      selectedPlane2DEntity.visible === false,
+                    )
+                  }
+                  type="button"
+                >
+                  {selectedPlane2DEntity.visible === false ? "显示" : "隐藏"}
+                </button>
+                <button
+                  className="danger-button"
+                  onClick={deleteSelectedPlane2DEntities}
+                  type="button"
+                >
+                  删除对象
+                </button>
+              </section>
             ) : selectedPlane2DEntity?.type === "plane2d-calculation" ? (
               <section className="property-group">
                 <h3>计算</h3>
@@ -10762,7 +11357,7 @@ function App() {
                 <label>
                   对象
                   <input
-                    value={`点 ${plane2DPoints.length} / 线段 ${plane2DSegments.length} / 延长 ${plane2DExtensions.length} / 圆 ${plane2DCircles.length} / 多边形 ${plane2DPolygons.length} / 测量 ${plane2DMeasurements.length} / 计算 ${plane2DCalculations.length}`}
+                    value={`点 ${plane2DPoints.length} / 线段 ${plane2DSegments.length} / 延长 ${plane2DExtensions.length} / 圆 ${plane2DCircles.length} / 多边形 ${plane2DPolygons.length} / 函数 ${plane2DFunctionGraphs.length} / 测量 ${plane2DMeasurements.length} / 计算 ${plane2DCalculations.length}`}
                     readOnly
                   />
                 </label>
@@ -10780,6 +11375,7 @@ function App() {
             <span>线段：{plane2DSegments.length}</span>
             <span>延长：{plane2DExtensions.length}</span>
             <span>多边形：{plane2DPolygons.length}</span>
+            <span>函数：{plane2DFunctionGraphs.length}</span>
             <span>测量：{plane2DMeasurements.length}</span>
             <span>计算：{plane2DCalculations.length}</span>
           </footer>

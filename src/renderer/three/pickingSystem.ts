@@ -31,6 +31,7 @@ const PICKABLE_ENTITY_TYPES = new Set<EntityKind>([
   "extension",
   "polygon",
   "solid",
+  "functionSurface",
   "measurement",
 ]);
 
@@ -44,6 +45,7 @@ const ENTITY_PICK_PRIORITY: Partial<Record<EntityKind, number>> = {
   measurement: 5,
   polygon: 6,
   solid: 7,
+  functionSurface: 8,
 };
 
 export const getPointerNdc = (
