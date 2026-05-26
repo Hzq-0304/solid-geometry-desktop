@@ -11,7 +11,9 @@ export type Plane2DSectionRelation =
   | "line-contained-in-section-plane"
   | "plane-plane-intersection-line"
   | "plane-coincident-with-section-plane"
-  | "face-extension-intersection-line";
+  | "face-extension-intersection-line"
+  | "section-local-point"
+  | "section-local-segment";
 
 export interface Plane2DSectionSourceRef {
   readonly sourceDocumentId?: string;
@@ -25,6 +27,19 @@ export interface Plane2DSectionSourceRef {
 export interface Plane2DSectionObjectRef {
   readonly kind: "section-object";
   readonly sectionResultId: string;
+  readonly sourceKey?: string;
+  readonly source3DTabId?: string;
+  readonly source3DEntityId?: string;
+  readonly source3DEntityType?: string;
+  readonly syncDirection?: "from3d" | "to3d" | "bidirectional" | "local2d";
+  readonly syncBackMode?:
+    | "create-3d-point"
+    | "create-3d-segment"
+    | "update-3d-point"
+    | "update-3d-segment"
+    | "readonly"
+    | "unsupported";
+  readonly createdBySection2DSync?: boolean;
   readonly sourceRef: Plane2DSectionSourceRef;
   readonly position3D?: Vec3;
   readonly linePoint3D?: Vec3;
@@ -43,10 +58,24 @@ export interface Plane2DSectionMetadata {
     readonly u: Vec3;
     readonly v: Vec3;
   };
+  readonly sourceGeometryRevision: number;
+  readonly lastSyncedAt: string;
+  readonly needsSync?: boolean;
+  readonly needsSyncFrom3D?: boolean;
+  readonly needsSyncTo3D?: boolean;
+  readonly lastSyncedTo3DAt?: string;
+  readonly localEditRevision?: number;
+  readonly lastSyncedTo3DLocalRevision?: number;
+  readonly pendingSyncTo3DDeletes?: readonly {
+    readonly source3DEntityId: string;
+    readonly source3DEntityType: string;
+    readonly sourceKey: string;
+    readonly deleted2DEntityId: string;
+  }[];
   readonly coincidentPlanes?: readonly Plane2DSectionSourceRef[];
   readonly createdAt: string;
   readonly liveUpdateEnabled: false;
-  readonly syncBackEnabled: false;
+  readonly syncBackEnabled: boolean;
 }
 
 export type Plane2DToolName =

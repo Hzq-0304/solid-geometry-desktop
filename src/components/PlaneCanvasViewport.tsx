@@ -2792,7 +2792,11 @@ export default function PlaneCanvasViewport({
         setInteraction({ kind: "dragPoint", pointerId: event.pointerId, pointId: point.id });
         event.currentTarget.setPointerCapture(event.pointerId);
       } else if (point?.type === "plane2d-point") {
-        onStatus(point.sectionRef ? "截面对象为静态结果，不能直接拖动。" : "构造点不能直接拖动。");
+        onStatus(
+          point.sectionRef
+            ? "该对象来自 3D 截取结果，暂不支持反向同步。"
+            : "构造点不能直接拖动。",
+        );
       }
 
       return;

@@ -65,6 +65,15 @@ export interface SectionDocumentOptions {
   readonly source3DDocumentId?: string;
   readonly sourceSectionEntityId?: string;
   readonly sectionPlane: SectionPlane3D;
+  readonly sourceGeometryRevision?: number;
+  readonly lastSyncedAt?: string;
+  readonly needsSync?: boolean;
+  readonly needsSyncFrom3D?: boolean;
+  readonly needsSyncTo3D?: boolean;
+  readonly syncBackEnabled?: boolean;
+  readonly lastSyncedTo3DAt?: string;
+  readonly localEditRevision?: number;
+  readonly lastSyncedTo3DLocalRevision?: number;
 }
 
 export type Plane2DSectionDocumentMetadata = Plane2DSectionMetadata;

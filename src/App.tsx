@@ -180,6 +180,10 @@ import {
 } from "./core/section/SectionPlane";
 import { solveSection } from "./core/section/SectionSolver";
 import {
+  applySection2DChangesTo3D,
+  refreshSection2DFrom3D,
+} from "./core/section/SectionSync";
+import {
   createPlane2DHistoryState,
   pushPlane2DHistoryEntry,
   redoPlane2DHistory,
@@ -216,6 +220,7 @@ type WorkspaceTab = {
   readonly isDirty: boolean;
   readonly createdAt: string;
   readonly updatedAt: string;
+  readonly geometryRevision?: number;
   readonly plane2DState?: {
     readonly history: Plane2DHistoryState;
     readonly activeTool: Plane2DToolName;
@@ -1851,6 +1856,10 @@ const getPlane2DSectionRelationLabel = (
       return "面的延长部分与截取平面的交线";
     case "plane-coincident-with-section-plane":
       return "平面与截取平面重合";
+    case "section-local-point":
+      return "2D 截面点同步到 3D";
+    case "section-local-segment":
+      return "2D 截面线段同步到 3D";
     default:
       return "来源对象未加载或已丢失";
   }
@@ -2508,6 +2517,7 @@ function App() {
   const [currentTool, setCurrentTool] = useState<ToolName>("select");
   const [geometry3DViewState, setGeometry3DViewState] =
     useState<SceneViewportViewState | null>(null);
+  const [geometryRevision, setGeometryRevision] = useState(0);
   const pointToolToggleRef = useRef<HTMLButtonElement | null>(null);
   const perpendicularToolToggleRef = useRef<HTMLButtonElement | null>(null);
   const extendToolToggleRef = useRef<HTMLButtonElement | null>(null);
@@ -2674,6 +2684,28 @@ function App() {
   const getTabTitleFromPath = (filePath: string | null, fallback: string) =>
     filePath ? getFileNameFromPath(filePath) : fallback;
 
+  const isSectionPlane2DTab = (
+    tab: WorkspaceTab,
+  ): tab is WorkspaceTab & { readonly document: PlaneCanvasDocument } =>
+    tab.kind === "plane2d" &&
+    (tab.document as PlaneCanvasDocument).section?.kind === "section-from-3d";
+
+  const getGeometryRevisionForTab = (tab: WorkspaceTab | undefined): number =>
+    tab?.kind === "geometry3d" ? tab.geometryRevision ?? 0 : 0;
+
+  const isSectionDocumentOutdated = (
+    sectionDocument: PlaneCanvasDocument,
+    sourceRevision: number,
+  ): boolean => {
+    const section = sectionDocument.section;
+
+    return (
+      section?.kind === "section-from-3d" &&
+      (section.needsSync === true ||
+        (section.sourceGeometryRevision ?? 0) < sourceRevision)
+    );
+  };
+
   const captureActiveWorkspaceTab = (tab: WorkspaceTab): WorkspaceTab => {
     const now = new Date().toISOString();
 
@@ -2685,6 +2717,7 @@ function App() {
         title: getTabTitleFromPath(currentFilePath, tab.title),
         isDirty,
         updatedAt: now,
+        geometryRevision,
         geometry3DState: {
           commandManager,
           activeTool: currentTool,
@@ -2744,6 +2777,7 @@ function App() {
       setPlane2DHistory(createPlane2DHistoryState());
       setCurrentTool(tab.geometry3DState?.activeTool ?? "select");
       setGeometry3DViewState(tab.geometry3DState?.viewState ?? null);
+      setGeometryRevision(tab.geometryRevision ?? 0);
       setWorkspaceMode("geometry3d");
       return;
     }
@@ -2762,6 +2796,7 @@ function App() {
       tab.plane2DState?.viewport ?? { panX: 0, panY: 0, zoom: 1 },
     );
     setGeometry3DViewState(null);
+    setGeometryRevision(0);
     setDocument(null);
     setWorkspaceMode("plane2d");
   };
@@ -2877,6 +2912,50 @@ function App() {
   const hasPointB = Boolean(displayDocument.entities[TEST_POINT_B_ID]);
   const hasSegmentAB = Boolean(displayDocument.entities[TEST_SEGMENT_AB_ID]);
   const activeWorkspaceTab = tabs.find((tab) => tab.id === activeTabId) ?? null;
+  const active3DSectionTabs = activeTabId
+    ? tabs.filter(
+        (
+          tab,
+        ): tab is WorkspaceTab & { readonly document: PlaneCanvasDocument } =>
+          isSectionPlane2DTab(tab) &&
+          tab.document.section?.source3DTabId === activeTabId,
+      )
+    : [];
+  const staleSectionTabsForActive3D =
+    workspaceMode === "geometry3d"
+      ? active3DSectionTabs.filter((tab) =>
+          isSectionDocumentOutdated(tab.document, geometryRevision),
+        )
+      : [];
+  const reverseSyncSectionTabsForActive3D =
+    workspaceMode === "geometry3d"
+      ? active3DSectionTabs.filter(
+          (tab) => tab.document.section?.needsSyncTo3D === true,
+        )
+      : [];
+  const activeSectionMetadata =
+    workspaceMode === "plane2d" &&
+    planeCanvasDocument?.section?.kind === "section-from-3d"
+      ? planeCanvasDocument.section
+      : null;
+  const activeSectionSourceTab = activeSectionMetadata
+    ? tabs.find(
+        (tab) =>
+          tab.id === activeSectionMetadata.source3DTabId &&
+          tab.kind === "geometry3d",
+      )
+    : null;
+  const activeSectionSourceRevision = getGeometryRevisionForTab(
+    activeSectionSourceTab ?? undefined,
+  );
+  const activeSectionNeedsSync =
+    Boolean(activeSectionMetadata && activeSectionSourceTab) &&
+    isSectionDocumentOutdated(
+      planeCanvasDocument as PlaneCanvasDocument,
+      activeSectionSourceRevision,
+    );
+  const activeSectionNeedsSyncTo3D =
+    Boolean(activeSectionMetadata?.needsSyncTo3D && activeSectionSourceTab);
   const currentFileName = currentFilePath
     ? currentFilePath.split(/[\\/]/).pop() ?? currentFilePath
     : activeWorkspaceTab?.title ?? "Untitled.sgb";
@@ -3150,6 +3229,65 @@ function App() {
     setDocument(sanitizedDocument);
   };
 
+  const has3DGeometryContentChanged = (
+    previousDocument: BoardDocument,
+    nextDocument: BoardDocument,
+  ): boolean => previousDocument.entities !== nextDocument.entities;
+
+  const markSectionTabsFor3DRevision = (
+    source3DTabId: string,
+    nextRevision: number,
+  ) => {
+    const now = new Date().toISOString();
+
+    setTabs((currentTabs) =>
+      currentTabs.map((tab) => {
+        if (tab.id === source3DTabId && tab.kind === "geometry3d") {
+          return {
+            ...tab,
+            geometryRevision: nextRevision,
+            updatedAt: now,
+          };
+        }
+
+        if (!isSectionPlane2DTab(tab)) {
+          return tab;
+        }
+
+        const section = tab.document.section;
+
+        if (section?.source3DTabId !== source3DTabId) {
+          return tab;
+        }
+
+        return {
+          ...tab,
+          document: {
+            ...tab.document,
+            section: {
+              ...section,
+              needsSync: true,
+              needsSyncFrom3D: true,
+            },
+          },
+          isDirty: true,
+          updatedAt: now,
+        };
+      }),
+    );
+  };
+
+  const bumpActive3DGeometryRevision = () => {
+    if (workspaceMode !== "geometry3d" || !activeTabId) {
+      return;
+    }
+
+    const nextRevision = geometryRevision + 1;
+
+    setGeometryRevision(nextRevision);
+    markSectionTabsFor3DRevision(activeTabId, nextRevision);
+  };
+
   const executeCommand = (command: Command) => {
     const previousDocument = commandManager.getDocument();
     const nextDocument = commandManager.execute(command);
@@ -3158,7 +3296,29 @@ function App() {
 
     if (nextDocument !== previousDocument) {
       setIsDirty(true);
+
+      if (has3DGeometryContentChanged(previousDocument, nextDocument)) {
+        bumpActive3DGeometryRevision();
+      }
     }
+  };
+
+  const createReplaceBoardDocumentCommand = (
+    name: string,
+    replacementDocument: BoardDocument,
+  ): Command => {
+    let previousDocument: BoardDocument | null = null;
+
+    return {
+      name,
+      execute(currentDocument: BoardDocument): BoardDocument {
+        previousDocument = currentDocument;
+        return replacementDocument;
+      },
+      undo(currentDocument: BoardDocument): BoardDocument {
+        return previousDocument ?? currentDocument;
+      },
+    };
   };
 
   const setSelection = (entityIds: readonly EntityId[]) => {
@@ -3388,6 +3548,120 @@ function App() {
     setPlane2DResetSignal((value) => value + 1);
   };
 
+  const isReverseSyncEditableSectionRef = (
+    sectionRef: Plane2DPointEntity["sectionRef"] | Plane2DSegmentEntity["sectionRef"],
+  ): boolean =>
+    sectionRef?.createdBySection2DSync === true &&
+    (sectionRef.syncBackMode === "update-3d-point" ||
+      sectionRef.syncBackMode === "update-3d-segment" ||
+      sectionRef.syncBackMode === "create-3d-point" ||
+      sectionRef.syncBackMode === "create-3d-segment");
+
+  const markPlane2DSectionNeedsSyncTo3D = (
+    beforeDocument: PlaneCanvasDocument | null,
+    nextDocument: PlaneCanvasDocument,
+  ): PlaneCanvasDocument => {
+    const section = nextDocument.section;
+
+    if (
+      !beforeDocument ||
+      section?.kind !== "section-from-3d" ||
+      section.syncBackEnabled === false
+    ) {
+      return nextDocument;
+    }
+
+    let hasSyncableChange = false;
+    const pendingDeletes = [...(section.pendingSyncTo3DDeletes ?? [])];
+    const pendingDeleteKeys = new Set(pendingDeletes.map((item) => item.sourceKey));
+
+    Object.values(beforeDocument.entities).forEach((previousEntity) => {
+      if (nextDocument.entities[previousEntity.id]) {
+        return;
+      }
+
+      if (
+        (previousEntity.type === "plane2d-point" ||
+          previousEntity.type === "plane2d-segment") &&
+        previousEntity.sectionRef?.createdBySection2DSync &&
+        previousEntity.sectionRef.source3DEntityId &&
+        previousEntity.sectionRef.sourceKey &&
+        !pendingDeleteKeys.has(previousEntity.sectionRef.sourceKey)
+      ) {
+        pendingDeletes.push({
+          source3DEntityId: previousEntity.sectionRef.source3DEntityId,
+          source3DEntityType:
+            previousEntity.sectionRef.source3DEntityType ??
+            previousEntity.sectionRef.sourceRef.sourceEntityType,
+          sourceKey: previousEntity.sectionRef.sourceKey,
+          deleted2DEntityId: previousEntity.id,
+        });
+        pendingDeleteKeys.add(previousEntity.sectionRef.sourceKey);
+        hasSyncableChange = true;
+      }
+    });
+
+    Object.values(nextDocument.entities).forEach((entity) => {
+      if (entity.type === "plane2d-point") {
+        const previous = beforeDocument.entities[entity.id];
+
+        if (!entity.sectionRef && entity.pointKind !== "constructed") {
+          hasSyncableChange = true;
+          return;
+        }
+
+        if (
+          isReverseSyncEditableSectionRef(entity.sectionRef) &&
+          previous?.type === "plane2d-point" &&
+          distanceBetweenVec2(previous.position, entity.position) > 1e-8
+        ) {
+          hasSyncableChange = true;
+        }
+      }
+
+      if (entity.type === "plane2d-segment" && entity.segmentKind !== "extension") {
+        const previous = beforeDocument.entities[entity.id];
+
+        if (!entity.sectionRef) {
+          hasSyncableChange = true;
+          return;
+        }
+
+        if (
+          isReverseSyncEditableSectionRef(entity.sectionRef) &&
+          previous?.type === "plane2d-segment" &&
+          (previous.startPointId !== entity.startPointId ||
+            previous.endPointId !== entity.endPointId)
+        ) {
+          hasSyncableChange = true;
+        }
+      }
+    });
+
+    if (!hasSyncableChange) {
+      return pendingDeletes.length === (section.pendingSyncTo3DDeletes ?? []).length
+        ? nextDocument
+        : {
+            ...nextDocument,
+            section: {
+              ...section,
+              pendingSyncTo3DDeletes: pendingDeletes,
+            },
+          };
+    }
+
+    return {
+      ...nextDocument,
+      section: {
+        ...section,
+        syncBackEnabled: true,
+        needsSyncTo3D: true,
+        localEditRevision: (section.localEditRevision ?? 0) + 1,
+        pendingSyncTo3DDeletes: pendingDeletes,
+      },
+    };
+  };
+
   const resetProjectDocument = (
     nextDocument: BoardDocument,
     nextFilePath: string | null,
@@ -3411,6 +3685,7 @@ function App() {
       isDirty: false,
       createdAt: now,
       updatedAt: now,
+      geometryRevision: 0,
       geometry3DState: {
         commandManager: manager,
         activeTool: "select",
@@ -3427,6 +3702,7 @@ function App() {
     setCurrentFilePath(nextFilePath);
     setIsDirty(false);
     setCurrentTool("select");
+    setGeometryRevision(0);
     setPlaneCanvasDocument(null);
     setGeometry3DViewState(null);
     setPlane2DHistory(createPlane2DHistoryState());
@@ -3494,6 +3770,7 @@ function App() {
     currentFilePath,
     currentTool,
     document,
+    geometryRevision,
     geometry3DViewState,
     isDirty,
     plane2DHistory,
@@ -3734,6 +4011,9 @@ function App() {
           source3DDocumentId: sourceDocument.id,
           sourceSectionEntityId: selectedEntity.id,
           sectionPlane,
+          sourceGeometryRevision: geometryRevision,
+          lastSyncedAt: new Date().toISOString(),
+          needsSync: false,
         },
         results,
       ),
@@ -3825,6 +4105,321 @@ function App() {
     setFileStatusMessage("请选择一个 3D 平面作为截取平面");
   };
 
+  const refreshSectionTabFromSource = (
+    sectionTab: WorkspaceTab & { readonly document: PlaneCanvasDocument },
+    sourceTab: WorkspaceTab,
+  ): WorkspaceTab => {
+    const sourceRevision = getGeometryRevisionForTab(sourceTab);
+    const sourceDocument =
+      sourceTab.id === activeTabId && workspaceMode === "geometry3d"
+        ? commandManager.getDocument()
+        : (sourceTab.document as BoardDocument);
+    const refreshedDocument = syncPlane2DIntersections(
+      normalizePlaneCanvasDocument(
+        refreshSection2DFrom3D({
+          sectionDocument: sectionTab.document,
+          sourceDocument,
+          sectionTabId: sectionTab.id,
+          source3DTabId: sourceTab.id,
+          sourceGeometryRevision: sourceRevision,
+        }),
+      ),
+    );
+
+    return {
+      ...sectionTab,
+      document: refreshedDocument,
+      isDirty: true,
+      updatedAt: new Date().toISOString(),
+    };
+  };
+
+  const syncSectionTabsForSource3DTab = (
+    source3DTabId: string,
+    onlyOutdated = true,
+  ) => {
+    const capturedTabs = tabs.map((tab) =>
+      tab.id === activeTabId ? captureActiveWorkspaceTab(tab) : tab,
+    );
+    const sourceTab = capturedTabs.find(
+      (tab) => tab.id === source3DTabId && tab.kind === "geometry3d",
+    );
+
+    if (!sourceTab) {
+      showToast("来源 3D 画布未加载，无法同步");
+      setFileStatusMessage("来源 3D 画布未加载，无法同步");
+      return;
+    }
+
+    const sourceRevision = getGeometryRevisionForTab(sourceTab);
+    let syncedCount = 0;
+    let activePlaneDocument: PlaneCanvasDocument | null = null;
+    const nextTabs = capturedTabs.map((tab) => {
+      if (!isSectionPlane2DTab(tab)) {
+        return tab;
+      }
+
+      const section = tab.document.section;
+
+      if (section?.source3DTabId !== source3DTabId) {
+        return tab;
+      }
+
+      if (onlyOutdated && !isSectionDocumentOutdated(tab.document, sourceRevision)) {
+        return tab;
+      }
+
+      const refreshedTab = refreshSectionTabFromSource(tab, sourceTab);
+      syncedCount += 1;
+
+      if (refreshedTab.id === activeTabId) {
+        activePlaneDocument = refreshedTab.document as PlaneCanvasDocument;
+      }
+
+      return refreshedTab;
+    });
+
+    setTabs(nextTabs);
+
+    if (activePlaneDocument) {
+      setPlaneCanvasDocument(activePlaneDocument);
+    }
+
+    if (syncedCount === 0) {
+      setFileStatusMessage("所有截面已是最新");
+      showToast("截面已是最新。");
+      return;
+    }
+
+    setFileStatusMessage(`已同步 ${syncedCount} 个截面画布`);
+    showToast(`已同步 ${syncedCount} 个截面画布。`);
+  };
+
+  const syncCurrentSectionTab = () => {
+    if (!activeTabId || !planeCanvasDocument?.section) {
+      return;
+    }
+
+    const source3DTabId = planeCanvasDocument.section.source3DTabId;
+    const capturedTabs = tabs.map((tab) =>
+      tab.id === activeTabId ? captureActiveWorkspaceTab(tab) : tab,
+    );
+    const sourceTab = capturedTabs.find(
+      (tab) => tab.id === source3DTabId && tab.kind === "geometry3d",
+    );
+
+    if (!sourceTab) {
+      showToast("来源 3D 画布未加载，无法同步");
+      setFileStatusMessage("来源 3D 画布未加载，无法同步");
+      return;
+    }
+
+    const sectionTab = capturedTabs.find(
+      (tab): tab is WorkspaceTab & { readonly document: PlaneCanvasDocument } =>
+        tab.id === activeTabId && isSectionPlane2DTab(tab),
+    );
+
+    if (!sectionTab) {
+      return;
+    }
+
+    const refreshedTab = refreshSectionTabFromSource(sectionTab, sourceTab);
+    const refreshedDocument = refreshedTab.document as PlaneCanvasDocument;
+
+    setTabs(
+      capturedTabs.map((tab) => (tab.id === refreshedTab.id ? refreshedTab : tab)),
+    );
+    setPlaneCanvasDocument(refreshedDocument);
+    setIsDirty(true);
+    setFileStatusMessage("已同步 1 个截面画布");
+    showToast("已同步 1 个截面画布。");
+  };
+
+  const syncSectionChangesTo3D = (
+    source3DTabId: string,
+    sectionTabIds?: readonly string[],
+  ) => {
+    const capturedTabs = tabs.map((tab) =>
+      tab.id === activeTabId ? captureActiveWorkspaceTab(tab) : tab,
+    );
+    const sourceTab = capturedTabs.find(
+      (tab) => tab.id === source3DTabId && tab.kind === "geometry3d",
+    );
+
+    if (!sourceTab) {
+      showToast("来源 3D 画布未加载，无法同步到 3D");
+      setFileStatusMessage("来源 3D 画布未加载，无法同步到 3D");
+      return;
+    }
+
+    const sectionIdSet = sectionTabIds ? new Set(sectionTabIds) : null;
+    const sectionTabsToSync = capturedTabs.filter(
+      (tab): tab is WorkspaceTab & { readonly document: PlaneCanvasDocument } =>
+        isSectionPlane2DTab(tab) &&
+        tab.document.section?.source3DTabId === source3DTabId &&
+        tab.document.section.needsSyncTo3D === true &&
+        (!sectionIdSet || sectionIdSet.has(tab.id)),
+    );
+
+    if (sectionTabsToSync.length === 0) {
+      showToast("2D 截面已同步到 3D。");
+      setFileStatusMessage("2D 截面已同步到 3D");
+      return;
+    }
+
+    const sourceManager =
+      sourceTab.id === activeTabId && workspaceMode === "geometry3d"
+        ? commandManager
+        : sourceTab.geometry3DState?.commandManager ??
+          new CommandManager(sourceTab.document as BoardDocument);
+    const previousSourceDocument =
+      sourceTab.id === activeTabId && workspaceMode === "geometry3d"
+        ? commandManager.getDocument()
+        : sourceManager.getDocument();
+    let nextSourceDocument = previousSourceDocument;
+    const updatedSectionDocuments = new Map<string, PlaneCanvasDocument>();
+    const skipped: string[] = [];
+    let createdCount = 0;
+    let updatedCount = 0;
+    let deletedCount = 0;
+
+    sectionTabsToSync.forEach((sectionTab) => {
+      const result = applySection2DChangesTo3D({
+        sectionDocument: sectionTab.document,
+        sourceDocument: nextSourceDocument,
+        source3DTabId,
+      });
+
+      if (!result.ok) {
+        skipped.push(result.error ?? `${sectionTab.title} 同步失败`);
+        return;
+      }
+
+      nextSourceDocument = result.sourceDocument;
+      createdCount += result.createdEntityIds.length;
+      updatedCount += result.updatedEntityIds.length;
+      deletedCount += result.deletedEntityIds.length;
+      result.skipped.forEach((item) => skipped.push(`${item.id}: ${item.reason}`));
+      updatedSectionDocuments.set(sectionTab.id, result.sectionDocument);
+    });
+
+    const changedSource =
+      nextSourceDocument.entities !== previousSourceDocument.entities;
+    const nextRevision = changedSource
+      ? getGeometryRevisionForTab(sourceTab) + 1
+      : getGeometryRevisionForTab(sourceTab);
+
+    if (changedSource) {
+      sourceManager.execute(
+        createReplaceBoardDocumentCommand(
+          "同步 2D 截面更改到 3D",
+          nextSourceDocument,
+        ),
+      );
+      nextSourceDocument = sourceManager.getDocument();
+    }
+
+    const now = new Date().toISOString();
+    const nextTabs = capturedTabs.map((tab) => {
+      if (tab.id === source3DTabId && tab.kind === "geometry3d") {
+        return {
+          ...tab,
+          document: nextSourceDocument,
+          isDirty: changedSource ? true : tab.isDirty,
+          updatedAt: changedSource ? now : tab.updatedAt,
+          geometryRevision: nextRevision,
+          geometry3DState: {
+            commandManager: sourceManager,
+            activeTool: tab.geometry3DState?.activeTool ?? "select",
+            viewState: tab.geometry3DState?.viewState ?? null,
+          },
+        };
+      }
+
+      if (!isSectionPlane2DTab(tab)) {
+        return tab;
+      }
+
+      const updatedDocument = updatedSectionDocuments.get(tab.id);
+
+      if (updatedDocument) {
+        return {
+          ...tab,
+          document: {
+            ...updatedDocument,
+            section: updatedDocument.section
+              ? {
+                  ...updatedDocument.section,
+                  sourceGeometryRevision: nextRevision,
+                  needsSync: false,
+                  needsSyncFrom3D: false,
+                  needsSyncTo3D: false,
+                }
+              : updatedDocument.section,
+          },
+          isDirty: true,
+          updatedAt: now,
+        };
+      }
+
+      if (
+        changedSource &&
+        tab.document.section?.source3DTabId === source3DTabId
+      ) {
+        return {
+          ...tab,
+          document: {
+            ...tab.document,
+            section: {
+              ...tab.document.section,
+              needsSync: true,
+              needsSyncFrom3D: true,
+            },
+          },
+          isDirty: true,
+          updatedAt: now,
+        };
+      }
+
+      return tab;
+    });
+
+    setTabs(nextTabs);
+
+    if (sourceTab.id === activeTabId && workspaceMode === "geometry3d") {
+      commandManagerRef.current = sourceManager;
+      setDocument(nextSourceDocument);
+      setGeometryRevision(nextRevision);
+      setIsDirty(changedSource ? true : isDirty);
+    }
+
+    if (workspaceMode === "plane2d" && activeTabId) {
+      const activeUpdatedDocument = nextTabs.find(
+        (tab) => tab.id === activeTabId && tab.kind === "plane2d",
+      )?.document as PlaneCanvasDocument | undefined;
+
+      if (activeUpdatedDocument) {
+        setPlaneCanvasDocument(activeUpdatedDocument);
+        setIsDirty(true);
+      }
+    }
+
+    const syncedCount = updatedSectionDocuments.size;
+    const skippedMessage = skipped.length > 0 ? "，部分对象无法同步" : "";
+    const summary = `已同步 ${syncedCount} 个截面画布到 3D（新增 ${createdCount}，更新 ${updatedCount}，删除 ${deletedCount}）${skippedMessage}`;
+
+    setFileStatusMessage(summary);
+    showToast(syncedCount === 1 ? `已同步到 3D${skippedMessage}。` : `${summary}。`);
+  };
+
+  const syncCurrentSectionChangesTo3D = () => {
+    if (!activeTabId || !activeSectionMetadata) {
+      return;
+    }
+
+    syncSectionChangesTo3D(activeSectionMetadata.source3DTabId, [activeTabId]);
+  };
+
   const closeWorkspaceTab = (tabId: string) => {
     const currentTabs = tabs.map((tab) =>
       tab.id === activeTabId ? captureActiveWorkspaceTab(tab) : tab,
@@ -3888,7 +4483,11 @@ function App() {
     dirty = true,
     options?: Plane2DDocumentChangeOptions,
   ) => {
-    const syncedDocument = syncPlane2DIntersections(nextDocument);
+    const beforeDocument = options?.before ?? planeCanvasDocument;
+    const sectionAwareDocument = dirty
+      ? markPlane2DSectionNeedsSyncTo3D(beforeDocument, nextDocument)
+      : nextDocument;
+    const syncedDocument = syncPlane2DIntersections(sectionAwareDocument);
 
     setPlaneCanvasDocument(syncedDocument);
     if (dirty) {
@@ -3898,8 +4497,6 @@ function App() {
     const historyMode = options?.history ?? (dirty ? "record" : "silent");
 
     if (dirty && historyMode !== "silent") {
-      const beforeDocument = options?.before ?? planeCanvasDocument;
-
       if (beforeDocument) {
         setPlane2DHistory((currentHistory) =>
           pushPlane2DHistoryEntry(
@@ -4157,7 +4754,8 @@ function App() {
       return;
     }
 
-    let nextDocument = commandManager.getDocument();
+    const previousDocument = commandManager.getDocument();
+    let nextDocument = previousDocument;
 
     selectedEntityIds.forEach((entityId) => {
       nextDocument = commandManager.execute(new DeleteEntityCommand(entityId));
@@ -4168,6 +4766,9 @@ function App() {
       selectedEntityIds: [],
     });
     setIsDirty(true);
+    if (has3DGeometryContentChanged(previousDocument, nextDocument)) {
+      bumpActive3DGeometryRevision();
+    }
     setDeleteStatusMessage(
       selectedEntityIds.length === 1
         ? "Deleted selected entity"
@@ -6414,6 +7015,9 @@ function App() {
 
     if (nextDocument !== previousDocument) {
       setIsDirty(true);
+      if (has3DGeometryContentChanged(previousDocument, nextDocument)) {
+        bumpActive3DGeometryRevision();
+      }
     }
   };
 
@@ -6444,6 +7048,9 @@ function App() {
 
     if (nextDocument !== previousDocument) {
       setIsDirty(true);
+      if (has3DGeometryContentChanged(previousDocument, nextDocument)) {
+        bumpActive3DGeometryRevision();
+      }
     }
   };
 
@@ -9948,6 +10555,56 @@ function App() {
           />
         ) : (
           <>
+        {active3DSectionTabs.length > 0 ? (
+          <section className="property-group">
+            <h3>截面同步</h3>
+            <label>
+              状态
+              <input
+                value={
+                  staleSectionTabsForActive3D.length > 0
+                    ? `有 ${staleSectionTabsForActive3D.length} 个截面画布需要同步。`
+                    : "所有截面已是最新。"
+                }
+                readOnly
+              />
+            </label>
+            {staleSectionTabsForActive3D.length > 0 ? (
+              <button
+                onClick={() => {
+                  if (activeTabId) {
+                    syncSectionTabsForSource3DTab(activeTabId);
+                  }
+                }}
+                type="button"
+              >
+                同步截面更改
+              </button>
+            ) : null}
+          </section>
+        ) : null}
+        {reverseSyncSectionTabsForActive3D.length > 0 ? (
+          <section className="property-group">
+            <h3>截面反向同步</h3>
+            <label>
+              状态
+              <input
+                value={`有 ${reverseSyncSectionTabsForActive3D.length} 个截面画布包含 2D 更改，需要同步到当前 3D。`}
+                readOnly
+              />
+            </label>
+            <button
+              onClick={() => {
+                if (activeTabId) {
+                  syncSectionChangesTo3D(activeTabId);
+                }
+              }}
+              type="button"
+            >
+              同步 2D 更改到 3D
+            </button>
+          </section>
+        ) : null}
         {selectedEntityCount > 0 ? (
           <section className="property-group selection-actions">
             <h3>Selection</h3>
@@ -10972,6 +11629,65 @@ function App() {
               />
             ) : (
               <>
+            {activeSectionMetadata ? (
+              <section className="property-group">
+                <h3>截面同步</h3>
+                <label>
+                  状态
+                  <input
+                    value={
+                      activeSectionSourceTab
+                        ? activeSectionNeedsSync
+                          ? "源 3D 已发生更改"
+                          : "截面已是最新"
+                        : "来源 3D 画布未加载，无法同步"
+                    }
+                    readOnly
+                  />
+                </label>
+                <label>
+                  上次同步
+                  <input
+                    value={activeSectionMetadata.lastSyncedAt ?? "未记录"}
+                    readOnly
+                  />
+                </label>
+                {activeSectionSourceTab && activeSectionNeedsSync ? (
+                  <button onClick={syncCurrentSectionTab} type="button">
+                    同步此截面
+                  </button>
+                ) : null}
+              </section>
+            ) : null}
+            {activeSectionMetadata ? (
+              <section className="property-group">
+                <h3>截面反向同步</h3>
+                <label>
+                  状态
+                  <input
+                    value={
+                      activeSectionSourceTab
+                        ? activeSectionNeedsSyncTo3D
+                          ? "该截面有 2D 更改尚未同步到 3D。"
+                          : "2D 截面已同步到 3D。"
+                        : "来源 3D 画布未加载，无法同步到 3D"
+                    }
+                    readOnly
+                  />
+                </label>
+                {activeSectionMetadata.lastSyncedTo3DAt ? (
+                  <label>
+                    上次同步到 3D
+                    <input value={activeSectionMetadata.lastSyncedTo3DAt} readOnly />
+                  </label>
+                ) : null}
+                {activeSectionSourceTab && activeSectionNeedsSyncTo3D ? (
+                  <button onClick={syncCurrentSectionChangesTo3D} type="button">
+                    同步到 3D
+                  </button>
+                ) : null}
+              </section>
+            ) : null}
             {hasMultipleSelectedPlane2DPoints ? (
               <section className="property-group batch-naming name-editor">
                 <h3>多点命名</h3>

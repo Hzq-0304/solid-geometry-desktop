@@ -254,12 +254,22 @@ export const normalizePlaneCanvasDocument = (
       }
 
       if (entity.type === "plane2d-point" && entity.sectionRef) {
+        const syncBackMode = entity.sectionRef.syncBackMode ?? "readonly";
+        const isReverseSyncEditable =
+          syncBackMode === "update-3d-point" ||
+          syncBackMode === "create-3d-point";
+
         return [
           entityId,
           {
             ...entity,
-            locked: entity.locked ?? true,
-            draggable: entity.draggable ?? false,
+            sectionRef: {
+              ...entity.sectionRef,
+              sourceKey:
+                entity.sectionRef.sourceKey ?? entity.sectionRef.sectionResultId,
+            },
+            locked: entity.locked ?? !isReverseSyncEditable,
+            draggable: entity.draggable ?? isReverseSyncEditable,
             visible: entity.visible ?? true,
             nameSource: entity.nameSource ?? "auto",
             showName: entity.showName ?? false,
@@ -268,12 +278,22 @@ export const normalizePlaneCanvasDocument = (
       }
 
       if (entity.type === "plane2d-segment" && entity.sectionRef) {
+        const syncBackMode = entity.sectionRef.syncBackMode ?? "readonly";
+        const isReverseSyncEditable =
+          syncBackMode === "update-3d-segment" ||
+          syncBackMode === "create-3d-segment";
+
         return [
           entityId,
           {
             ...entity,
-            locked: entity.locked ?? true,
-            draggable: entity.draggable ?? false,
+            sectionRef: {
+              ...entity.sectionRef,
+              sourceKey:
+                entity.sectionRef.sourceKey ?? entity.sectionRef.sectionResultId,
+            },
+            locked: entity.locked ?? !isReverseSyncEditable,
+            draggable: entity.draggable ?? isReverseSyncEditable,
             visible: entity.visible ?? true,
             nameSource: entity.nameSource ?? "auto",
             showName: entity.showName ?? false,
@@ -285,9 +305,33 @@ export const normalizePlaneCanvasDocument = (
     }),
   ) as PlaneCanvasDocument["entities"];
 
+  const section =
+    document.section?.kind === "section-from-3d"
+      ? {
+          ...document.section,
+          sourceGeometryRevision: document.section.sourceGeometryRevision ?? 0,
+          lastSyncedAt:
+            document.section.lastSyncedAt ??
+            document.section.createdAt ??
+            document.updatedAt ??
+            defaults.updatedAt,
+          needsSync: document.section.needsSync ?? false,
+          needsSyncFrom3D:
+            document.section.needsSyncFrom3D ?? document.section.needsSync ?? false,
+          needsSyncTo3D: document.section.needsSyncTo3D ?? false,
+          syncBackEnabled: document.section.syncBackEnabled ?? true,
+          localEditRevision: document.section.localEditRevision ?? 0,
+          lastSyncedTo3DLocalRevision:
+            document.section.lastSyncedTo3DLocalRevision ?? 0,
+          pendingSyncTo3DDeletes: document.section.pendingSyncTo3DDeletes ?? [],
+          liveUpdateEnabled: false as const,
+        }
+      : undefined;
+
   return {
     ...defaults,
     ...document,
+    section,
     entities,
     selectedEntityIds: document.selectedEntityIds ?? [],
     settings: {
