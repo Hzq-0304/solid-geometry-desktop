@@ -146,6 +146,7 @@ import type {
   Plane2DMeasurementEntity,
   Plane2DPointEntity,
   Plane2DPolygonEntity,
+  Plane2DSectionObjectRef,
   Plane2DSectionSourceRef,
   Plane2DSegmentEntity,
   Plane2DToolName,
@@ -2930,7 +2931,7 @@ function App() {
   const reverseSyncSectionTabsForActive3D =
     workspaceMode === "geometry3d"
       ? active3DSectionTabs.filter(
-          (tab) => tab.document.section?.needsSyncTo3D === true,
+          (tab) => hasUnsyncedSectionLocalChanges(tab.document),
         )
       : [];
   const activeSectionMetadata =
@@ -2955,7 +2956,11 @@ function App() {
       activeSectionSourceRevision,
     );
   const activeSectionNeedsSyncTo3D =
-    Boolean(activeSectionMetadata?.needsSyncTo3D && activeSectionSourceTab);
+    Boolean(
+      activeSectionMetadata &&
+        activeSectionSourceTab &&
+        hasUnsyncedSectionLocalChanges(planeCanvasDocument),
+    );
   const currentFileName = currentFilePath
     ? currentFilePath.split(/[\\/]/).pop() ?? currentFilePath
     : activeWorkspaceTab?.title ?? "Untitled.sgb";
@@ -3557,6 +3562,102 @@ function App() {
       sectionRef.syncBackMode === "create-3d-point" ||
       sectionRef.syncBackMode === "create-3d-segment");
 
+  function isSectionRefSyncBackCandidate(
+    sectionRef: Plane2DPointEntity["sectionRef"] | Plane2DSegmentEntity["sectionRef"],
+  ): boolean {
+    return (
+      sectionRef?.syncDirection === "to3d" ||
+      sectionRef?.syncDirection === "bidirectional" ||
+      sectionRef?.syncDirection === "local2d" ||
+      sectionRef?.createdBySection2DSync === true ||
+      sectionRef?.syncBackMode === "create-3d-point" ||
+      sectionRef?.syncBackMode === "create-3d-segment" ||
+      sectionRef?.syncBackMode === "update-3d-point" ||
+      sectionRef?.syncBackMode === "update-3d-segment"
+    );
+  }
+
+  function hasUnsyncedSectionLocalChanges(
+    sectionDocument: PlaneCanvasDocument | null | undefined,
+  ): boolean {
+    if (!sectionDocument) {
+      return false;
+    }
+
+    const section = sectionDocument.section;
+
+    if (section?.kind !== "section-from-3d") {
+      return false;
+    }
+
+    if (section.needsSyncTo3D === true) {
+      return true;
+    }
+
+    if ((section.pendingSyncTo3DDeletes?.length ?? 0) > 0) {
+      return true;
+    }
+
+    if (
+      (section.localEditRevision ?? 0) >
+      (section.lastSyncedTo3DLocalRevision ?? 0)
+    ) {
+      return true;
+    }
+
+    return Object.values(sectionDocument.entities).some((entity) => {
+      if (entity.type !== "plane2d-point" && entity.type !== "plane2d-segment") {
+        return false;
+      }
+
+      const sectionRef = entity.sectionRef;
+
+      if (!isSectionRefSyncBackCandidate(sectionRef)) {
+        return false;
+      }
+
+      return (
+        !sectionRef?.source3DEntityId ||
+        sectionRef.syncBackMode === "create-3d-point" ||
+        sectionRef.syncBackMode === "create-3d-segment"
+      );
+    });
+  }
+
+  const createLocalSectionObjectRef = (
+    section: PlaneCanvasDocument["section"],
+    entityId: string,
+    kind: "point" | "segment",
+  ): Plane2DSectionObjectRef | undefined => {
+    if (section?.kind !== "section-from-3d") {
+      return undefined;
+    }
+
+    const relation =
+      kind === "point" ? "section-local-point" : "section-local-segment";
+    const sourceKey = `local2d:${kind}:${entityId}`;
+
+    return {
+      kind: "section-object",
+      sectionResultId: entityId,
+      sourceKey,
+      source3DTabId: section.source3DTabId,
+      syncDirection: "to3d",
+      syncBackMode:
+        kind === "point" ? "create-3d-point" : "create-3d-segment",
+      createdBySection2DSync: true,
+      sourceRef: {
+        sourceDocumentId: section.source3DDocumentId,
+        sourceTabId: section.source3DTabId,
+        sourceEntityId: entityId,
+        sourceEntityType:
+          kind === "point" ? "2D section point" : "2D section segment",
+        sourceName: entityId,
+        relation,
+      },
+    };
+  };
+
   const markPlane2DSectionNeedsSyncTo3D = (
     beforeDocument: PlaneCanvasDocument | null,
     nextDocument: PlaneCanvasDocument,
@@ -3572,6 +3673,7 @@ function App() {
     }
 
     let hasSyncableChange = false;
+    let nextEntities = nextDocument.entities;
     const pendingDeletes = [...(section.pendingSyncTo3DDeletes ?? [])];
     const pendingDeleteKeys = new Set(pendingDeletes.map((item) => item.sourceKey));
 
@@ -3606,6 +3708,29 @@ function App() {
         const previous = beforeDocument.entities[entity.id];
 
         if (!entity.sectionRef && entity.pointKind !== "constructed") {
+          const sectionRef = createLocalSectionObjectRef(section, entity.id, "point");
+
+          if (sectionRef) {
+            nextEntities = {
+              ...nextEntities,
+              [entity.id]: {
+                ...entity,
+                locked: false,
+                draggable: true,
+                sectionRef,
+                updatedAt: new Date().toISOString(),
+              },
+            };
+          }
+
+          hasSyncableChange = true;
+          return;
+        }
+
+        if (
+          isSectionRefSyncBackCandidate(entity.sectionRef) &&
+          !previous
+        ) {
           hasSyncableChange = true;
           return;
         }
@@ -3619,10 +3744,33 @@ function App() {
         }
       }
 
-      if (entity.type === "plane2d-segment" && entity.segmentKind !== "extension") {
+      if (entity.type === "plane2d-segment") {
         const previous = beforeDocument.entities[entity.id];
 
         if (!entity.sectionRef) {
+          const sectionRef = createLocalSectionObjectRef(section, entity.id, "segment");
+
+          if (sectionRef) {
+            nextEntities = {
+              ...nextEntities,
+              [entity.id]: {
+                ...entity,
+                locked: false,
+                draggable: true,
+                sectionRef,
+                updatedAt: new Date().toISOString(),
+              },
+            };
+          }
+
+          hasSyncableChange = true;
+          return;
+        }
+
+        if (
+          isSectionRefSyncBackCandidate(entity.sectionRef) &&
+          !previous
+        ) {
           hasSyncableChange = true;
           return;
         }
@@ -3643,6 +3791,7 @@ function App() {
         ? nextDocument
         : {
             ...nextDocument,
+            entities: nextEntities,
             section: {
               ...section,
               pendingSyncTo3DDeletes: pendingDeletes,
@@ -3652,6 +3801,7 @@ function App() {
 
     return {
       ...nextDocument,
+      entities: nextEntities,
       section: {
         ...section,
         syncBackEnabled: true,
@@ -4257,7 +4407,7 @@ function App() {
       (tab): tab is WorkspaceTab & { readonly document: PlaneCanvasDocument } =>
         isSectionPlane2DTab(tab) &&
         tab.document.section?.source3DTabId === source3DTabId &&
-        tab.document.section.needsSyncTo3D === true &&
+        hasUnsyncedSectionLocalChanges(tab.document) &&
         (!sectionIdSet || sectionIdSet.has(tab.id)),
     );
 

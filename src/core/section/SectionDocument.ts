@@ -82,6 +82,38 @@ const collectPreservedSectionMetadata = (
   return preserved;
 };
 
+const shouldPreserveLocalSectionEntity = (entity: Plane2DEntity): boolean => {
+  const sectionRef =
+    entity.type === "plane2d-point" || entity.type === "plane2d-segment"
+      ? entity.sectionRef
+      : undefined;
+
+  if (!sectionRef) {
+    return true;
+  }
+
+  return (
+    sectionRef.createdBySection2DSync === true ||
+    sectionRef.syncDirection === "to3d" ||
+    sectionRef.syncDirection === "bidirectional" ||
+    sectionRef.syncDirection === "local2d" ||
+    sectionRef.syncBackMode === "create-3d-point" ||
+    sectionRef.syncBackMode === "create-3d-segment" ||
+    sectionRef.syncBackMode === "update-3d-point" ||
+    sectionRef.syncBackMode === "update-3d-segment"
+  );
+};
+
+const collectPreservedLocalSectionEntities = (
+  document: PlaneCanvasDocument | undefined,
+): Plane2DEntity[] => {
+  if (!document) {
+    return [];
+  }
+
+  return Object.values(document.entities).filter(shouldPreserveLocalSectionEntity);
+};
+
 const addSectionPoint = (
   entities: Record<string, Plane2DEntity>,
   id: string,
@@ -187,6 +219,16 @@ export const createPlane2DSectionDocument = (
   const baseDocument = createPlaneCanvasDocument();
   const entities: Record<string, Plane2DEntity> = {};
   const preserved = collectPreservedSectionMetadata(previousDocument);
+  const preservedLocalEntities = collectPreservedLocalSectionEntities(previousDocument);
+  const preservedLocalSourceIds = new Set(
+    preservedLocalEntities
+      .map((entity) =>
+        entity.type === "plane2d-point" || entity.type === "plane2d-segment"
+          ? entity.sectionRef?.source3DEntityId
+          : undefined,
+      )
+      .filter((sourceEntityId): sourceEntityId is string => Boolean(sourceEntityId)),
+  );
   const coincidentPlanes = results
     .filter((result) => result.kind === "coincidentPlane")
     .map((result) => result.sourceRef);
@@ -213,6 +255,22 @@ export const createPlane2DSectionDocument = (
     }
   });
 
+  Object.entries(entities).forEach(([entityId, entity]) => {
+    if (
+      (entity.type === "plane2d-point" || entity.type === "plane2d-segment") &&
+      entity.sectionRef?.source3DEntityId &&
+      preservedLocalSourceIds.has(entity.sectionRef.source3DEntityId)
+    ) {
+      delete entities[entityId];
+    }
+  });
+
+  preservedLocalEntities.forEach((entity) => {
+    entities[entity.id] = entity;
+  });
+
+  const previousSection = previousDocument?.section;
+
   return {
     ...baseDocument,
     name: options.title,
@@ -234,15 +292,22 @@ export const createPlane2DSectionDocument = (
       lastSyncedAt: options.lastSyncedAt ?? now,
       needsSync: options.needsSync ?? false,
       needsSyncFrom3D: options.needsSyncFrom3D ?? options.needsSync ?? false,
-      needsSyncTo3D: options.needsSyncTo3D ?? false,
-      lastSyncedTo3DAt: options.lastSyncedTo3DAt,
-      localEditRevision: options.localEditRevision ?? 0,
-      lastSyncedTo3DLocalRevision: options.lastSyncedTo3DLocalRevision ?? 0,
-      pendingSyncTo3DDeletes: [],
+      needsSyncTo3D:
+        options.needsSyncTo3D ?? previousSection?.needsSyncTo3D ?? false,
+      lastSyncedTo3DAt:
+        options.lastSyncedTo3DAt ?? previousSection?.lastSyncedTo3DAt,
+      localEditRevision:
+        options.localEditRevision ?? previousSection?.localEditRevision ?? 0,
+      lastSyncedTo3DLocalRevision:
+        options.lastSyncedTo3DLocalRevision ??
+        previousSection?.lastSyncedTo3DLocalRevision ??
+        0,
+      pendingSyncTo3DDeletes: previousSection?.pendingSyncTo3DDeletes ?? [],
       coincidentPlanes,
       createdAt: now,
       liveUpdateEnabled: false,
-      syncBackEnabled: options.syncBackEnabled ?? true,
+      syncBackEnabled:
+        options.syncBackEnabled ?? previousSection?.syncBackEnabled ?? true,
     },
   };
 };

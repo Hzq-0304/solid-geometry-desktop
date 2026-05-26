@@ -126,6 +126,7 @@ export type Plane2DPointConstruction =
       readonly kind: "perpendicularFoot";
       readonly pointId: string;
       readonly segmentId: string;
+      readonly constructionGroupId?: string;
     }
   | {
       readonly kind: "perpendicularEndpoint";
@@ -133,6 +134,7 @@ export type Plane2DPointConstruction =
       readonly segmentId: string;
       readonly side: 1 | -1;
       readonly length: number;
+      readonly constructionGroupId?: string;
     }
   | {
       readonly kind: "copiedCircleRadiusPoint";
@@ -180,6 +182,7 @@ export type Plane2DSegmentConstruction =
       readonly kind: "perpendicular";
       readonly pointId: string;
       readonly segmentId: string;
+      readonly constructionGroupId?: string;
     }
   | {
       readonly kind: "perpendicularTargetExtension";
@@ -187,6 +190,7 @@ export type Plane2DSegmentConstruction =
       readonly targetSegmentId: string;
       readonly footPointId: string;
       readonly endpointRole: "start" | "end";
+      readonly constructionGroupId?: string;
     };
 
 export interface Plane2DSegmentEntity {

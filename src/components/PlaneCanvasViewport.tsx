@@ -36,8 +36,6 @@ import {
   getSignedPerpendicularSide2D,
   midpointVec2,
   plane2DMidpointId,
-  plane2DPerpendicularEndpointId,
-  plane2DPerpendicularFootId,
   plane2DExtensionId,
   syncPlane2DConstructions,
   evaluatePlane2DCalculation,
@@ -1246,12 +1244,18 @@ export default function PlaneCanvasViewport({
       return;
     }
 
-    const footId = plane2DPerpendicularFootId(pointId, segmentId);
-    const segmentLineId = `plane2d-perpendicular-segment-${pointId}-${segmentId}`;
+    const constructionGroupId = makePlane2DId("plane2d-perpendicular");
+    const footId = makePlane2DId("plane2d-perpendicular-foot");
+    const segmentLineId = makePlane2DId("plane2d-perpendicular-segment");
     const previousFoot = document.entities[footId];
     const foot = createPlane2DPoint(footId, preview.end, {
       pointKind: "constructed",
-      construction: { kind: "perpendicularFoot", pointId, segmentId },
+      construction: {
+        kind: "perpendicularFoot",
+        pointId,
+        segmentId,
+        constructionGroupId,
+      },
       name: previousFoot?.type === "plane2d-point" ? previousFoot.name : undefined,
       nameSource:
         previousFoot?.type === "plane2d-point" ? previousFoot.nameSource : "auto",
@@ -1266,7 +1270,12 @@ export default function PlaneCanvasViewport({
       footId,
       {
         segmentKind: "constructed",
-        construction: { kind: "perpendicular", pointId, segmentId },
+        construction: {
+          kind: "perpendicular",
+          pointId,
+          segmentId,
+          constructionGroupId,
+        },
       },
     );
 
@@ -1300,11 +1309,11 @@ export default function PlaneCanvasViewport({
       return;
     }
 
-    const endpointId = plane2DPerpendicularEndpointId(
-      perpendicularDirectionPick.pointId,
-      perpendicularDirectionPick.segmentId,
+    const constructionGroupId = makePlane2DId("plane2d-perpendicular");
+    const endpointId = makePlane2DId("plane2d-perpendicular-endpoint");
+    const segmentLineId = makePlane2DId(
+      "plane2d-perpendicular-direction-segment",
     );
-    const segmentLineId = `plane2d-perpendicular-direction-segment-${perpendicularDirectionPick.pointId}-${perpendicularDirectionPick.segmentId}`;
     const previousEndpoint = document.entities[endpointId];
     const endpoint = createPlane2DPoint(endpointId, preview.end, {
       pointKind: "constructed",
@@ -1314,6 +1323,7 @@ export default function PlaneCanvasViewport({
         segmentId: perpendicularDirectionPick.segmentId,
         side: preview.side,
         length: preview.length,
+        constructionGroupId,
       },
       name:
         previousEndpoint?.type === "plane2d-point" ? previousEndpoint.name : undefined,
@@ -1340,6 +1350,7 @@ export default function PlaneCanvasViewport({
           kind: "perpendicular",
           pointId: perpendicularDirectionPick.pointId,
           segmentId: perpendicularDirectionPick.segmentId,
+          constructionGroupId,
         },
       },
     );

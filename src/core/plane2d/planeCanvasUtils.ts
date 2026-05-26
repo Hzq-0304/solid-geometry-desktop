@@ -801,7 +801,11 @@ export const plane2DPerpendicularEndpointId = (
 export const plane2DPerpendicularTargetExtensionId = (
   pointId: string,
   segmentId: string,
-): string => `plane2d-perpendicular-target-extension-${pointId}-${segmentId}`;
+  footPointId?: string,
+): string =>
+  footPointId
+    ? `plane2d-perpendicular-target-extension-${pointId}-${segmentId}-${footPointId}`
+    : `plane2d-perpendicular-target-extension-${pointId}-${segmentId}`;
 
 export const plane2DExtensionId = (segmentId: string): string =>
   `plane2d-extension-${segmentId}`;
@@ -985,18 +989,44 @@ const isEndpointIntersection = (t: number, u: number): boolean =>
 
 const preservePointMetadata = (
   previous: Plane2DEntity | undefined,
-): Pick<Plane2DPointEntity, "name" | "nameSource" | "showName" | "createdAt"> => ({
+): Pick<
+  Plane2DPointEntity,
+  | "name"
+  | "nameSource"
+  | "showName"
+  | "createdAt"
+  | "visible"
+  | "locked"
+  | "draggable"
+  | "sectionRef"
+> => ({
   name: previous?.type === "plane2d-point" ? previous.name : undefined,
   nameSource:
     previous?.type === "plane2d-point" ? previous.nameSource : "auto",
   showName: previous?.type === "plane2d-point" ? previous.showName : false,
   createdAt:
     previous?.type === "plane2d-point" ? previous.createdAt : undefined,
+  visible: previous?.type === "plane2d-point" ? previous.visible : undefined,
+  locked: previous?.type === "plane2d-point" ? previous.locked : undefined,
+  draggable:
+    previous?.type === "plane2d-point" ? previous.draggable : undefined,
+  sectionRef:
+    previous?.type === "plane2d-point" ? previous.sectionRef : undefined,
 });
 
 const preserveSegmentMetadata = (
   previous: Plane2DEntity | undefined,
-): Pick<Plane2DSegmentEntity, "name" | "nameSource" | "showName" | "createdAt"> => ({
+): Pick<
+  Plane2DSegmentEntity,
+  | "name"
+  | "nameSource"
+  | "showName"
+  | "createdAt"
+  | "visible"
+  | "locked"
+  | "draggable"
+  | "sectionRef"
+> => ({
   name: previous?.type === "plane2d-segment" ? previous.name : undefined,
   nameSource:
     previous?.type === "plane2d-segment" ? previous.nameSource : "auto",
@@ -1004,6 +1034,13 @@ const preserveSegmentMetadata = (
     previous?.type === "plane2d-segment" ? previous.showName : false,
   createdAt:
     previous?.type === "plane2d-segment" ? previous.createdAt : undefined,
+  visible:
+    previous?.type === "plane2d-segment" ? previous.visible : undefined,
+  locked: previous?.type === "plane2d-segment" ? previous.locked : undefined,
+  draggable:
+    previous?.type === "plane2d-segment" ? previous.draggable : undefined,
+  sectionRef:
+    previous?.type === "plane2d-segment" ? previous.sectionRef : undefined,
 });
 
 export const syncPlane2DConstructions = (
@@ -1187,6 +1224,7 @@ export const syncPlane2DConstructions = (
     const id = plane2DPerpendicularTargetExtensionId(
       point.construction.pointId,
       point.construction.segmentId,
+      point.id,
     );
     const previous = document.entities[id];
 
@@ -1203,6 +1241,7 @@ export const syncPlane2DConstructions = (
           targetSegmentId: point.construction.segmentId,
           footPointId: point.id,
           endpointRole,
+          constructionGroupId: point.construction.constructionGroupId,
         },
       },
     );

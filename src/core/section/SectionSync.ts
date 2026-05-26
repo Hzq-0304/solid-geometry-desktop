@@ -160,7 +160,6 @@ const isReverseSyncPoint = (
 ): entity is Plane2DPointEntity =>
   entity.type === "plane2d-point" &&
   entity.sectionRef?.createdBySection2DSync === true &&
-  entity.sectionRef.source3DEntityId !== undefined &&
   (entity.sectionRef.syncBackMode === "update-3d-point" ||
     entity.sectionRef.syncBackMode === "create-3d-point");
 
@@ -169,9 +168,20 @@ const isReverseSyncSegment = (
 ): entity is Plane2DSegmentEntity =>
   entity.type === "plane2d-segment" &&
   entity.sectionRef?.createdBySection2DSync === true &&
-  entity.sectionRef.source3DEntityId !== undefined &&
   (entity.sectionRef.syncBackMode === "update-3d-segment" ||
     entity.sectionRef.syncBackMode === "create-3d-segment");
+
+const isLocalPointSyncCandidate = (entity: Plane2DEntity): entity is Plane2DPointEntity =>
+  entity.type === "plane2d-point" &&
+  !entity.sectionRef &&
+  entity.pointKind !== "constructed" &&
+  !entity.construction;
+
+const isLocalSegmentSyncCandidate = (
+  entity: Plane2DEntity,
+): entity is Plane2DSegmentEntity =>
+  entity.type === "plane2d-segment" &&
+  !entity.sectionRef;
 
 export const applySection2DChangesTo3D = (args: {
   readonly sectionDocument: PlaneCanvasDocument;
@@ -206,17 +216,10 @@ export const applySection2DChangesTo3D = (args: {
   const skipped: { id: string; reason: string }[] = [];
   const pointIdMap = new Map<string, EntityId>();
 
-  Object.values(sectionEntities).forEach((entity) => {
-    if (isReverseSyncPoint(entity)) {
-      const source3DEntityId = entity.sectionRef?.source3DEntityId;
-
-      if (source3DEntityId) {
-        pointIdMap.set(entity.id, source3DEntityId);
-      }
-    }
-  });
-
-  const ensurePointSynced = (pointId: string): EntityId | null => {
+  const ensurePointSynced = (
+    pointId: string,
+    options: { readonly allowConstructed?: boolean } = {},
+  ): EntityId | null => {
     const mappedPointId = pointIdMap.get(pointId);
 
     if (mappedPointId) {
@@ -230,10 +233,27 @@ export const applySection2DChangesTo3D = (args: {
       return null;
     }
 
+    const canSyncConstructedPoint =
+      options.allowConstructed === true &&
+      entity.pointKind === "constructed" &&
+      !entity.sectionRef;
+
     if (entity.sectionRef && !isReverseSyncPoint(entity)) {
       skipped.push({
         id: pointId,
         reason: "readonly section object cannot sync back to 3D",
+      });
+      return null;
+    }
+
+    if (
+      !isReverseSyncPoint(entity) &&
+      !isLocalPointSyncCandidate(entity) &&
+      !canSyncConstructedPoint
+    ) {
+      skipped.push({
+        id: pointId,
+        reason: "constructed or unsupported 2D point cannot sync back to 3D",
       });
       return null;
     }
@@ -309,7 +329,7 @@ export const applySection2DChangesTo3D = (args: {
       return;
     }
 
-    if (entity.sectionRef && !isReverseSyncPoint(entity)) {
+    if (!isReverseSyncPoint(entity) && !isLocalPointSyncCandidate(entity)) {
       return;
     }
 
@@ -317,16 +337,20 @@ export const applySection2DChangesTo3D = (args: {
   });
 
   Object.values(sectionEntities).forEach((entity) => {
-    if (entity.type !== "plane2d-segment" || entity.segmentKind === "extension") {
+    if (entity.type !== "plane2d-segment") {
       return;
     }
 
-    if (entity.sectionRef && !isReverseSyncSegment(entity)) {
+    if (!isReverseSyncSegment(entity) && !isLocalSegmentSyncCandidate(entity)) {
       return;
     }
 
-    const startPointId = ensurePointSynced(entity.startPointId);
-    const endPointId = ensurePointSynced(entity.endPointId);
+    const startPointId = ensurePointSynced(entity.startPointId, {
+      allowConstructed: true,
+    });
+    const endPointId = ensurePointSynced(entity.endPointId, {
+      allowConstructed: true,
+    });
 
     if (!startPointId || !endPointId || startPointId === endPointId) {
       skipped.push({ id: entity.id, reason: "segment endpoints cannot sync to 3D" });
