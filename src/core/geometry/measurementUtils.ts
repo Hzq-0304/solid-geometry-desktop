@@ -79,6 +79,55 @@ const getPlaneFromDocument = (
   return entity?.kind === "plane" ? entity : null;
 };
 
+const getDirectionBetweenPointIds = (
+  document: BoardDocument,
+  firstPointId: EntityId,
+  secondPointId: EntityId,
+) => {
+  const firstPosition = getPointWorldPosition(document, firstPointId);
+  const secondPosition = getPointWorldPosition(document, secondPointId);
+
+  return firstPosition && secondPosition
+    ? subtractVec3(secondPosition, firstPosition)
+    : null;
+};
+
+const getLineDirectionByEntityId = (
+  document: BoardDocument,
+  lineEntityId: EntityId,
+) => {
+  const entity = document.entities[lineEntityId];
+
+  if (!entity) {
+    return null;
+  }
+
+  if (entity.kind === "segment") {
+    return getDirectionBetweenPointIds(
+      document,
+      entity.pointIds[0],
+      entity.pointIds[1],
+    );
+  }
+
+  if (entity.kind === "extension" && entity.targetType === "segment") {
+    return getLineDirectionByEntityId(document, entity.targetId);
+  }
+
+  if (
+    entity.kind === "perpendicularLine" ||
+    entity.kind === "linePlanePerpendicular"
+  ) {
+    const directionPointId = entity.directionPointId ?? entity.footPointId;
+
+    return directionPointId
+      ? getDirectionBetweenPointIds(document, entity.pointId, directionPointId)
+      : null;
+  }
+
+  return null;
+};
+
 export const getPointDistanceByIds = (
   document: BoardDocument,
   firstPointId: EntityId,
@@ -178,21 +227,19 @@ export const getLinePlaneAngleBySegmentId = (
   document: BoardDocument,
   segmentId: EntityId,
 ): number | null => {
-  const entity = document.entities[segmentId];
+  const direction = normalizeVec3(
+    getLineDirectionByEntityId(document, segmentId) ?? { x: 0, y: 0, z: 0 },
+  );
 
-  if (entity?.kind !== "segment") {
+  if (!direction) {
     return null;
   }
 
-  const [startPointId, endPointId] = entity.pointIds;
-  const startPoint = getPointFromDocument(document, startPointId);
-  const endPoint = getPointFromDocument(document, endPointId);
+  const horizontalLength = Math.sqrt(
+    direction.x * direction.x + direction.y * direction.y,
+  );
 
-  if (!startPoint || !endPoint) {
-    return null;
-  }
-
-  return calculateLinePlaneAngleByPoints(startPoint, endPoint, document);
+  return (Math.atan2(Math.abs(direction.z), horizontalLength) * 180) / Math.PI;
 };
 
 export const getLinePlaneAngleByPointIds = (
@@ -208,32 +255,46 @@ export const getLinePlaneAngleByPointIds = (
     : null;
 };
 
+export const getLineLineAngleByLineIds = (
+  document: BoardDocument,
+  firstLineId: EntityId,
+  secondLineId: EntityId,
+): number | null => {
+  const firstDirection = normalizeVec3(
+    getLineDirectionByEntityId(document, firstLineId) ?? { x: 0, y: 0, z: 0 },
+  );
+  const secondDirection = normalizeVec3(
+    getLineDirectionByEntityId(document, secondLineId) ?? { x: 0, y: 0, z: 0 },
+  );
+
+  if (!firstDirection || !secondDirection) {
+    return null;
+  }
+
+  const cosine = clamp(Math.abs(dotVec3(firstDirection, secondDirection)), -1, 1);
+
+  return (Math.acos(cosine) * 180) / Math.PI;
+};
+
 export const getLinePlaneAngleBySegmentAndPlaneId = (
   document: BoardDocument,
   segmentId: EntityId,
   planeId: EntityId,
 ): number | null => {
-  const segment = getSegmentFromDocument(document, segmentId);
   const plane = getPlaneFromDocument(document, planeId);
+  const direction = normalizeVec3(
+    getLineDirectionByEntityId(document, segmentId) ?? { x: 0, y: 0, z: 0 },
+  );
 
-  if (!segment || !plane) {
+  if (!direction || !plane) {
     return null;
   }
 
-  const [startPointId, endPointId] = segment.pointIds;
-  const startPoint = getPointFromDocument(document, startPointId);
-  const endPoint = getPointFromDocument(document, endPointId);
-  const startPosition = getPointWorldPosition(document, startPointId);
-  const endPosition = getPointWorldPosition(document, endPointId);
   const planePoints = getPlaneWorldPositions(document, plane.pointIds);
 
-  if (!startPoint || !endPoint || !startPosition || !endPosition || !planePoints) {
+  if (!planePoints) {
     return null;
   }
-
-  const direction = normalizeVec3(
-    subtractVec3(endPosition, startPosition),
-  );
   const planeEquation = getPlaneFromThreePoints(
     planePoints[0],
     planePoints[1],
@@ -437,6 +498,31 @@ const getSegmentPrefixById = (
   return startName && endName ? `${startName}${endName}` : null;
 };
 
+const getLinePrefixById = (
+  document: BoardDocument,
+  lineEntityId: EntityId,
+): string | null => {
+  const entity = document.entities[lineEntityId];
+
+  if (!entity) {
+    return null;
+  }
+
+  if (entity.kind === "segment") {
+    return getSegmentPrefixById(document, lineEntityId);
+  }
+
+  if (entity.name?.trim()) {
+    return entity.name.trim();
+  }
+
+  if (entity.kind === "extension" && entity.targetType === "segment") {
+    return getSegmentPrefixById(document, entity.targetId) ?? entity.id;
+  }
+
+  return entity.id;
+};
+
 const getPlaneDisplayNameById = (
   document: BoardDocument,
   planeId: EntityId,
@@ -467,11 +553,11 @@ const getLinePlaneAngleTextParts = (
 
   if (
     targetIds.length === 2 &&
-    document.entities[targetIds[0]]?.kind === "segment" &&
+    getLineDirectionByEntityId(document, targetIds[0]) !== null &&
     document.entities[targetIds[1]]?.kind === "plane"
   ) {
     return {
-      segmentText: getSegmentPrefixById(document, targetIds[0]) ?? "segment",
+      segmentText: getLinePrefixById(document, targetIds[0]) ?? "segment",
       planeText: `平面 ${
         getPlaneDisplayNameById(document, targetIds[1]) ?? targetIds[1]
       }`,
@@ -481,6 +567,18 @@ const getLinePlaneAngleTextParts = (
   return {
     segmentText: getLinePlaneAnglePrefix(measurement, document) ?? "segment",
     planeText: `${measurement.plane ?? "XY"} 面`,
+  };
+};
+
+const getLineLineAngleTextParts = (
+  measurement: MeasurementEntity,
+  document: BoardDocument,
+): { readonly firstLineText: string; readonly secondLineText: string } => {
+  const targetIds = getMeasurementTargetIds(measurement);
+
+  return {
+    firstLineText: getLinePrefixById(document, targetIds[0]) ?? "line",
+    secondLineText: getLinePrefixById(document, targetIds[1]) ?? "line",
   };
 };
 
@@ -555,9 +653,34 @@ export const calculateMeasurementValue = (
   }
 
   if (
+    measurement.measurementKind === "lineLineAngle" &&
+    targetIds.length === 2 &&
+    getLineDirectionByEntityId(document, targetIds[0]) !== null &&
+    getLineDirectionByEntityId(document, targetIds[1]) !== null
+  ) {
+    const value = getLineLineAngleByLineIds(
+      document,
+      targetIds[0],
+      targetIds[1],
+    );
+    const { firstLineText, secondLineText } = getLineLineAngleTextParts(
+      measurement,
+      document,
+    );
+
+    return value === null
+      ? null
+      : {
+          value,
+          unit: measurement.unit ?? "deg",
+          formattedText: `${firstLineText} 与 ${secondLineText} = ${value.toFixed(2)}°`,
+        };
+  }
+
+  if (
     measurement.measurementKind === "linePlaneAngle" &&
     targetIds.length === 2 &&
-    document.entities[targetIds[0]]?.kind === "segment" &&
+    getLineDirectionByEntityId(document, targetIds[0]) !== null &&
     document.entities[targetIds[1]]?.kind === "plane"
   ) {
     const value = getLinePlaneAngleBySegmentAndPlaneId(
@@ -662,11 +785,31 @@ export const formatMeasurementText = (
     };
   }
 
+  if (measurement.measurementKind === "lineLineAngle") {
+    const { firstLineText, secondLineText } = getLineLineAngleTextParts(
+      measurement,
+      document,
+    );
+    const unitText = "\u00b0";
+
+    return {
+      prefix: `${firstLineText} 与 ${secondLineText}`,
+      valueText: calculation.value.toFixed(2),
+      unitText,
+      formattedText: `${firstLineText} 与 ${secondLineText} = ${calculation.value.toFixed(
+        2,
+      )}${unitText}`,
+      overlinePrefix: false,
+    };
+  }
+
   if (
     measurement.measurementKind === "linePlaneAngle" &&
     getMeasurementTargetIds(measurement).length === 2 &&
-    document.entities[getMeasurementTargetIds(measurement)[0]]?.kind ===
-      "segment" &&
+    getLineDirectionByEntityId(
+      document,
+      getMeasurementTargetIds(measurement)[0],
+    ) !== null &&
     document.entities[getMeasurementTargetIds(measurement)[1]]?.kind === "plane"
   ) {
     const { segmentText, planeText } = getLinePlaneAngleTextParts(

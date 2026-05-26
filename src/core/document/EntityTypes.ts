@@ -226,6 +226,7 @@ export type MeasurementKind =
   | "length"
   | "distance"
   | "angle"
+  | "lineLineAngle"
   | "linePlaneAngle"
   | "planePlaneAngle"
   | "area"

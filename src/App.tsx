@@ -117,6 +117,7 @@ import { getObjectInspectorInfo } from "./core/geometry/objectInspector";
 import { getPointWorldPosition } from "./core/geometry/pointPositionUtils";
 import {
   calculateMeasurementValue,
+  getLineLineAngleByLineIds,
   getLinePlaneAngleBySegmentAndPlaneId,
   getLinePlaneAngleByPointIds,
   getLinePlaneAngleBySegmentId,
@@ -239,11 +240,13 @@ type WorkspaceTab = {
   };
 };
 type AngleMeasureMode =
+  | "auto"
   | "threePoint"
   | "lineXYPlane"
   | "linePlane"
   | "planeXYPlane"
   | "planePlane";
+type AngleTargetKind = "point" | "line" | "plane" | "unsupported";
 type PlaneCreationMode = "threePoint";
 type PerpendicularMode = "pointLine" | "linePlane";
 type ExtendMode = "auto" | "segmentToBoundary" | "planeToBoundary";
@@ -328,6 +331,118 @@ interface Preselection {
   readonly entityId: EntityId;
   readonly entityType: PreselectedEntityType;
 }
+
+const getAngleTargetKind = (
+  entity: BoardEntity | null | undefined,
+): AngleTargetKind => {
+  if (!entity || entity.visible === false) {
+    return "unsupported";
+  }
+
+  if (entity.kind === "plane") {
+    return "plane";
+  }
+
+  if (
+    entity.kind === "segment" ||
+    entity.kind === "perpendicularLine" ||
+    entity.kind === "linePlanePerpendicular" ||
+    (entity.kind === "extension" && entity.targetType === "segment")
+  ) {
+    return "line";
+  }
+
+  if (entity.kind === "point") {
+    return "point";
+  }
+
+  return "unsupported";
+};
+
+const getAngleLineDisplayName = (
+  document: BoardDocument,
+  lineEntityId: EntityId,
+): string => {
+  const entity = document.entities[lineEntityId];
+
+  if (entity?.kind === "segment") {
+    return getSegmentDisplayName(document, entity);
+  }
+
+  if (entity?.name?.trim()) {
+    return entity.name.trim();
+  }
+
+  if (entity?.kind === "extension" && entity.targetType === "segment") {
+    const target = document.entities[entity.targetId];
+
+    return target?.kind === "segment"
+      ? getSegmentDisplayName(document, target)
+      : entity.id;
+  }
+
+  return entity?.id ?? lineEntityId;
+};
+
+const resolveSegmentTargetIdFromPointer = (
+  pointerInfo: PointerInfo,
+  document: BoardDocument,
+): EntityId | null => {
+  const entityId =
+    pointerInfo.hitEntityType === "segment" && pointerInfo.hitEntityId
+      ? pointerInfo.hitEntityId
+      : pointerInfo.snapResult?.type === "segment"
+        ? pointerInfo.snapResult.targetEntityId ?? null
+        : null;
+  const entity = entityId ? document.entities[entityId] : null;
+
+  return entity?.kind === "segment" ? entityId : null;
+};
+
+const resolvePlaneTargetIdFromPointer = (
+  pointerInfo: PointerInfo,
+  document: BoardDocument,
+): EntityId | null => {
+  const candidateIds = [
+    pointerInfo.hitEntityType === "plane" ? pointerInfo.hitEntityId : null,
+    pointerInfo.planeSnapEntityId ?? null,
+    pointerInfo.snapResult?.type === "plane"
+      ? pointerInfo.snapResult.targetEntityId ?? null
+      : null,
+  ];
+
+  for (const entityId of candidateIds) {
+    const entity = entityId ? document.entities[entityId] : null;
+
+    if (getAngleTargetKind(entity) === "plane") {
+      return entityId;
+    }
+  }
+
+  return null;
+};
+
+const resolveAngleLineTargetIdFromPointer = (
+  pointerInfo: PointerInfo,
+  document: BoardDocument,
+): EntityId | null => {
+  const candidateIds = [
+    pointerInfo.hitEntityId,
+    pointerInfo.snapResult?.type === "segment"
+      ? pointerInfo.snapResult.targetEntityId ?? null
+      : null,
+  ];
+
+  for (const entityId of candidateIds) {
+    const entity = entityId ? document.entities[entityId] : null;
+
+    if (getAngleTargetKind(entity) === "line") {
+      return entityId;
+    }
+  }
+
+  return null;
+};
 
 type ParallelDraft =
   | {
@@ -1036,6 +1151,32 @@ const createAngleMeasurementEntity = (
     targetIds: pointIds,
     targetEntityIds: [],
     pointIds,
+    value,
+    unit: "deg",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+};
+
+const createLineLineAngleMeasurementEntity = (
+  id: EntityId,
+  name: string,
+  targetIds: readonly [EntityId, EntityId],
+  value: number,
+): MeasurementEntity => {
+  const timestamp = new Date().toISOString();
+
+  return {
+    id,
+    kind: "measurement",
+    measurementKind: "lineLineAngle",
+    name,
+    style: { color: "#9333ea" },
+    visible: true,
+    locked: false,
+    targetIds,
+    targetEntityIds: targetIds,
+    pointIds: [],
     value,
     unit: "deg",
     createdAt: timestamp,
@@ -2445,6 +2586,7 @@ const getMeasureAngleToolStatus = (
   angleMeasureMode: AngleMeasureMode,
   selectedPointIds: readonly EntityId[],
   linePlaneSegmentId: EntityId | null,
+  linePlanePlaneId: EntityId | null,
   planePlaneFirstPlaneId: EntityId | null,
   statusMessage: string | null,
   document: BoardDocument,
@@ -2457,12 +2599,40 @@ const getMeasureAngleToolStatus = (
     return statusMessage;
   }
 
+  if (angleMeasureMode === "auto") {
+    if (linePlaneSegmentId) {
+      return "已选择线，请选择另一条线或一个平面";
+    }
+
+    if (linePlanePlaneId) {
+      return "已选择平面，请选择另一个平面或一条线";
+    }
+
+    if (selectedPointIds.length > 0) {
+      if (selectedPointIds.length === 1) {
+        return "请选择第二个点，第二个点为顶点";
+      }
+
+      return "请选择第三个点完成三点角";
+    }
+
+    return "请选择点、线或平面创建角度";
+  }
+
   if (angleMeasureMode === "lineXYPlane") {
     return "Select a segment to measure its angle with the X-Y plane";
   }
 
   if (angleMeasureMode === "linePlane") {
-    return linePlaneSegmentId ? "Select a plane" : "Select a segment";
+    if (linePlaneSegmentId) {
+      return "已选择线段，请选择平面";
+    }
+
+    if (linePlanePlaneId) {
+      return "已选择平面，请选择线段";
+    }
+
+    return "请选择线段或平面创建线面角";
   }
 
   if (angleMeasureMode === "planeXYPlane") {
@@ -2570,6 +2740,8 @@ function App() {
   >([]);
   const [linePlaneAngleSegmentId, setLinePlaneAngleSegmentId] =
     useState<EntityId | null>(null);
+  const [linePlaneAnglePlaneId, setLinePlaneAnglePlaneId] =
+    useState<EntityId | null>(null);
   const [planePlaneAngleFirstPlaneId, setPlanePlaneAngleFirstPlaneId] =
     useState<EntityId | null>(null);
   const [angleStatusMessage, setAngleStatusMessage] = useState<string | null>(
@@ -2630,7 +2802,7 @@ function App() {
   const [showCoordinatePointModal, setShowCoordinatePointModal] =
     useState(false);
   const [angleMeasureMode, setAngleMeasureMode] =
-    useState<AngleMeasureMode>("threePoint");
+    useState<AngleMeasureMode>("auto");
   const [showAngleToolPanel, setShowAngleToolPanel] = useState(false);
   const [showLinePlaneAnglePanel, setShowLinePlaneAnglePanel] = useState(false);
   const [showPlanePlaneAnglePanel, setShowPlanePlaneAnglePanel] = useState(false);
@@ -3125,6 +3297,7 @@ function App() {
     angleMeasureMode,
     angleSelectedPointIds,
     linePlaneAngleSegmentId,
+    linePlaneAnglePlaneId,
     planePlaneAngleFirstPlaneId,
     angleStatusMessage,
     displayDocument,
@@ -3530,6 +3703,7 @@ function App() {
     setMeasureStatusMessage(null);
     setAngleSelectedPointIds([]);
     setLinePlaneAngleSegmentId(null);
+    setLinePlaneAnglePlaneId(null);
     setPlanePlaneAngleFirstPlaneId(null);
     setAngleStatusMessage(null);
     setCalculationExpression(null);
@@ -6595,6 +6769,48 @@ function App() {
     setAngleStatusMessage(`${measurement.name} = ${formatAngleValue(value)}`);
   };
 
+  const getLineLineAngleMeasurementName = (
+    firstLineId: EntityId,
+    secondLineId: EntityId,
+  ): string => {
+    const currentDocument = commandManager.getDocument();
+
+    return `${getAngleLineDisplayName(
+      currentDocument,
+      firstLineId,
+    )} and ${getAngleLineDisplayName(currentDocument, secondLineId)}`;
+  };
+
+  const addLineLineAngleMeasurement = (
+    firstLineId: EntityId,
+    secondLineId: EntityId,
+  ) => {
+    const currentDocument = commandManager.getDocument();
+    const value = getLineLineAngleByLineIds(
+      currentDocument,
+      firstLineId,
+      secondLineId,
+    );
+
+    if (value === null) {
+      setAngleStatusMessage("角度工具：无法计算两条线的夹角");
+      return;
+    }
+
+    const measurement = {
+      ...createLineLineAngleMeasurementEntity(
+        createEntityId("measurement"),
+        getLineLineAngleMeasurementName(firstLineId, secondLineId),
+        [firstLineId, secondLineId],
+        value,
+      ),
+      displayPosition: getNextMeasurementDisplayPosition(),
+    };
+
+    executeCommand(new AddMeasurementCommand(measurement));
+    setAngleStatusMessage(`${measurement.name} = ${formatAngleValue(value)}`);
+  };
+
   const getLinePlaneAngleMeasurementName = (
     targetIds: readonly EntityId[],
   ): string => {
@@ -6660,8 +6876,8 @@ function App() {
     const segment = currentDocument.entities[segmentId];
     const plane = currentDocument.entities[planeId];
     const segmentName =
-      segment?.kind === "segment"
-        ? getSegmentDisplayName(currentDocument, segment)
+      getAngleTargetKind(segment) === "line"
+        ? getAngleLineDisplayName(currentDocument, segmentId)
         : segmentId;
     const planeName =
       plane?.kind === "plane"
@@ -7429,6 +7645,23 @@ function App() {
     measureAngleToolRef.current.cancel();
     setAngleSelectedPointIds([]);
     setLinePlaneAngleSegmentId(null);
+    setLinePlaneAnglePlaneId(null);
+    setPlanePlaneAngleFirstPlaneId(null);
+    setAngleStatusMessage(null);
+    changeTool("measureAngle");
+  };
+
+  const activateAutoAngleMode = () => {
+    setAngleMeasureMode("auto");
+    setShowAngleToolPanel(false);
+    setShowLinePlaneAnglePanel(false);
+    setShowPlanePlaneAnglePanel(false);
+    setShowPointToolPanel(false);
+    setShowPerpendicularToolPanel(false);
+    measureAngleToolRef.current.cancel();
+    setAngleSelectedPointIds([]);
+    setLinePlaneAngleSegmentId(null);
+    setLinePlaneAnglePlaneId(null);
     setPlanePlaneAngleFirstPlaneId(null);
     setAngleStatusMessage(null);
     changeTool("measureAngle");
@@ -7485,6 +7718,7 @@ function App() {
     measureAngleToolRef.current.cancel();
     setAngleSelectedPointIds([]);
     setLinePlaneAngleSegmentId(null);
+    setLinePlaneAnglePlaneId(null);
     setPlanePlaneAngleFirstPlaneId(null);
     setAngleStatusMessage(null);
     changeTool("measureAngle");
@@ -7500,6 +7734,7 @@ function App() {
     measureAngleToolRef.current.cancel();
     setAngleSelectedPointIds([]);
     setLinePlaneAngleSegmentId(null);
+    setLinePlaneAnglePlaneId(null);
     setPlanePlaneAngleFirstPlaneId(null);
     setAngleStatusMessage(null);
     changeTool("measureAngle");
@@ -7515,6 +7750,7 @@ function App() {
     measureAngleToolRef.current.cancel();
     setAngleSelectedPointIds([]);
     setLinePlaneAngleSegmentId(null);
+    setLinePlaneAnglePlaneId(null);
     setPlanePlaneAngleFirstPlaneId(null);
     setAngleStatusMessage(null);
     changeTool("measureAngle");
@@ -7529,6 +7765,7 @@ function App() {
     measureAngleToolRef.current.cancel();
     setAngleSelectedPointIds([]);
     setLinePlaneAngleSegmentId(null);
+    setLinePlaneAnglePlaneId(null);
     setPlanePlaneAngleFirstPlaneId(null);
     setAngleStatusMessage(null);
     changeTool("measureAngle");
@@ -7807,16 +8044,26 @@ function App() {
     pointerInfo: PointerInfo,
     sourceDocument: BoardDocument,
   ): Preselection | null => {
-    const entityId =
-      pointerInfo.hitEntityType === "segment"
-        ? pointerInfo.hitEntityId
-        : pointerInfo.snapResult?.type === "segment"
-          ? pointerInfo.snapResult.targetEntityId ?? null
-          : null;
+    const entityId = resolveSegmentTargetIdFromPointer(
+      pointerInfo,
+      sourceDocument,
+    );
+
+    return entityId ? { entityId, entityType: "segment" } : null;
+  };
+
+  const getAngleLinePreselection = (
+    pointerInfo: PointerInfo,
+    sourceDocument: BoardDocument,
+  ): Preselection | null => {
+    const entityId = resolveAngleLineTargetIdFromPointer(
+      pointerInfo,
+      sourceDocument,
+    );
     const entity = entityId ? sourceDocument.entities[entityId] : null;
 
-    return entity?.kind === "segment" && entity.visible
-      ? { entityId: entity.id, entityType: "segment" }
+    return entity && getAngleTargetKind(entity) === "line"
+      ? { entityId: entity.id, entityType: entity.kind as PreselectedEntityType }
       : null;
   };
 
@@ -7824,13 +8071,13 @@ function App() {
     pointerInfo: PointerInfo,
     sourceDocument: BoardDocument,
   ): Preselection | null => {
-    const entity =
-      pointerInfo.hitEntityType === "plane" && pointerInfo.hitEntityId
-        ? sourceDocument.entities[pointerInfo.hitEntityId]
-        : null;
+    const entityId = resolvePlaneTargetIdFromPointer(
+      pointerInfo,
+      sourceDocument,
+    );
 
-    return entity?.kind === "plane" && entity.visible
-      ? { entityId: entity.id, entityType: "plane" }
+    return entityId
+      ? { entityId, entityType: "plane" }
       : null;
   };
 
@@ -8077,14 +8324,47 @@ function App() {
           getPointPreselection(pointerInfo, sourceDocument)
         );
       case "measureAngle":
+        if (angleMeasureMode === "auto") {
+          if (linePlaneAngleSegmentId) {
+            const target =
+              getAngleLinePreselection(pointerInfo, sourceDocument) ??
+              getPlanePreselection(pointerInfo, sourceDocument);
+
+            return target?.entityId === linePlaneAngleSegmentId ? null : target;
+          }
+
+          if (linePlaneAnglePlaneId) {
+            const target =
+              getPlanePreselection(pointerInfo, sourceDocument) ??
+              getAngleLinePreselection(pointerInfo, sourceDocument);
+
+            return target?.entityId === linePlaneAnglePlaneId ? null : target;
+          }
+
+          return (
+            getPointPreselection(pointerInfo, sourceDocument) ??
+            getAngleLinePreselection(pointerInfo, sourceDocument) ??
+            getPlanePreselection(pointerInfo, sourceDocument)
+          );
+        }
+
         if (angleMeasureMode === "lineXYPlane") {
-          return getSegmentPreselection(pointerInfo, sourceDocument);
+          return getAngleLinePreselection(pointerInfo, sourceDocument);
         }
 
         if (angleMeasureMode === "linePlane") {
-          return linePlaneAngleSegmentId
-            ? getPlanePreselection(pointerInfo, sourceDocument)
-            : getSegmentPreselection(pointerInfo, sourceDocument);
+          if (linePlaneAngleSegmentId) {
+            return getPlanePreselection(pointerInfo, sourceDocument);
+          }
+
+          if (linePlaneAnglePlaneId) {
+            return getAngleLinePreselection(pointerInfo, sourceDocument);
+          }
+
+          return (
+            getAngleLinePreselection(pointerInfo, sourceDocument) ??
+            getPlanePreselection(pointerInfo, sourceDocument)
+          );
         }
 
         if (angleMeasureMode === "planeXYPlane") {
@@ -8856,19 +9136,135 @@ function App() {
     }
 
     if (currentTool === "measureAngle") {
-      if (angleMeasureMode === "lineXYPlane") {
-        const segmentId =
-          nextPointerInfo.hitEntityType === "segment" &&
-          nextPointerInfo.hitEntityId
-            ? nextPointerInfo.hitEntityId
-            : nextPointerInfo.snapResult?.type === "segment"
-              ? nextPointerInfo.snapResult.targetEntityId ?? null
-              : null;
+      const currentDocument = commandManager.getDocument();
 
-        if (
-          segmentId &&
-          commandManager.getDocument().entities[segmentId]?.kind === "segment"
-        ) {
+      if (angleMeasureMode === "auto") {
+        const pointTarget = getPointPreselection(
+          nextPointerInfo,
+          currentDocument,
+        );
+        const lineTargetId = resolveAngleLineTargetIdFromPointer(
+          nextPointerInfo,
+          currentDocument,
+        );
+        const planeTargetId = resolvePlaneTargetIdFromPointer(
+          nextPointerInfo,
+          currentDocument,
+        );
+
+        if (linePlaneAngleSegmentId) {
+          if (lineTargetId) {
+            if (lineTargetId === linePlaneAngleSegmentId) {
+              setAngleStatusMessage("请选择另一条线");
+              return;
+            }
+
+            addLineLineAngleMeasurement(linePlaneAngleSegmentId, lineTargetId);
+            setLinePlaneAngleSegmentId(null);
+            setLinePlaneAnglePlaneId(null);
+            return;
+          }
+
+          if (planeTargetId) {
+            addSegmentPlaneAngleMeasurement(
+              linePlaneAngleSegmentId,
+              planeTargetId,
+            );
+            setLinePlaneAngleSegmentId(null);
+            setLinePlaneAnglePlaneId(null);
+            return;
+          }
+
+          setAngleStatusMessage("已选择线，请选择另一条线或一个平面");
+          return;
+        }
+
+        if (linePlaneAnglePlaneId) {
+          if (planeTargetId) {
+            if (planeTargetId === linePlaneAnglePlaneId) {
+              setAngleStatusMessage("请选择另一个平面");
+              return;
+            }
+
+            addPlanePlaneAngleMeasurement(linePlaneAnglePlaneId, planeTargetId);
+            setLinePlaneAngleSegmentId(null);
+            setLinePlaneAnglePlaneId(null);
+            return;
+          }
+
+          if (lineTargetId) {
+            addSegmentPlaneAngleMeasurement(lineTargetId, linePlaneAnglePlaneId);
+            setLinePlaneAngleSegmentId(null);
+            setLinePlaneAnglePlaneId(null);
+            return;
+          }
+
+          setAngleStatusMessage("已选择平面，请选择另一个平面或一条线");
+          return;
+        }
+
+        if (angleSelectedPointIds.length > 0) {
+          if (!pointTarget) {
+            setAngleStatusMessage("三点角需要选择点");
+            return;
+          }
+
+          measureAngleToolRef.current.onPointerDown(
+            nextPointerInfo,
+            createToolContext(),
+          );
+          setAngleSelectedPointIds(
+            measureAngleToolRef.current.getSelectedPointIds(),
+          );
+
+          const angleMessage = measureAngleToolRef.current.getLastMessage();
+
+          if (angleMessage === "duplicate-point") {
+            setAngleStatusMessage("量角器：请选择不同的点");
+          } else if (!angleMessage) {
+            setAngleStatusMessage(null);
+          }
+
+          return;
+        }
+
+        if (pointTarget) {
+          measureAngleToolRef.current.onPointerDown(
+            nextPointerInfo,
+            createToolContext(),
+          );
+          setAngleSelectedPointIds(
+            measureAngleToolRef.current.getSelectedPointIds(),
+          );
+          setAngleStatusMessage("请选择第二个点，第二个点为顶点");
+          return;
+        }
+
+        if (lineTargetId) {
+          setLinePlaneAngleSegmentId(lineTargetId);
+          setLinePlaneAnglePlaneId(null);
+          setAngleStatusMessage("已选择线，请选择另一条线或一个平面");
+          return;
+        }
+
+        if (planeTargetId) {
+          setLinePlaneAnglePlaneId(planeTargetId);
+          setLinePlaneAngleSegmentId(null);
+          setAngleStatusMessage("已选择平面，请选择另一个平面或一条线");
+          return;
+        }
+
+        setAngleStatusMessage("该对象不能用于角度测量");
+        return;
+      }
+
+      if (angleMeasureMode === "lineXYPlane") {
+        const segmentId = resolveAngleLineTargetIdFromPointer(
+          nextPointerInfo,
+          currentDocument,
+        );
+
+        if (segmentId) {
           addLinePlaneAngleMeasurement([segmentId]);
         } else {
           setAngleStatusMessage("Select a segment to measure its angle with the X-Y plane");
@@ -8878,57 +9274,77 @@ function App() {
       }
 
       if (angleMeasureMode === "linePlane") {
-        if (!linePlaneAngleSegmentId) {
-          const segmentId =
-            nextPointerInfo.hitEntityType === "segment" &&
-            nextPointerInfo.hitEntityId
-              ? nextPointerInfo.hitEntityId
-              : nextPointerInfo.snapResult?.type === "segment"
-                ? nextPointerInfo.snapResult.targetEntityId ?? null
-                : null;
+        if (!linePlaneAngleSegmentId && !linePlaneAnglePlaneId) {
+          const segmentId = resolveAngleLineTargetIdFromPointer(
+            nextPointerInfo,
+            currentDocument,
+          );
+          const planeId = resolvePlaneTargetIdFromPointer(
+            nextPointerInfo,
+            currentDocument,
+          );
 
-          if (
-            segmentId &&
-            commandManager.getDocument().entities[segmentId]?.kind === "segment"
-          ) {
+          if (segmentId) {
             setLinePlaneAngleSegmentId(segmentId);
-            setAngleStatusMessage("Select a plane");
+            setLinePlaneAnglePlaneId(null);
+            setAngleStatusMessage("已选择线段，请选择平面");
+          } else if (planeId) {
+            setLinePlaneAnglePlaneId(planeId);
+            setLinePlaneAngleSegmentId(null);
+            setAngleStatusMessage("已选择平面，请选择线段");
           } else {
-            setAngleStatusMessage("Select a segment");
+            setAngleStatusMessage("请选择线段或平面创建线面角");
           }
 
           return;
         }
 
-        if (
-          nextPointerInfo.hitEntityId &&
-          nextPointerInfo.hitEntityType === "plane" &&
-          commandManager.getDocument().entities[nextPointerInfo.hitEntityId]
-            ?.kind === "plane"
-        ) {
+        if (linePlaneAngleSegmentId) {
+          const planeId = resolvePlaneTargetIdFromPointer(
+            nextPointerInfo,
+            currentDocument,
+          );
+
+          if (!planeId) {
+            setAngleStatusMessage("请选择平面");
+            return;
+          }
+
           addSegmentPlaneAngleMeasurement(
             linePlaneAngleSegmentId,
-            nextPointerInfo.hitEntityId,
+            planeId,
           );
           setLinePlaneAngleSegmentId(null);
-        } else {
-          setAngleStatusMessage("Select a plane");
+          setLinePlaneAnglePlaneId(null);
+          return;
+        }
+
+        if (linePlaneAnglePlaneId) {
+          const segmentId = resolveAngleLineTargetIdFromPointer(
+            nextPointerInfo,
+            currentDocument,
+          );
+
+          if (!segmentId) {
+            setAngleStatusMessage("请选择线段");
+            return;
+          }
+
+          addSegmentPlaneAngleMeasurement(segmentId, linePlaneAnglePlaneId);
+          setLinePlaneAngleSegmentId(null);
+          setLinePlaneAnglePlaneId(null);
         }
 
         return;
       }
 
       if (angleMeasureMode === "planeXYPlane") {
-        const planeId =
-          nextPointerInfo.hitEntityType === "plane" &&
-          nextPointerInfo.hitEntityId
-            ? nextPointerInfo.hitEntityId
-            : null;
+        const planeId = resolvePlaneTargetIdFromPointer(
+          nextPointerInfo,
+          currentDocument,
+        );
 
-        if (
-          planeId &&
-          commandManager.getDocument().entities[planeId]?.kind === "plane"
-        ) {
+        if (planeId) {
           addPlaneXYPlaneAngleMeasurement(planeId);
         } else {
           setAngleStatusMessage("Select a plane to measure its angle with the X-Y plane");
@@ -8938,16 +9354,12 @@ function App() {
       }
 
       if (angleMeasureMode === "planePlane") {
-        const planeId =
-          nextPointerInfo.hitEntityType === "plane" &&
-          nextPointerInfo.hitEntityId
-            ? nextPointerInfo.hitEntityId
-            : null;
+        const planeId = resolvePlaneTargetIdFromPointer(
+          nextPointerInfo,
+          currentDocument,
+        );
 
-        if (
-          !planeId ||
-          commandManager.getDocument().entities[planeId]?.kind !== "plane"
-        ) {
+        if (!planeId) {
           setAngleStatusMessage(
             planePlaneAngleFirstPlaneId
               ? "Select the second plane"
@@ -9149,6 +9561,7 @@ function App() {
       measureAngleToolRef.current.cancel();
       setAngleSelectedPointIds([]);
       setLinePlaneAngleSegmentId(null);
+      setLinePlaneAnglePlaneId(null);
       setPlanePlaneAngleFirstPlaneId(null);
       setAngleStatusMessage(null);
     }
@@ -9378,9 +9791,10 @@ function App() {
         measureAngleToolRef.current.cancel();
         setAngleSelectedPointIds([]);
         setLinePlaneAngleSegmentId(null);
+        setLinePlaneAnglePlaneId(null);
         setPlanePlaneAngleFirstPlaneId(null);
         setAngleStatusMessage(null);
-        setAngleMeasureMode("threePoint");
+        setAngleMeasureMode("auto");
         setCurrentTool("select");
         return;
       }
@@ -10087,11 +10501,11 @@ function App() {
                 <div className="split-tool-button" key={name}>
                   <button
                     className={
-                      currentTool === name && angleMeasureMode === "threePoint"
+                      currentTool === name && angleMeasureMode === "auto"
                         ? "tool-button active"
                         : "tool-button"
                     }
-                    onClick={activateThreePointAngleMode}
+                    onClick={activateAutoAngleMode}
                     title={label}
                     aria-label={label}
                     type="button"
@@ -10481,6 +10895,13 @@ function App() {
           aria-label="角度工具方式"
         >
           <button
+            className={angleMeasureMode === "auto" ? "active" : ""}
+            onClick={activateAutoAngleMode}
+            type="button"
+          >
+            自动角度
+          </button>
+          <button
             className={angleMeasureMode === "threePoint" ? "active" : ""}
             onClick={activateThreePointAngleMode}
             type="button"
@@ -10517,6 +10938,13 @@ function App() {
           open={showAngleToolPanel}
         >
           <button
+            className={angleMeasureMode === "auto" ? "active" : ""}
+            onClick={activateAutoAngleMode}
+            type="button"
+          >
+            自动角度
+          </button>
+          <button
             className={angleMeasureMode === "threePoint" ? "active" : ""}
             onClick={activateThreePointAngleMode}
             type="button"
@@ -10531,7 +10959,7 @@ function App() {
                   ? "active"
                   : ""
               }
-              onClick={toggleLinePlaneAnglePanel}
+              onClick={activateLinePlaneAngleMode}
               type="button"
             >
               线面角
@@ -10556,7 +10984,7 @@ function App() {
                   ? "active"
                   : ""
               }
-              onClick={togglePlanePlaneAnglePanel}
+              onClick={activatePlanePlaneAngleMode}
               type="button"
             >
               面面角
@@ -11068,18 +11496,50 @@ function App() {
               </div>
             ) : null}
             {singleSelectedEntity?.kind === "measurement" &&
+            singleSelectedEntity.measurementKind === "lineLineAngle" ? (
+              <div className="batch-naming">
+                <span>类型：线线角</span>
+                <span>
+                  来源线 1：
+                  {getAngleTargetKind(
+                    displayDocument.entities[singleSelectedEntity.targetIds[0]],
+                  ) === "line"
+                    ? getAngleLineDisplayName(
+                        displayDocument,
+                        singleSelectedEntity.targetIds[0],
+                      )
+                    : singleSelectedEntity.targetIds[0] ?? "invalid"}
+                </span>
+                <span>
+                  来源线 2：
+                  {getAngleTargetKind(
+                    displayDocument.entities[singleSelectedEntity.targetIds[1]],
+                  ) === "line"
+                    ? getAngleLineDisplayName(
+                        displayDocument,
+                        singleSelectedEntity.targetIds[1],
+                      )
+                    : singleSelectedEntity.targetIds[1] ?? "invalid"}
+                </span>
+                <span>
+                  当前值：
+                  {calculateMeasurementValue(singleSelectedEntity, displayDocument)
+                    ?.formattedText ?? "invalid"}
+                </span>
+              </div>
+            ) : null}
+            {singleSelectedEntity?.kind === "measurement" &&
             singleSelectedEntity.measurementKind === "linePlaneAngle" ? (
               <div className="batch-naming">
                 <span>类型：线面角</span>
                 <span>
-                  线段：
-                  {displayDocument.entities[singleSelectedEntity.targetIds[0]]
-                    ?.kind === "segment"
-                    ? getSegmentDisplayName(
+                  来源线：
+                  {getAngleTargetKind(
+                    displayDocument.entities[singleSelectedEntity.targetIds[0]],
+                  ) === "line"
+                    ? getAngleLineDisplayName(
                         displayDocument,
-                        displayDocument.entities[
-                          singleSelectedEntity.targetIds[0]
-                        ] as SegmentEntity,
+                        singleSelectedEntity.targetIds[0],
                       )
                     : singleSelectedEntity.targetIds[0] ?? "invalid"}
                 </span>
